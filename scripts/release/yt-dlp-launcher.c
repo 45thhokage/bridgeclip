@@ -12,7 +12,7 @@ int wmain(void) {
     const wchar_t *tail = GetCommandLineW();
     if (*tail == L'"') { tail++; while (*tail && *tail != L'"') tail++; if (*tail) tail++; }
     else { while (*tail && *tail != L' ' && *tail != L'\t') tail++; }
-    if (_snwprintf_s(command, 32768, _TRUNCATE, L"\"%ls\\..\\engine-venv\\python.exe\" -m yt_dlp %ls", module, tail) < 0) return 1;
+    if (_snwprintf_s(command, 32768, _TRUNCATE, L"\"%ls\\..\\engine-venv\\python.exe\" -P -m yt_dlp %ls", module, tail) < 0) return 1;
     STARTUPINFOW startup = {0};
     PROCESS_INFORMATION child = {0};
     startup.cb = sizeof(startup);

@@ -273,8 +273,10 @@ class VideoDownloaderService:
         if twitch_vod_url(url_or_key):
             return "twitch"
 
-        # S3 URL formats
-        if parsed.hostname and (
+        # S3 URL formats. The desktop app has no S3 source: boto3 would sign a
+        # pasted bucket URL with the user's ambient ~/.aws credentials, so
+        # local mode fetches it anonymously as a direct URL instead.
+        if not self.settings.local_mode and parsed.hostname and (
             ".s3." in parsed.hostname or
             parsed.hostname.endswith(".amazonaws.com") or
             parsed.hostname == "s3.amazonaws.com"

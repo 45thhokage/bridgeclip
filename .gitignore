@@ -8,12 +8,16 @@ dist/
 *.pem
 *.p8
 *.p12
+*.pfx
 *.key
 *.log
 .DS_Store
 engine-venv/
 engine-bin/
 engine/.venv/
+.venv/
+.pytest_cache/
+.deepsec/
 *.tsbuildinfo
 
 __pycache__/

@@ -168,6 +168,9 @@ async def run(config: dict) -> bool:
     # hold the server's proxy pool, and environment variables beat .env values.
     os.environ["YTDLP_PROXIES"] = ""
     os.environ["YTDLP_PROXY"] = ""
+    # yt-dlp otherwise imports plugin code from config folders, including
+    # /etc/yt-dlp, which Windows resolves to C:\etc (creatable by any user).
+    os.environ["YTDLP_NO_PLUGINS"] = "1"
     os.environ["LAYOUT_VISION_ENABLED"] = "true" if config["layout_vision_enabled"] else "false"
     os.environ["CLIPPING_MODE"] = config.get("clipping_mode", "quality")
     if config.get("clipping_mode", "quality") == "economy":

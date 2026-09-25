@@ -1034,10 +1034,13 @@ Do not overlap clips by more than 5 seconds."""
             try:
                 parsed = json.loads(content)
             except json.JSONDecodeError:
-                # Try to extract JSON from text
-                json_match = re.search(r'[\[{][\s\S]*[\]}]', content)
-                if json_match:
-                    parsed = json.loads(json_match.group())
+                # Try to extract JSON from text: first opening bracket through
+                # the last closing one. A regex search for that span
+                # backtracks quadratically on a long, unclosed response.
+                end = max(content.rfind("]"), content.rfind("}"))
+                starts = [i for i in (content.find("["), content.find("{")) if 0 <= i < end]
+                if starts:
+                    parsed = json.loads(content[min(starts):end + 1])
                 else:
                     logger.error("Failed to parse JSON from planner response")
                     raise IntelligencePlanningError("Failed to parse JSON from planner response")

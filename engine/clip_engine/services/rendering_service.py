@@ -731,10 +731,13 @@ class RenderingService:
                 None, lambda: run_media(cmd),
             )
             text = result.stderr.decode(errors="replace")
-            match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", text)
-            if result.returncode != 0 or not match:
+            # The source's metadata is printed before loudnorm's report, so use
+            # the last block. A pattern spanning "input_i" backtracks
+            # quadratically on crafted metadata.
+            blocks = [block for block in re.findall(r"\{[^{}]*\}", text) if '"input_i"' in block]
+            if result.returncode != 0 or not blocks:
                 raise ValueError("no loudnorm measurement in output")
-            loudness = measured_loudness_filter(json.loads(match.group()))
+            loudness = measured_loudness_filter(json.loads(blocks[-1]))
             if loudness:
                 logger.info("Two-pass loudness normalization enabled for this clip")
             return loudness

@@ -9,6 +9,15 @@ const { resolve } = require('path')
 
 const REGISTRY = 'https://registry.npmjs.org/'
 
+// The only tarball a node_modules/<name> entry at <version> may resolve to. A
+// registry URL for a different package (or an npm alias) would otherwise pass
+// with a valid integrity and install that package's code under a trusted name.
+function expectedTarball(path, version) {
+  const index = path.lastIndexOf('node_modules/')
+  const name = index === -1 ? '' : path.slice(index + 'node_modules/'.length)
+  return `${REGISTRY}${name}/-/${name.slice(name.lastIndexOf('/') + 1)}-${version}.tgz`
+}
+
 function findLockfileProblems(lock) {
   const problems = []
   for (const [name, entry] of Object.entries(lock.packages ?? {})) {
@@ -16,6 +25,7 @@ function findLockfileProblems(lock) {
     if (!entry.resolved || !entry.integrity) problems.push(`${name}: missing resolved/integrity`)
     else if (!entry.resolved.startsWith(REGISTRY)) problems.push(`${name}: resolved outside ${REGISTRY}`)
     else if (!/^sha512-[A-Za-z0-9+/]+=*$/.test(entry.integrity)) problems.push(`${name}: integrity is not sha512`)
+    else if (entry.resolved !== expectedTarball(name, entry.version)) problems.push(`${name}: resolved is not the registry tarball for this package and version`)
   }
   return problems
 }
