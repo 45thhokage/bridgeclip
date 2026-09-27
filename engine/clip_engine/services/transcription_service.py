@@ -790,7 +790,8 @@ class TranscriptionService:
         for raw in raw_words:
             if not isinstance(raw, dict) or not isinstance(raw.get("word"), str):
                 raise TranscriptionProviderError("invalid_response")
-            word = raw["word"].strip()
+            # One line per word: caption and SRT writers treat line breaks as structure.
+            word = " ".join(raw["word"].split())
             start, end = raw.get("start"), raw.get("end")
             if (not word or not _nonnegative_number(start) or not _nonnegative_number(end)
                     or end < start or end > audio_duration + 1):

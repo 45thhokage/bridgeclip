@@ -120,13 +120,17 @@ function spokenWords(value: string): string[] {
  * between, such as a "not" the quote leaves out, breaks the match.
  */
 export function evidenceInTranscript(evidence: string, transcript: string): boolean {
+  // Provider text is untrusted. Bound both the quote and each fuzzy search
+  // window so repeated words cannot monopolize the Electron main process.
+  if (evidence.length > 1000 || transcript.length > MAX_TRANSCRIPT) return false
   const quote = spokenWords(evidence)
   const heard = spokenWords(transcript)
-  if (!quote.length) return false
+  if (!quote.length || quote.length > 80) return false
   for (let start = 0; start < heard.length; start++) {
     if (heard[start] !== quote[0]) continue
     let matched = 1
-    for (let index = start + 1; index < heard.length && matched < quote.length; index++) {
+    const limit = Math.min(heard.length, start + quote.length + 12)
+    for (let index = start + 1; index < limit && matched < quote.length; index++) {
       if (heard[index] === quote[matched]) matched++
       else if (heard[index] !== 'like' && !heard.slice(Math.max(start, index - 4), index).includes(heard[index])) break
     }
@@ -149,7 +153,8 @@ export function parseGeneratedMetadata(value: unknown, platforms: readonly Platf
       const code = character.charCodeAt(0)
       return (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127
     }) || captionLength(post.caption) > PLATFORM_RULES[platform].captionMax ||
-        (platform === 'youtube' && Buffer.byteLength(post.caption, 'utf8') > 5000) || /https?:\/\//i.test(post.caption) ||
+        // Platforms auto-link scheme-less "www." addresses too; a transcript must not smuggle a clickable link into a post.
+        (platform === 'youtube' && Buffer.byteLength(post.caption, 'utf8') > 5000) || /:\/\/|www\./i.test(post.caption) ||
         (post.caption.match(/#[\p{L}\p{N}_]+/gu)?.length ?? 0) > 5) throw new Error(`AI metadata for ${platform} was invalid. The clip was not posted.`)
     if (typeof post.evidence !== 'string' || post.evidence.trim().length < 10 || !evidenceInTranscript(post.evidence, transcript)) {
       throw new Error(`AI metadata for ${platform} was not grounded in the transcript. The clip was not posted.`)

@@ -281,6 +281,8 @@ class VideoDownloaderService:
 
         # S3 key (no protocol)
         if not url_or_key.startswith("http"):
+            if self.settings.local_mode:
+                raise VideoDownloadError("Video source is not a local file or HTTP(S) URL")
             return "s3"
         
         parsed = urlparse(url_or_key)
@@ -409,6 +411,8 @@ class VideoDownloaderService:
         )
 
         max_duration = min(max_duration_seconds or self.settings.max_download_duration_seconds, self.settings.max_download_duration_seconds)
+        if metadata.duration_seconds <= 0:
+            raise VideoDownloadError("Video duration is unavailable; live and upcoming streams are not supported")
         if metadata.duration_seconds > max_duration:
             raise VideoDownloadError(
                 f"Video duration ({metadata.duration_seconds}s) exceeds maximum "
@@ -901,6 +905,9 @@ class VideoDownloaderService:
             opts.update({
                 "skip_download": True,
                 "noplaylist": True,
+                # A playlist or channel link must fail fast instead of fetching
+                # every entry's page; the result is rejected below.
+                "extract_flat": "in_playlist",
                 "socket_timeout": 30,
                 "nocheckcertificate": False,
                 "geo_bypass": True,
@@ -928,6 +935,11 @@ class VideoDownloaderService:
                     "or try a different video URL."
                 )
             raise VideoDownloadError(f"Failed to get video info: {e}")
+
+        # ydl.download() would otherwise fetch every entry of a playlist or
+        # channel into the same output path, one after another.
+        if not isinstance(info, dict) or info.get("_type", "video") != "video":
+            raise VideoDownloadError("Video source is a playlist or channel, not a single video")
 
         if twitch_url:
             self._validate_twitch_info(info, self.settings.max_download_duration_seconds)

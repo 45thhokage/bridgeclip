@@ -1277,12 +1277,16 @@ Do not overlap clips by more than 5 seconds."""
                     )
                     continue
 
+                # The title is drawn on the clip and written next to it; keep
+                # it a bounded single line whatever the model returned.
+                summary = clip.get("summary")
+                summary = " ".join(summary.split())[:200] if isinstance(summary, str) else ""
                 segment = ClipPlanSegment(
                     start_time_ms=start_time_ms,
                     end_time_ms=end_time_ms,
                     virality_score=self._score_clip(clip),
                     layout_type=layout_type,
-                    summary=clip.get("summary"),
+                    summary=summary or None,
                     tags=clip.get("tags", []),
                     emphasis_words=(
                         [w for w in clip.get("emphasis", []) if isinstance(w, str)][:5]
@@ -1339,7 +1343,7 @@ Do not overlap clips by more than 5 seconds."""
             try:
                 s_ms = int(float(item["start_time"]) * 1000)
                 e_ms = int(float(item["end_time"]) * 1000)
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
                 continue
             if transcript:
                 # Jump from the end of a sentence to the start of the next one.
@@ -1388,7 +1392,7 @@ Do not overlap clips by more than 5 seconds."""
             title = item.get("title")
             try:
                 t_ms = int(float(item["time"]) * 1000)
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
                 continue
             if not isinstance(title, str) or not title.strip():
                 continue
