@@ -205,6 +205,22 @@ class TestRendering:
         assert measured_loudness_filter({**measured, "input_i": "-inf"}) is None
         assert measured_loudness_filter({}) is None
 
+    def test_loudness_report_ignores_crafted_source_metadata(self, monkeypatch):
+        import time
+
+        from clip_engine.services import rendering_service as module
+
+        report = {"input_i": "-23.4", "input_tp": "-5.1", "input_lra": "6.2",
+                  "input_thresh": "-33.9", "target_offset": "0.3"}
+        spoof = json.dumps({**report, "input_i": "-1.0"})
+        stderr = (f"    comment : {spoof}\n    title : {{" + '"input_i"' * 40_000 + "\n"
+                  f"[Parsed_loudnorm_2 @ 0x1]\n{json.dumps(report, indent=1)}\n").encode()
+        monkeypatch.setattr(module, "run_media", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, b"", stderr))
+        started = time.perf_counter()
+        f = asyncio.run(RenderingService.__new__(RenderingService)._measure_loudness("in.mp4", 0, 1000))
+        assert time.perf_counter() - started < 5
+        assert "measured_I=-23.40" in f
+
     def test_landscape_chain_blurs_non_16_9_sources(self):
         shot = ShotLayout(0, 1000, LayoutType.SCREEN)
         assert "gblur" not in shot_chain(0, shot, 1920, 1080, 1920, 1080, landscape=True)

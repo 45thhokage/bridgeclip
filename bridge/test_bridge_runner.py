@@ -189,6 +189,17 @@ class BridgeTests(unittest.TestCase):
             asyncio.run(bridge.run(self.config()))
         self.assertEqual(observed, [("", "")])
 
+    def test_ytdlp_plugins_are_disabled_before_engine_loads(self):
+        observed = []
+        def get_settings():
+            observed.append(os.environ.get("YTDLP_NO_PLUGINS"))
+            return types.SimpleNamespace(openrouter_api_key=None)
+        config_module = types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None)
+        pipeline_module = types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None)
+        with patch.dict(sys.modules, {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}), patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+            asyncio.run(bridge.run(self.config()))
+        self.assertEqual(observed, ["1"])
+
     def test_failures_map_to_fixed_messages(self):
         blocked = bridge.describe_failure("YouTube download failed after trying all 5 proxies. Last error: ERROR: unable to download video data: HTTP Error 403: Forbidden")
         self.assertEqual(blocked["message"], "The video service refused the download.")

@@ -292,7 +292,8 @@ class CaptionGeneratorService:
             end = min(end, clip_end_ms - clip_start_ms)
             if end <= start:
                 continue
-            text = " ".join(w.word.strip().replace("{", "").replace("}", "") for w in cue)
+            # Provider words may contain line breaks; one would start a new cue.
+            text = " ".join(" ".join(w.word.split()).replace("{", "").replace("}", "") for w in cue)
             blocks.append(
                 f"{len(blocks) + 1}\n{self._format_srt_time(start)} --> {self._format_srt_time(end)}\n"
                 f"{self._wrap_subtitle(text)}\n"
@@ -772,7 +773,9 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 
     def _display_word(self, word: str, style: CaptionStyle) -> str:
         """Caption text for a word: trailing commas/periods dropped, ASS braces removed."""
-        text = word.strip().replace("{", "").replace("}", "").replace("\\", "")
+        # Collapse line breaks too: provider text must not start a new ASS
+        # script line ([Fonts], Style: or Dialogue: sections).
+        text = " ".join(word.split()).replace("{", "").replace("}", "").replace("\\", "")
         if len(text) > 1 and text[-1] in ",.;:":
             text = text.rstrip(",.;:")
         return text.upper() if style.uppercase else text

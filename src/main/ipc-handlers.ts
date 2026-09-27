@@ -302,7 +302,9 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     if (!isWithinDirectory(canonical, loadSettings().outputDirectory)) assertMediaPath(canonical, loadSettings().outputDirectory)
     const { statSync } = await import('fs')
     if (statSync(canonical).isDirectory()) {
-      if (canonical.split(/[\\/]+/).some((part) => /\.(app|bundle)$/i.test(part))) throw new Error('Application bundles cannot be opened from the library')
+      // macOS opens these directory packages with Installer, System Settings,
+      // Automator or the bundle itself instead of showing a folder.
+      if (canonical.split(/[\\/]+/).some((part) => /\.(app|bundle|pkg|mpkg|prefpane|saver|workflow|action|xpc|appex|plugin|kext|framework|qlgenerator|wdgt)$/i.test(part))) throw new Error('Application bundles cannot be opened from the library')
     } else {
       assertMediaPath(canonical, loadSettings().outputDirectory)
     }

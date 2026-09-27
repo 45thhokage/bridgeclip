@@ -53,7 +53,7 @@ bash "$(dirname "$0")/build-ffmpeg-mac.sh" engine-bin
 cat > engine-bin/yt-dlp <<'SH'
 #!/bin/sh
 BUNDLE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec "$BUNDLE_DIR/../engine-venv/bin/python3" -m yt_dlp "$@"
+exec "$BUNDLE_DIR/../engine-venv/bin/python3" -P -m yt_dlp "$@"
 SH
 chmod 755 engine-bin/ffmpeg engine-bin/ffprobe engine-bin/yt-dlp
 PYTHONPATH=engine engine-venv/bin/python3 -c 'import cv2, yt_dlp; from clip_engine.bridge_contract import BRIDGE_CONTRACT_VERSION; from clip_engine.services.layout_analyzer import LayoutAnalyzer; assert BRIDGE_CONTRACT_VERSION == 3; assert LayoutAnalyzer().available'

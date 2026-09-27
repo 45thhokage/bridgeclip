@@ -1055,10 +1055,13 @@ Do not overlap clips by more than 5 seconds."""
             try:
                 parsed = json.loads(content)
             except json.JSONDecodeError:
-                # Try to extract JSON from text
-                json_match = re.search(r'[\[{][\s\S]*[\]}]', content)
-                if json_match:
-                    parsed = json.loads(json_match.group())
+                # Try to extract JSON from text: first opening bracket through
+                # the last closing one. A regex search for that span
+                # backtracks quadratically on a long, unclosed response.
+                end = max(content.rfind("]"), content.rfind("}"))
+                starts = [i for i in (content.find("["), content.find("{")) if 0 <= i < end]
+                if starts:
+                    parsed = json.loads(content[min(starts):end + 1])
                 else:
                     logger.error("Failed to parse JSON from planner response")
                     raise IntelligencePlanningError("Failed to parse JSON from planner response")
@@ -1117,8 +1120,11 @@ Do not overlap clips by more than 5 seconds."""
                     end_ms = max(end_ms, moment['payoff']['end_ms'])
                     if not (0 <= start_ms < end_ms <= source_end and moment['topic_interval'][0] <= start_ms < end_ms <= moment['topic_interval'][1]):
                         continue
+                # Keep model-generated titles bounded and on one line.
+                summary = clip.get("summary")
+                summary = " ".join(summary.split())[:200] if isinstance(summary, str) else ""
                 segment = ClipPlanSegment(start_ms, end_ms, self._score_clip(clip), moment=moment,
-                    summary=clip.get('summary'), tags=clip.get('tags', []),
+                    summary=summary or None, tags=clip.get('tags', []),
                     emphasis_words=[w for w in clip.get('emphasis', []) if isinstance(w, str)][:5] if transcript else [])
                 if getattr(self, '_current_longform', False):
                     segment.skip_ranges_ms = self._clean_skips(clip.get('skip'), start_ms, end_ms, 0, transcript)
@@ -1165,7 +1171,7 @@ Do not overlap clips by more than 5 seconds."""
             try:
                 s_ms = int(float(item["start_time"]) * 1000)
                 e_ms = int(float(item["end_time"]) * 1000)
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
                 continue
             if transcript:
                 # Jump from the end of a sentence to the start of the next one.
@@ -1214,7 +1220,7 @@ Do not overlap clips by more than 5 seconds."""
             title = item.get("title")
             try:
                 t_ms = int(float(item["time"]) * 1000)
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
                 continue
             if not isinstance(title, str) or not title.strip():
                 continue

@@ -127,12 +127,39 @@ export function metadataFailureCode(message: string): string {
   return 'generation_failure'
 }
 
-/** Speech-to-text and the writing model may punctuate the same spoken words differently. */
-function evidenceInTranscript(evidence: string, transcript: string): boolean {
-  const words = (value: string): string => value.normalize('NFKC').toLocaleLowerCase()
-    .replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/g, ' ').trim()
-  const excerpt = words(evidence)
-  return excerpt.length > 0 && ` ${words(transcript)} `.includes(` ${excerpt} `)
+const FILLER_WORDS = new Set(['uh', 'uhm', 'um', 'umm', 'er', 'erm', 'ah', 'hmm', 'mm', 'mhm'])
+
+/** Spoken words without punctuation or filler sounds; "80%" and "80 percent" read the same. */
+function spokenWords(value: string): string[] {
+  return value.normalize('NFKC').toLocaleLowerCase().replace(/%/g, ' percent ')
+    .replace(/[\p{P}\p{S}]+/gu, ' ').split(/\s+/).filter((word) => word && !FILLER_WORDS.has(word))
+}
+
+/**
+ * Evidence is grounded when its words were spoken in that order. Speech-to-text
+ * keeps stutters and restarts ("are, are", "the, the, like") that the writing
+ * model tidies when it quotes, so the transcript may repeat a word from the
+ * last few words or say "like" between quoted words. Any other word in
+ * between, such as a "not" the quote leaves out, breaks the match.
+ */
+export function evidenceInTranscript(evidence: string, transcript: string): boolean {
+  // Provider text is untrusted. Bound both the quote and each fuzzy search
+  // window so repeated words cannot monopolize the Electron main process.
+  if (evidence.length > 1000 || transcript.length > MAX_TRANSCRIPT) return false
+  const quote = spokenWords(evidence)
+  const heard = spokenWords(transcript)
+  if (!quote.length || quote.length > 80) return false
+  for (let start = 0; start < heard.length; start++) {
+    if (heard[start] !== quote[0]) continue
+    let matched = 1
+    const limit = Math.min(heard.length, start + quote.length + 12)
+    for (let index = start + 1; index < limit && matched < quote.length; index++) {
+      if (heard[index] === quote[matched]) matched++
+      else if (heard[index] !== 'like' && !heard.slice(Math.max(start, index - 4), index).includes(heard[index])) break
+    }
+    if (matched === quote.length) return true
+  }
+  return false
 }
 
 /** Validate fields a platform uses; discard fields that cannot enter its post request. */
@@ -149,7 +176,8 @@ export function parseGeneratedMetadata(value: unknown, platforms: readonly Platf
       const code = character.charCodeAt(0)
       return (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127
     }) || captionLength(post.caption) > PLATFORM_RULES[platform].captionMax ||
-        (platform === 'youtube' && Buffer.byteLength(post.caption, 'utf8') > 5000) || /https?:\/\//i.test(post.caption) ||
+        // Platforms auto-link scheme-less "www." addresses too; a transcript must not smuggle a clickable link into a post.
+        (platform === 'youtube' && Buffer.byteLength(post.caption, 'utf8') > 5000) || /:\/\/|www\./i.test(post.caption) ||
         (post.caption.match(/#[\p{L}\p{N}_]+/gu)?.length ?? 0) > 5) throw new Error(`AI metadata for ${platform} was invalid. The clip was not posted.`)
     if (typeof post.evidence !== 'string' || post.evidence.trim().length < 10 || !evidenceInTranscript(post.evidence, transcript)) {
       throw new Error(`AI metadata for ${platform} was not grounded in the transcript. The clip was not posted.`)

@@ -32,6 +32,19 @@ test('reports non-registry sources and weak hashes', () => {
   assert.deepEqual(problems.map((p) => p.split(':')[0]), ['node_modules/a', 'node_modules/b'])
 })
 
+test('reports registry tarballs for a different package, version or alias', () => {
+  const problems = findLockfileProblems({ packages: {
+    'node_modules/react': { version: '1.3.0', ...good },
+    'node_modules/left-pad': { version: '1.2.0', ...good },
+    'node_modules/pad': { version: '1.3.0', name: 'left-pad', ...good },
+    'node_modules/@scope/left-pad': { version: '1.3.0', ...good },
+    'node_modules/a/node_modules/@scope/b': { version: '2.0.0', ...good, resolved: 'https://registry.npmjs.org/@scope/b/-/b-2.0.0.tgz' },
+    'node_modules/c': { version: '1.0.0', ...good, resolved: 'https://registry.npmjs.org/c/-/c-1.0.0.tgz' }
+  } })
+  assert.deepEqual(problems.map((p) => p.split(':')[0]), ['node_modules/react', 'node_modules/left-pad', 'node_modules/pad', 'node_modules/@scope/left-pad'])
+  assert.match(problems[0], /not the registry tarball for this package and version/)
+})
+
 test('the committed lockfile passes', () => {
   const lock = JSON.parse(readFileSync(join(__dirname, '..', 'package-lock.json'), 'utf8'))
   assert.deepEqual(findLockfileProblems(lock), [])

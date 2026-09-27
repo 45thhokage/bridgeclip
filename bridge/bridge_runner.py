@@ -108,6 +108,12 @@ FAILURES = (
     (("the planner returned no clip candidates",),
      "The planner returned no clip candidates.",
      "Open Inspect transcript & edits in Jobs and check the planner response for its explanation. The video may still contain suitable clips; this is not a rendering or system-check failure."),
+    (("playlist or channel",),
+     "This link is a playlist or channel, not a single video.",
+     "Paste the link of one video."),
+    (("duration is unavailable", "video is live or upcoming"),
+     "This video is live or not yet available.",
+     "Wait until the stream has ended and the saved video is ready, then retry."),
     (("no clip-worthy moments",),
      "BridgeClip couldn't find any clips in this video.",
      "No clear spoken or visual moment met the selected clip length. If you set a start and end time, widen it or pick a shorter clip length."),
@@ -179,6 +185,9 @@ async def run(config: dict) -> bool:
     # hold the server's proxy pool, and environment variables beat .env values.
     os.environ["YTDLP_PROXIES"] = ""
     os.environ["YTDLP_PROXY"] = ""
+    # yt-dlp otherwise imports plugin code from config folders, including
+    # /etc/yt-dlp, which Windows resolves to C:\etc (creatable by any user).
+    os.environ["YTDLP_NO_PLUGINS"] = "1"
     os.environ["LAYOUT_VISION_ENABLED"] = "true" if config["layout_vision_enabled"] else "false"
     os.environ["CLIPPING_MODE"] = config.get("clipping_mode", "quality")
     if config.get("clipping_mode", "quality") == "economy":

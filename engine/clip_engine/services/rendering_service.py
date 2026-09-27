@@ -72,6 +72,8 @@ LANDSCAPE_TITLE_SHOW_S = (0.4, 5.5)
 LANDSCAPE_TITLE_FADE_S = 0.4
 # Output frame rates a landscape render keeps from its source (higher is capped).
 MAX_OUTPUT_FPS = 60
+# Bound raster allocation even when a model ignores the requested title length.
+MAX_TITLE_CHARS = 120
 # Landscape H.264 bitrates (Mbps) by output height at 30 fps, after
 # YouTube's upload recommendations; 60 fps sources get 1.5x.
 LANDSCAPE_BITRATE_MBPS = {1080: 12, 1440: 20, 2160: 45}
@@ -897,10 +899,13 @@ class RenderingService:
                 None, lambda: run_media(cmd),
             )
             text = result.stderr.decode(errors="replace")
-            match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", text)
-            if result.returncode != 0 or not match:
+            # The source's metadata is printed before loudnorm's report, so use
+            # the last block. A pattern spanning "input_i" backtracks
+            # quadratically on crafted metadata.
+            blocks = [block for block in re.findall(r"\{[^{}]*\}", text) if '"input_i"' in block]
+            if result.returncode != 0 or not blocks:
                 raise ValueError("no loudnorm measurement in output")
-            loudness = measured_loudness_filter(json.loads(match.group()))
+            loudness = measured_loudness_filter(json.loads(blocks[-1]))
             if loudness:
                 logger.info("Two-pass loudness normalization enabled for this clip")
             return loudness
@@ -930,7 +935,10 @@ class RenderingService:
         scale: float = 1.0,
     ) -> Optional[dict]:
         """Generate a rounded-rect PNG with title text and return positioning info."""
-        clean = title_text.replace("\n", " ").strip()
+        # The planner is asked for 2-7 words; a runaway model title would
+        # otherwise be rasterized at full length (a 20k character title is a
+        # 1.4M px wide image and hundreds of MB before FFmpeg rejects it).
+        clean = " ".join(title_text.split())[:MAX_TITLE_CHARS]
 
         if not clean:
             return None
@@ -1271,20 +1279,21 @@ class RenderingService:
             error_msg = result.stderr.decode()[-1000:] if result.stderr else "Unknown error"
             raise RenderingError(f"FFmpeg failed: {error_msg}")
 
-    def _escape_filter_path(self, path: str) -> str:
-        """Escape file path for FFmpeg filter usage."""
-        import sys
+    @staticmethod
+    def _escape_filter_path(path: str) -> str:
+        """Escape a file path for use as a filter option inside a filtergraph.
 
-        escaped = path.replace("\\", "/")
-
-        if sys.platform == "win32" and len(escaped) >= 2 and escaped[1] == ":":
-            escaped = escaped[0] + "\\:" + escaped[2:]
-
-        escaped = escaped.replace("'", "'\\''")
-        escaped = escaped.replace("[", "\\[")
-        escaped = escaped.replace("]", "\\]")
-
-        return f"'{escaped}'"
+        FFmpeg strips one layer of escaping when it splits the graph ([ ] , ;
+        ' \\ and edge whitespace are special there) and another when the filter
+        parses its options (: separates them, = ends a leading option name,
+        ' and \\ quote), so the path is escaped for both levels. Quoting once
+        (the old form) left a path with ' or : able to end the filename early
+        and feed the rest of the path to the filter's other options.
+        """
+        if sys.platform == "win32":
+            path = path.replace("\\", "/")
+        option = re.sub(r"([\\':=\s])", r"\\\1", path)
+        return re.sub(r"([\\'\[\],;\s])", r"\\\1", option)
 
 
 class RenderingError(Exception):

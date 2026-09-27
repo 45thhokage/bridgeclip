@@ -59,6 +59,21 @@ YOUTUBE_FORMAT_SELECTORS = [
 ]
 
 
+# YouTube occasionally rejects a freshly extracted media URL (HTTP 403) or drops
+# a connection. A new yt-dlp run extracts new URLs, which usually succeeds, so
+# such failures are retried before the job fails. Rate limits and missing videos
+# are not transient and fail at once.
+YOUTUBE_TRANSIENT_ATTEMPTS = 3
+YOUTUBE_RETRY_DELAYS_SECONDS = (2, 5)
+NETWORK_ERROR_MARKERS = ("unable to download", "http error", "timed out", "connection")
+PERMANENT_HTTP_ERROR = re.compile(r"http error (?:4(?!03|08)\d\d)")
+
+
+def is_transient_download_error(error_str: str) -> bool:
+    lowered = error_str.lower()
+    return any(m in lowered for m in NETWORK_ERROR_MARKERS) and not PERMANENT_HTTP_ERROR.search(lowered)
+
+
 TWITCH_HOSTS = {"twitch.tv", "www.twitch.tv", "m.twitch.tv", "go.twitch.tv"}
 
 
@@ -268,6 +283,8 @@ class VideoDownloaderService:
 
         # S3 key (no protocol)
         if not url_or_key.startswith("http"):
+            if self.settings.local_mode:
+                raise VideoDownloadError("Video source is not a local file or HTTP(S) URL")
             return "s3"
         
         parsed = urlparse(url_or_key)
@@ -275,8 +292,10 @@ class VideoDownloaderService:
         if twitch_vod_url(url_or_key):
             return "twitch"
 
-        # S3 URL formats
-        if parsed.hostname and (
+        # S3 URL formats. The desktop app has no S3 source: boto3 would sign a
+        # pasted bucket URL with the user's ambient ~/.aws credentials, so
+        # local mode fetches it anonymously as a direct URL instead.
+        if not self.settings.local_mode and parsed.hostname and (
             ".s3." in parsed.hostname or
             parsed.hostname.endswith(".amazonaws.com") or
             parsed.hostname == "s3.amazonaws.com"
@@ -406,6 +425,8 @@ class VideoDownloaderService:
         )
 
         max_duration = min(max_duration_seconds or self.settings.max_download_duration_seconds, self.settings.max_download_duration_seconds)
+        if metadata.duration_seconds <= 0:
+            raise VideoDownloadError("Video duration is unavailable; live and upcoming streams are not supported")
         if metadata.duration_seconds > max_duration:
             raise VideoDownloadError(
                 f"Video duration ({metadata.duration_seconds}s) exceeds maximum "
@@ -453,62 +474,72 @@ class VideoDownloaderService:
 
             last_error = None
 
+            attempts = YOUTUBE_TRANSIENT_ATTEMPTS if source_type == "youtube" else 1
             for fmt_idx, format_selector in enumerate(format_selectors):
-                try:
-                    logger.info(f"Format attempt {fmt_idx + 1}/{len(format_selectors)}: {format_selector[:50]}...")
+                for attempt in range(1, attempts + 1):
+                    try:
+                        logger.info(f"Format attempt {fmt_idx + 1}/{len(format_selectors)}: {format_selector[:50]}...")
 
-                    ydl_opts = self._build_ytdlp_opts(
-                        output_path=output_path,
-                        download=True,
-                    )
-                    if source_type == "twitch":
-                        ydl_opts["allowed_extractors"] = ["twitch:vod"]
-                        ydl_opts["skip_unavailable_fragments"] = False
-                        ydl_opts["match_filter"] = lambda info, *, incomplete=False: self._validate_twitch_info(info, max_duration, incomplete)
-                    ydl_opts["format"] = format_selector
-                    ydl_opts["progress_hooks"] = [check_progress]
-                    ydl_opts["postprocessor_hooks"] = [check_progress]
+                        ydl_opts = self._build_ytdlp_opts(
+                            output_path=output_path,
+                            download=True,
+                        )
+                        if source_type == "twitch":
+                            ydl_opts["allowed_extractors"] = ["twitch:vod"]
+                            ydl_opts["skip_unavailable_fragments"] = False
+                            ydl_opts["match_filter"] = lambda info, *, incomplete=False: self._validate_twitch_info(info, max_duration, incomplete)
+                        ydl_opts["format"] = format_selector
+                        ydl_opts["progress_hooks"] = [check_progress]
+                        ydl_opts["postprocessor_hooks"] = [check_progress]
 
-                    if time.monotonic() > deadline:
-                        raise VideoDownloadError("Video download deadline exceeded")
+                        if time.monotonic() > deadline:
+                            raise VideoDownloadError("Video download deadline exceeded")
 
-                    with guarded_ytdlp_children(deadline), guarded_public_connections():
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([url])
+                        with guarded_ytdlp_children(deadline), guarded_public_connections():
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                ydl.download([url])
 
-                    # If we get here, download succeeded
-                    logger.info("Video download succeeded")
-                    return
+                        # If we get here, download succeeded
+                        logger.info("Video download succeeded")
+                        return
 
-                except VideoDownloadError:
-                    raise
-                except Exception as e:
-                    last_error = e
-                    error_str = str(e)
-
-                    # A full disk affects every format selector.
-                    if is_disk_full(e):
+                    except VideoDownloadError:
                         raise
+                    except Exception as e:
+                        last_error = e
+                        error_str = str(e)
 
-                    # Bot detection will affect every format selector.
-                    if "Sign in to confirm" in error_str or "bot" in error_str.lower():
-                        logger.warning("Bot detection triggered")
-                        raise
+                        # A full disk affects every format selector.
+                        if is_disk_full(e):
+                            raise
 
-                    # Check if it's a format issue - try next selector
-                    if "Requested format" in error_str or "No video formats" in error_str:
-                        logger.warning("Format not available, trying next")
-                        continue
+                        # Bot detection will affect every format selector.
+                        if "Sign in to confirm" in error_str or "bot" in error_str.lower():
+                            logger.warning("Bot detection triggered")
+                            raise
 
-                    # Network and HTTP failures affect every format selector.
-                    lowered = error_str.lower()
-                    if any(m in lowered for m in ("unable to download", "http error", "timed out", "connection")):
-                        logger.warning("Format attempt %d failed at the network level", fmt_idx + 1)
-                        raise
+                        # Check if it's a format issue - try next selector
+                        if "Requested format" in error_str or "No video formats" in error_str:
+                            logger.warning("Format not available, trying next")
+                            break
 
-                    # For other errors (e.g. merge/conversion), try the next format
-                    logger.warning("Format attempt %d failed", fmt_idx + 1)
-                    continue
+                        # Network and HTTP failures affect every format selector.
+                        lowered = error_str.lower()
+                        if any(m in lowered for m in NETWORK_ERROR_MARKERS):
+                            delay = YOUTUBE_RETRY_DELAYS_SECONDS[min(attempt, len(YOUTUBE_RETRY_DELAYS_SECONDS)) - 1]
+                            if (attempt < attempts and is_transient_download_error(error_str)
+                                    and time.monotonic() + delay < deadline):
+                                logger.warning("Format attempt %d: transient network failure, retrying with fresh "
+                                               "URLs (%d/%d)", fmt_idx + 1, attempt + 1, attempts)
+                                self._remove_partial_files(output_path)
+                                time.sleep(delay)
+                                continue
+                            logger.warning("Format attempt %d failed at the network level", fmt_idx + 1)
+                            raise
+
+                        # For other errors (e.g. merge/conversion), try the next format
+                        logger.warning("Format attempt %d failed", fmt_idx + 1)
+                        break
 
             # All format attempts failed.
             raise last_error or VideoDownloadError("All format attempts failed")
@@ -902,6 +933,9 @@ class VideoDownloaderService:
             opts.update({
                 "skip_download": True,
                 "noplaylist": True,
+                # A playlist or channel link must fail fast instead of fetching
+                # every entry's page; the result is rejected below.
+                "extract_flat": "in_playlist",
                 "socket_timeout": 30,
                 "nocheckcertificate": False,
                 "geo_bypass": True,
@@ -930,8 +964,18 @@ class VideoDownloaderService:
                 )
             raise VideoDownloadError(f"Failed to get video info: {e}")
 
+        # ydl.download() would otherwise fetch every entry of a playlist or
+        # channel into the same output path, one after another.
+        if not isinstance(info, dict) or info.get("_type", "video") != "video":
+            raise VideoDownloadError("Video source is a playlist or channel, not a single video")
+
         if twitch_url:
             self._validate_twitch_info(info, self.settings.max_download_duration_seconds)
+        elif (info.get("is_live") or info.get("is_upcoming")
+              or info.get("live_status") in {"is_live", "is_upcoming", "post_live"}):
+            # Some live streams report elapsed duration. A positive number
+            # still does not make them a bounded, completed video.
+            raise VideoDownloadError("Video is live or upcoming; only completed videos are supported")
 
         return VideoMetadata(
             source_type="twitch" if twitch_url else "youtube",

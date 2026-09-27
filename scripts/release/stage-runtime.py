@@ -92,7 +92,7 @@ def stage():
             subprocess.run(["powershell", "-NoProfile", "-File", str(ROOT / "scripts/release/build-launcher.ps1")], check=True)
         else:
             launcher = binaries / "yt-dlp"
-            launcher.write_text('#!/bin/sh\nBUNDLE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$BUNDLE_DIR/../engine-venv/bin/python3" -m yt_dlp "$@"\n')
+            launcher.write_text('#!/bin/sh\nBUNDLE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$BUNDLE_DIR/../engine-venv/bin/python3" -P -m yt_dlp "$@"\n')
             launcher.chmod(0o755)
         for cache in venv.rglob("__pycache__"):
             shutil.rmtree(cache)
