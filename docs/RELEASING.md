@@ -12,7 +12,7 @@ Only `matthewmiller2925` maintains the upstream repository. Main requires a pull
 | Windows | x64 | NSIS EXE | BRIDGEMIND LLC Authenticode signatures; timestamp; installed runtime smoke |
 | Linux | x64 | AppImage and DEB | Installed/extracted runtime smoke; signed checksum manifest |
 
-The macOS DMGs are public in `v0.1.17`, and the signed Windows x64 installer is public in `v0.1.18`. Linux is a pipeline target but has no public package yet. Windows ARM64 and Linux ARM64 are not release targets. Do not advertise an unsupported OS version based only on the build runner version.
+Version `v0.1.19` targets all four platform/architecture builds in one release, including the first Linux packages. Publication is gated on successful native tests, package acceptance, signatures and complete source archives; use the published release assets as the availability record. Windows ARM64 and Linux ARM64 are not release targets. Do not advertise an unsupported OS version based only on the build runner version.
 
 ## Maintainer sequence
 

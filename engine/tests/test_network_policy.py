@@ -29,3 +29,17 @@ def test_youtube_detection_uses_hostname_not_text_in_path():
         downloader = VideoDownloaderService()
         assert downloader.detect_source_type("https://www.youtube.com/watch?v=test") == "youtube"
         assert downloader.detect_source_type("https://evil.example/youtube.com/watch") == "direct_url"
+
+
+def test_desktop_bucket_urls_are_not_signed_with_ambient_aws_credentials():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from clip_engine.services.video_downloader import VideoDownloaderService
+
+    for local_mode, expected in ((True, "direct_url"), (False, "s3")):
+        settings = SimpleNamespace(local_mode=local_mode, get_proxy_list=lambda: [])
+        with patch("clip_engine.services.video_downloader.get_settings", return_value=settings):
+            downloader = VideoDownloaderService()
+            for url in ("https://attacker-bucket.s3.amazonaws.com/video.mp4",
+                        "https://s3.us-east-1.amazonaws.com/attacker-bucket/video.mp4"):
+                assert downloader.detect_source_type(url) == expected, (local_mode, url)

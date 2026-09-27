@@ -177,6 +177,22 @@ class TestParsing:
             planner._parse_clip_plan_response(completion("not json at all"))
         assert exc.value.retryable
 
+    def test_json_wrapped_in_prose_is_extracted(self):
+        planner = make_planner()
+        planner._current_transcript = []
+        plan = planner._parse_clip_plan_response(completion('Plan: {"insights": "ok", "clips": []} done'))
+        assert plan.insights == "ok" and plan.segments == []
+
+    def test_unclosed_hostile_json_fails_in_linear_time(self):
+        import time
+
+        planner = make_planner()
+        planner._current_transcript = []
+        started = time.perf_counter()
+        with pytest.raises(IntelligencePlanningError):
+            planner._parse_clip_plan_response(completion('{"insights": "' + "{" * 50_000))
+        assert time.perf_counter() - started < 5
+
 
 class FakeClient(httpx.AsyncClient):
     """Exercise the actual streaming client against queued offline responses."""

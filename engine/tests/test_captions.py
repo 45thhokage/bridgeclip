@@ -72,6 +72,28 @@ def test_trailing_punctuation_dropped():
     assert service._display_word("{bad}", style) == "BAD"
 
 
+def test_provider_line_breaks_cannot_inject_subtitle_script_lines(tmp_path):
+    from clip_engine.config import get_caption_preset
+    from clip_engine.services.transcription_service import TranscriptSegment
+
+    injected = ("hi\r\n[V4+ Styles]\nStyle: Default,Arial,400,&H000000FF,&H000000FF,&H0,&H0,0,0,0,0,"
+                "100,100,0,0,1,0,0,5,0,0,0,1\n[Events]\nDialogue: 9,0:00:00.00,9:00:00.00,Default,,0,0,0,,INJECTED")
+    words = [WORDS[0], TranscriptWord(word=injected, start_time_ms=300, end_time_ms=600), WORDS[2]]
+    events = _events(get_caption_preset("editorial"), words, tmp_path=tmp_path)
+    lines = (tmp_path / "c.ass").read_text().splitlines()
+    assert sum(line.startswith("Style:") for line in lines) == 1
+    assert sum(line.startswith("[") for line in lines) == 3
+    assert not any(line.startswith("Dialogue: 9,") for line in lines)
+    assert all(line.startswith("Dialogue: ") for line in lines[lines.index("[Events]") + 2:])
+    assert events
+
+    cue = TranscriptWord(word="hi\n\n2\n00:00:00,000 --> 09:00:00,000\nFAKE", start_time_ms=300, end_time_ms=600)
+    srt = CaptionGeneratorService().generate_srt(
+        [TranscriptSegment(0, 1200, "x", words=[WORDS[0], cue, WORDS[2]])], 0, 2000, str(tmp_path / "c.srt"))
+    blocks = open(srt, encoding="utf-8").read().strip().split("\n\n")
+    assert len(blocks) == 1 and len(blocks[0].splitlines()) <= 4
+
+
 def test_karaoke_sweep_spans_gaps_between_words(tmp_path):
     from clip_engine.config import get_caption_preset
 

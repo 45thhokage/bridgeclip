@@ -21,3 +21,13 @@ test('resource staging preserves existing tools when the in-repo engine is incom
     assert.equal(fs.readFileSync(sentinel, 'utf8'), 'keep')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('bundled yt-dlp launchers never import modules from the working directory', () => {
+  // `python -m` otherwise puts the caller's cwd first on sys.path, so a
+  // yt_dlp/ directory there would run instead of the hash-locked package.
+  for (const file of ['prepare-resources.sh', 'release/stage-runtime.py', 'release/yt-dlp-launcher.c']) {
+    const source = fs.readFileSync(path.join(__dirname, file), 'utf8')
+    assert.match(source, /python(?:3"|\.exe\\") -P -m yt_dlp/, file)
+    assert.doesNotMatch(source, /python(?:3"|\.exe\\") -m yt_dlp/, file)
+  }
+})

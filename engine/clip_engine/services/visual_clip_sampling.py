@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageStat
 
 from clip_engine.services.intelligence_planner import VisionFrame
-from clip_engine.services.media_process import media_child_env
+from clip_engine.services.media_process import run_media
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +48,10 @@ def _sample_one(video_path: str, output_path: Path, timestamp: float) -> bool:
         "-vf", f"scale={FRAME_WIDTH}:-2", "-q:v", "7", str(output_path),
     ]
     try:
-        result = subprocess.run(
-            command, capture_output=True, timeout=FRAME_TIMEOUT_SECONDS,
-            env=media_child_env(), check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        # Bound stderr as well as time: a corrupt source can spew decoder
+        # errors far faster than capture_output could hold in memory.
+        result = run_media(command, timeout=FRAME_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0 and output_path.is_file() and output_path.stat().st_size > 1024
 
