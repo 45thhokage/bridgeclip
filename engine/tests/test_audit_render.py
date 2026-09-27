@@ -154,7 +154,8 @@ def test_filter_path_survives_both_parse_levels(path):
     assert rest == "[captioned];[captioned]null[out]"
     # Filter level: the path is the whole first (shorthand) value, and no
     # part of it became an option name or leaked into fontsdir.
-    assert filter_options(args) == [(None, path), ("fontsdir", fonts)]
+    expected_path = path.replace("\\", "/") if sys.platform == "win32" else path
+    assert filter_options(args) == [(None, expected_path), ("fontsdir", fonts)]
 
 
 @needs_libass
