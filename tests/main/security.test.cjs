@@ -11,7 +11,7 @@ function loadSource(file, mocks = {}, globals = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/main', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? (id === '../shared/job-progress' ? loadShared('job-progress.ts') : require(id)), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? (id.startsWith('../shared/') ? loadShared(id.slice('../shared/'.length) + '.ts') : require(id)), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
   return module.exports
 }
 function loadShared(file) {
@@ -209,7 +209,13 @@ test('the native picker authorizes media and shell opening rejects aliased appli
     assert.equal((await storage({ sender: contents, senderFrame: frame }, root)).outputDirectory, library)
     const sourceUrl = 'https://www.youtube.com/watch?v=hqP9fivmBqI'
     assert.equal(await handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, sourceUrl), true)
-    assert.deepEqual(openedLinks, [sourceUrl])
+    const docs = ['https://docs.typesafe.ai/introduction', 'https://docs.typesafe.ai/confidence']
+    for (const url of docs) assert.equal(await handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, url), true)
+    assert.deepEqual(openedLinks, [sourceUrl, ...docs])
+    for (const url of ['https://docs.typesafe.ai/other', 'https://docs.typesafe.ai/confidence?redirect=https://example.com', 'https://docs.typesafe.ai.evil.test/confidence', 'http://docs.typesafe.ai/confidence', 'https://user@docs.typesafe.ai/confidence']) {
+      assert.equal(security.isTrustedExternalUrl(url), false)
+      await assert.rejects(handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, url), /not supported|absolute path/)
+    }
     await assert.rejects(handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, 'https://www.youtube.com/redirect?q=https://example.com'), /not supported/)
     assert.equal(handlers.has('files:registerMedia'), false)
     assert.throws(() => security.assertMediaPath(video, library))
@@ -835,11 +841,52 @@ test('Jev migration drops the separate TypeSafe key without decrypting it', () =
     assert.equal(loaded.jevEnabled, 'on')
     assert.equal(loaded.jevVisualContext, 'on')
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
-    assert.equal(saved.version, 10)
+    assert.equal(saved.version, 11)
     assert.equal(Object.hasOwn(saved, 'typesafeApiKey'), false)
     assert.equal(Object.hasOwn(saved, 'typesafeVisualContext'), false)
     assert.equal(Object.hasOwn(loaded, 'typesafeApiKey'), false)
     assert.equal(Object.hasOwn(store.getSettingsForBridge(loaded), 'TYPESAFE_API_KEY'), false)
     assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevEnabled: 'invalid' }), /Invalid Jev/)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+
+test('Jev thresholds migrate, validate atomically, persist, and reach the worker', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-jev-settings-'))
+  const file = path.join(root, 'settings.json')
+  fs.writeFileSync(file, JSON.stringify({ version: 10, outputDirectory: root }))
+  const store = loadSource('settings-store.ts', { electron: {
+    app: { getPath: () => root, isReady: () => true },
+    safeStorage: { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'gnome_libsecret' }
+  } })
+  try {
+    const keys = ['jevThreshold', 'jevSelfContainedThreshold', 'jevFaithfulToSourceThreshold', 'jevTitleSupportedThreshold', 'jevSponsorThreshold', 'jevEvidenceThreshold', 'jevCutThreshold']
+    const env = ['JEV_THRESHOLD', 'JEV_SELF_CONTAINED_THRESHOLD', 'JEV_FAITHFUL_TO_SOURCE_THRESHOLD', 'JEV_TITLE_SUPPORTED_THRESHOLD', 'JEV_SPONSOR_THRESHOLD', 'JEV_EVIDENCE_THRESHOLD', 'JEV_CUT_THRESHOLD']
+    const defaults = [.75, .70, .65, .70, .80, .50, .95]
+    const initial = store.publicSettings(store.loadSettings())
+    keys.forEach((key, i) => assert.equal(Number(initial[key]), defaults[i]))
+    assert.equal(JSON.parse(fs.readFileSync(file)).version, 11)
+    const values = ['0', '1', '0.61', '0.72', '0.83', '0.54', '0.96']
+    const saved = store.savePublicSettings({ ...initial, ...Object.fromEntries(keys.map((key, i) => [key, values[i]])) })
+    const worker = store.getSettingsForBridge(store.loadSettings())
+    keys.forEach((key, i) => { assert.equal(saved[key], values[i]); assert.equal(worker[env[i]], values[i]) })
+    for (const value of ['0.0000001', '1e-7', '5e-324', '1e-4']) {
+      const tiny = store.savePublicSettings({ ...saved, jevThreshold: value })
+      assert.equal(Number(tiny.jevThreshold), Number(value))
+      assert.equal(store.loadSettings().jevThreshold, tiny.jevThreshold)
+      store.savePublicSettings({ ...tiny, customVocabulary: 'round trip' })
+      assert.equal(store.loadSettings().jevThreshold, tiny.jevThreshold)
+    }
+    store.savePublicSettings(saved)
+    const before = fs.readFileSync(file, 'utf8')
+    for (const key of keys) for (const value of ['', 'NaN', 'Infinity', '-0.01', '1.01', '75%', '1e2', '1e999', '-1e-7', 0.75]) {
+      assert.throws(() => store.savePublicSettings({ ...saved, [key]: value }), /Invalid/)
+      assert.equal(fs.readFileSync(file, 'utf8'), before)
+    }
+    const olderClient = { ...saved }; keys.forEach(key => delete olderClient[key])
+    store.savePublicSettings(olderClient)
+    keys.forEach((key, i) => assert.equal(store.loadSettings()[key], values[i]))
+    store.savePublicSettings({ ...saved, ...Object.fromEntries(keys.map((key, i) => [key, String(defaults[i])])) })
+    keys.forEach((key, i) => assert.equal(Number(store.loadSettings()[key]), defaults[i]))
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
