@@ -111,15 +111,27 @@ def test_playlist_results_are_rejected_before_download(service, monkeypatch, tmp
 
 
 @pytest.mark.parametrize("duration", [None, 0, -1, float("nan")])
-def test_live_or_unknown_duration_is_rejected_before_download(service, monkeypatch, tmp_path, duration):
-    _, downloads = fake_ydl(monkeypatch, {"title": "Live now", "duration": duration, "is_live": True})
+def test_unknown_duration_is_rejected_before_download(service, monkeypatch, tmp_path, duration):
+    _, downloads = fake_ydl(monkeypatch, {"title": "Unknown duration", "duration": duration})
     with pytest.raises(module.VideoDownloadError, match="duration is unavailable"):
         asyncio.run(service.download_video("https://www.youtube.com/watch?v=live1234567", str(tmp_path)))
     assert downloads == []
 
 
-def test_single_video_metadata_still_passes(service, monkeypatch):
-    fake_ydl(monkeypatch, {"title": "One video", "duration": 42, "width": 1920, "height": 1080, "fps": 30})
+@pytest.mark.parametrize("live_fields", [
+    {"is_live": True}, {"is_upcoming": True}, {"live_status": "is_live"},
+    {"live_status": "is_upcoming"}, {"live_status": "post_live"},
+])
+def test_live_sources_with_positive_duration_are_rejected(service, monkeypatch, tmp_path, live_fields):
+    _, downloads = fake_ydl(monkeypatch, {"title": "Live", "duration": 42, **live_fields})
+    with pytest.raises(module.VideoDownloadError, match="live or upcoming"):
+        asyncio.run(service.download_video("https://www.youtube.com/watch?v=live1234567", str(tmp_path)))
+    assert downloads == []
+
+
+@pytest.mark.parametrize("status", ["not_live", "was_live"])
+def test_single_video_metadata_still_passes(service, monkeypatch, status):
+    fake_ydl(monkeypatch, {"title": "One video", "duration": 42, "width": 1920, "height": 1080, "fps": 30, "live_status": status})
     metadata = asyncio.run(service._get_video_info("https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
     assert metadata.duration_seconds == 42
     assert metadata.source_type == "youtube"

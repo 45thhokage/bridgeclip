@@ -943,6 +943,11 @@ class VideoDownloaderService:
 
         if twitch_url:
             self._validate_twitch_info(info, self.settings.max_download_duration_seconds)
+        elif (info.get("is_live") or info.get("is_upcoming")
+              or info.get("live_status") in {"is_live", "is_upcoming", "post_live"}):
+            # Some live streams report elapsed duration. A positive number
+            # still does not make them a bounded, completed video.
+            raise VideoDownloadError("Video is live or upcoming; only completed videos are supported")
 
         return VideoMetadata(
             source_type="twitch" if twitch_url else "youtube",

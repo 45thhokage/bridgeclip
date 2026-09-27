@@ -102,7 +102,7 @@ FAILURES = (
     (("playlist or channel",),
      "This link is a playlist or channel, not a single video.",
      "Paste the link of one video."),
-    (("duration is unavailable",),
+    (("duration is unavailable", "video is live or upcoming"),
      "This video is live or not yet available.",
      "Wait until the stream has ended and the saved video is ready, then retry."),
     (("no clip-worthy moments",),
