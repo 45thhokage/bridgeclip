@@ -54,13 +54,13 @@ def test_prepare_retains_rejected_candidates_and_does_not_render(tmp_path):
     source = tmp_path / 'original.mov'
     source.write_bytes(b'original source')
     out = tmp_path / 'run'; out.mkdir()
-    async def preview(src, dest): Path(dest).write_bytes(b'preview')
+    async def preview(src, dest, **kwargs): Path(dest).write_bytes(b'preview')
     renderer = SimpleNamespace(_get_video_dimensions=AsyncMock(return_value=(1920, 1080)),
         capture_framing_source=AsyncMock(side_effect=preview), render_clip=AsyncMock())
     request = SimpleNamespace(aspect_ratio='9:16', layout_style='fit', include_captions=True, caption_preset='pop', video_speed=1)
     segments = [ClipPlanSegment(0, 5000, .9, summary='First'), ClipPlanSegment(6000, 11000, .7, summary='Second')]
     project = asyncio.run(prepare_project(request, segments, transcript(), SimpleNamespace(video_path=str(source),
-        metadata=SimpleNamespace(title='Original', duration_seconds=12)), renderer, gate, str(out), lambda _: None))
+        metadata=SimpleNamespace(title='Original', duration_seconds=12)), renderer, gate, str(out), lambda *_: None))
     assert len(project['candidates']) == 2
     assert all(c['status'] == 'refining' and c['caption_edits'] == [] for c in project['candidates'])
     assert all(c['review']['decision'] == 'needs_attention' for c in project['candidates'])
@@ -276,6 +276,19 @@ def test_export_appends_library_clip_and_preserves_source_and_previous_exports(m
     (tmp_path / 'editor-project.json').write_text(json.dumps(saved))
     asyncio.run(run_editor(config))
     assert (tmp_path / 'clip_01.mp4').exists() and (tmp_path / 'editor-source.mp4').read_bytes() == b'original'
+    # Deleting exports must not recycle IDs referenced by posts or bank copies.
+    for path in tmp_path.glob('clip_*.mp4'):
+        path.unlink()
+    output = json.loads((tmp_path / 'job_output.json').read_text())
+    output.update(clips=[], total_clips=0, next_clip_index=2)
+    (tmp_path / 'job_output.json').write_text(json.dumps(output))
+    saved = json.loads((tmp_path / 'editor-project.json').read_text())
+    saved['candidates'][0].update(exports=[], status='ready')
+    (tmp_path / 'editor-project.json').write_text(json.dumps(saved))
+    config['revision'] = saved['revision']
+    asyncio.run(run_editor(config))
+    assert (tmp_path / 'clip_02.mp4').exists() and not (tmp_path / 'clip_00.mp4').exists()
+    assert json.loads((tmp_path / 'job_output.json').read_text())['clips'][0]['clip_index'] == 2
 
 
 def test_short_manual_export_contains_only_the_selected_frames(monkeypatch, tmp_path):
@@ -357,7 +370,7 @@ def test_pipeline_review_stops_before_automatic_repairs_and_render(monkeypatch, 
     pipeline.transcription_service.transcribe = AsyncMock(return_value=TranscriptionResult(segments=transcript(), full_text='Original source'))
     pipeline.intelligence_planner.plan_clips = AsyncMock(return_value=ClipPlanResponse(segments=[ClipPlanSegment(0, 5000, .8, summary='First'), ClipPlanSegment(6000, 11000, .7, summary='Second')], total_clips=2))
     pipeline.rendering_service._get_video_dimensions = AsyncMock(return_value=(1920, 1080))
-    async def preview(src, dest): Path(dest).write_bytes(b'preview')
+    async def preview(src, dest, **kwargs): Path(dest).write_bytes(b'preview')
     pipeline.rendering_service.capture_framing_source = AsyncMock(side_effect=preview)
     pipeline.rendering_service.render_clip = AsyncMock(side_effect=AssertionError('Review must not render'))
     monkeypatch.setattr(module.CoherenceReviewer, 'prepare', AsyncMock(side_effect=AssertionError('Review must not repair')))

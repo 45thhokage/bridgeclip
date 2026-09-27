@@ -2,6 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Use the engine's bundled caption faces in previews, including offline builds. */
+@font-face {
+  font-family: 'Montserrat';
+  src: url('../../engine/assets/fonts/Montserrat-Black.ttf') format('truetype');
+  font-weight: 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('../../engine/assets/fonts/Montserrat-ExtraBold.ttf') format('truetype');
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Poppins';
+  src: url('../../engine/assets/fonts/Poppins-Black.ttf') format('truetype');
+  font-weight: 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Poppins';
+  src: url('../../engine/assets/fonts/Poppins-ExtraBold.ttf') format('truetype');
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anton';
+  src: url('../../engine/assets/fonts/Anton-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Archivo Black';
+  src: url('../../engine/assets/fonts/ArchivoBlack-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Instrument Serif';
+  src: url('../../engine/assets/fonts/InstrumentSerif-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
 /* Geist is vendored (SIL OFL 1.1, see assets/fonts/Geist-OFL.txt) so the app
    renders identically offline. */
 @font-face {
@@ -336,4 +381,23 @@
   .glass-thick {
     background: rgb(var(--overlay));
   }
+}
+
+/* Native progress preserves accessible measured/indeterminate semantics. */
+.stage-progress {
+  appearance: none;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, .07);
+}
+.stage-progress::-webkit-progress-bar { background: rgba(255, 255, 255, .07); border-radius: 9999px; }
+.stage-progress::-webkit-progress-value { background: var(--color-accent, #2563eb); border-radius: 9999px; transition: width .2s ease; }
+.stage-progress:indeterminate {
+  background: linear-gradient(90deg, transparent, #2563eb 50%, transparent) -100% 0 / 50% 100% no-repeat, rgba(255, 255, 255, .07);
+  animation: stage-progress-pulse 1.8s ease-in-out infinite;
+}
+@keyframes stage-progress-pulse { to { background-position: 200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .stage-progress:indeterminate { animation: none; background-position: 50% 0; }
+  .stage-progress::-webkit-progress-value { transition: none; }
 }

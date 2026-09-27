@@ -1,11 +1,12 @@
+import { StageBreakdown } from './StageBreakdown'
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Check, Clapperboard, Clock3, Download, FileText, Film, Gauge, Github, RotateCcw, ScrollText, Sparkles } from 'lucide-react'
-import { cn, formatTimecode, sourceLabel } from '../lib/utils'
+import { AlertTriangle, Clapperboard, Clock3, Gauge, Github, RotateCcw, ScrollText } from 'lucide-react'
+import { formatTimecode, sourceLabel } from '../lib/utils'
 import { getApi } from '../lib/ipc'
 import { ISSUES_URL } from '../config/brand'
 import type { Job } from '../store/use-job-store'
 import { Page } from './ui/Page'
-import { ProgressRing } from './ui/ProgressBar'
+import { JobTimeline } from './JobTimeline'
 import { IconTile } from './ui/IconTile'
 import { Button } from './ui/Button'
 import { JsonViewer } from './ui/JsonViewer'
@@ -25,19 +26,6 @@ export const STAGE_LABELS: Record<string, string> = {
   cancelled: 'Cancelled'
 }
 
-const STEPS = [
-  { label: 'Download', icon: Download, statuses: ['downloading'] },
-  { label: 'Context', icon: ScrollText, statuses: ['contextualizing'] },
-  { label: 'Transcribe', icon: FileText, statuses: ['transcribing'] },
-  { label: 'Find moments', icon: Sparkles, statuses: ['planning'] },
-  { label: 'Render', icon: Film, statuses: ['rendering', 'uploading'] }
-]
-
-function stepIndex(status: string): number {
-  if (status === 'completed') return STEPS.length
-  return STEPS.findIndex((s) => s.statuses.includes(status))
-}
-
 function useElapsed(since: string, running: boolean): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -48,7 +36,7 @@ function useElapsed(since: string, running: boolean): number {
   return Math.max(0, now - new Date(since).getTime())
 }
 
-/** Small frosted capsule for a single fact under the progress ring. */
+/** Small capsule for job metadata. */
 function InfoChip({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }): React.JSX.Element {
   return (
     <span className="glass-tile inline-flex h-8 items-center gap-2 rounded-full px-3.5 text-xs tabular text-ink-muted [&_svg]:h-3.5 [&_svg]:w-3.5 [&_svg]:text-ink-subtle">
@@ -66,98 +54,35 @@ interface JobProgressProps {
 }
 
 export function JobProgress({ job, onCancel, leading }: JobProgressProps): React.JSX.Element {
-  const current = stepIndex(job.status)
   const queued = job.status === 'queued'
   const elapsed = useElapsed(job.startedAt ?? job.queuedAt, true)
-  const pct = Math.round(Math.min(job.percent, 100))
   const source = job.request.videoUrl
 
   return (
-    <Page width="focus">
-      {leading && <div className="mb-2">{leading}</div>}
-      <div className="text-center">
-        <p className="eyebrow text-accent">{queued ? 'Waiting in the queue' : 'Generating clips'}</p>
-        <h1 className="mx-auto mt-1.5 max-w-[560px] truncate text-xl font-semibold tracking-[-0.025em] text-ink" title={source}>
-          {sourceLabel(source)}
-        </h1>
-      </div>
-
-      <section className="glass relative mt-5 overflow-hidden rounded-3xl px-5 pb-5 pt-6">
-        <div className="relative flex flex-col items-center">
-          <ProgressRing value={job.percent} size={168} stroke={9}>
-            <p className="font-mono text-3xl font-medium tabular tracking-[-0.04em] text-ink">
-              {pct}
-              <span className="ml-0.5 text-xl text-ink-subtle">%</span>
-            </p>
-            <p className="mt-1.5 text-xs font-medium text-accent">{STAGE_LABELS[job.status] ?? 'Working'}</p>
-          </ProgressRing>
-
-          <p className="mt-4 h-5 max-w-full truncate text-center text-sm text-ink-muted" aria-live="polite">
-            {job.step}
-          </p>
-
-          <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
-            {(job.request.videoSpeed ?? 1) > 1 && (
-              <InfoChip icon={<Gauge />}>{job.request.videoSpeed}× export speed</InfoChip>
-            )}
-            {job.clipsTotal > 0 && (
-              <InfoChip icon={<Clapperboard />}>
-                {job.clipsDone} of {job.clipsTotal} clip{job.clipsTotal === 1 ? '' : 's'} rendered
-              </InfoChip>
-            )}
-            <InfoChip icon={<Clock3 />}>{formatTimecode(elapsed)} {queued ? 'waiting' : 'elapsed'}</InfoChip>
+    <Page width="narrow">
+      {leading && <div className="mb-3">{leading}</div>}
+      <section className="glass overflow-hidden rounded-3xl p-5 sm:p-6">
+        <header className="mb-6 flex flex-wrap items-center gap-4">
+          <div className="glass-tile hidden h-16 w-20 shrink-0 items-center justify-center rounded-xl sm:flex"><Clapperboard className="h-7 w-7 text-ink-muted" /></div>
+          <div className="min-w-0 flex-1">
+            <p className="eyebrow text-accent">{queued ? 'Waiting in the queue' : 'Generating clips'}</p>
+            <h1 className="mt-1 truncate text-xl font-semibold tracking-[-0.025em] text-ink" title={source}>{sourceLabel(source)}</h1>
+            <p className="mt-1 text-xs text-ink-muted">{job.request.workflow === 'review' ? 'Review & edit' : 'Automatic clips'}</p>
           </div>
-        </div>
-
-        <ol className="relative mt-6 flex items-start" aria-label="Progress">
-          {STEPS.map((step, i) => {
-            const done = current > i
-            const active = current === i
-            const Icon = step.icon
-            return (
-              <li key={step.label} className="flex flex-1 items-start last:flex-none">
-                <div className="flex w-[84px] flex-col items-center gap-2.5">
-                  <span
-                    className={cn(
-                      'flex h-10 w-10 items-center justify-center rounded-full transition-[background,box-shadow,color] duration-300',
-                      done &&
-                        'bg-ink text-canvas shadow-[inset_0_1px_0_rgb(255_255_255/0.9),0_4px_14px_-4px_rgb(255_255_255/0.35)]',
-                      active &&
-                        'animate-pulse-ring bg-accent text-accent-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.16)]',
-                      !done && !active && 'bg-black/25 text-ink-faint shadow-[inset_0_0_0_1px_rgb(255_255_255/0.1),inset_0_1px_2px_rgb(0_0_0/0.3)]'
-                    )}
-                    aria-current={active ? 'step' : undefined}
-                  >
-                    {done ? <Check className="h-4 w-4" strokeWidth={3} /> : <Icon className="h-4 w-4" />}
-                  </span>
-                  <span
-                    className={cn(
-                      'text-center text-2xs font-medium',
-                      active ? 'text-ink' : done ? 'text-ink-muted' : 'text-ink-faint'
-                    )}
-                  >
-                    {step.label}
-                  </span>
-                </div>
-                {i < STEPS.length - 1 && (
-                  <div className="mt-4 h-[3px] flex-1 overflow-hidden rounded-full bg-black/30 shadow-[inset_0_1px_1px_rgb(0_0_0/0.4)]">
-                    <div
-                      className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
-                      style={{ width: done ? '100%' : '0%' }}
-                    />
-                  </div>
-                )}
-              </li>
-            )
-          })}
-        </ol>
+          <div className="w-full lg:w-auto"><InfoChip icon={<Clock3 />}>{formatTimecode(elapsed)} {queued ? 'waiting' : 'elapsed'}</InfoChip></div>
+        </header>
+        {((job.request.videoSpeed ?? 1) > 1 || job.clipsTotal > 0) && <div className="mb-5 flex flex-wrap items-center gap-2">
+          {(job.request.videoSpeed ?? 1) > 1 && <InfoChip icon={<Gauge />}>{job.request.videoSpeed}× export speed</InfoChip>}
+          {job.clipsTotal > 0 && <InfoChip icon={<Clapperboard />}>{job.clipsDone} of {job.clipsTotal} clips rendered</InfoChip>}
+        </div>}
+        <JobTimeline job={job} />
       </section>
 
       <div className="mt-4 flex items-center justify-between gap-4 px-1">
         <p className="text-xs leading-relaxed text-ink-subtle">
           {queued
             ? 'Starts automatically when a running job finishes.'
-            : 'Long videos can take a while. Keep using BridgeClip or queue more videos; progress shows in the sidebar.'}
+            : 'Keep creating. This job continues in the background.'}
         </p>
         <Button onClick={onCancel}>{queued ? 'Remove from queue' : 'Cancel'}</Button>
       </div>
@@ -198,6 +123,7 @@ export function JobFailure({ job, onRetry, leading }: { job: Job; onRetry: () =>
         )}
       </section>
 
+      {job.stages && <div className="mt-4"><StageBreakdown stages={job.stages} /></div>}
       <div className="mt-5 flex flex-wrap items-center gap-2">
         <Button variant="primary" icon={<RotateCcw className="h-4 w-4" />} onClick={onRetry}>
           Run again

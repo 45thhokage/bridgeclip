@@ -118,7 +118,7 @@ test('sample labels never invent detections between observations or across missi
   const html = renderToStaticMarkup(React.createElement(RecordedFramingView, {
     inspection: { status: 'limited', trace, sourcePath: null, clipPath: null, message: 'Missing preview' }
   }))
-  assert.match(html, /4 fps sampling/)
+  assert.match(html, /4 fps base sampling/)
   assert.match(html, /Missing preview/)
   assert.match(html, /disabled/)
   assert.match(html, /Source preview unavailable/)
@@ -187,4 +187,34 @@ test('sped-up framing traces map source, cuts and output without changing source
     const value = clone(); value.output.video_speed = speed
     assert.throws(() => parseFramingTrace(value))
   }
+})
+
+test('card availability includes recorded traces without media and excludes absent or unsafe files', async () => {
+  const { root, run } = library()
+  const { availableFraming } = inspectionModule()
+  const trace = path.join(run, 'clip_00.framing.json')
+  try {
+    assert.deepEqual(await availableFraming(run, root), [0])
+    fs.unlinkSync(path.join(run, 'framing-source.mp4'))
+    fs.unlinkSync(path.join(run, 'clip_00.mp4'))
+    assert.deepEqual(await availableFraming(run, root), [0], 'Trace-only inspection remains useful')
+    fs.unlinkSync(trace)
+    assert.deepEqual(await availableFraming(run, root), [])
+    fs.writeFileSync(trace, '')
+    assert.deepEqual(await availableFraming(run, root), [])
+    fs.unlinkSync(trace)
+    fs.symlinkSync(path.join(run, 'job_output.json'), trace)
+    assert.deepEqual(await availableFraming(run, root), [])
+    await assert.rejects(availableFraming(path.dirname(root), root))
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+
+test('precise pipeline boundaries and bounded vision decisions remain inspectable', () => {
+  const raw = clone()
+  raw.boundaries.push({ t_ms: 709.042, kind: 'precise_scene', accepted: true })
+  raw.decisions[0].vision.status = 'budget_limited'
+  const trace = parseFramingTrace(raw)
+  assert.equal(trace.boundaries.at(-1).t_ms, 709.042)
+  assert.equal(trace.decisions[0].vision.status, 'budget_limited')
 })

@@ -110,19 +110,43 @@ test('Jobs actions inspect runs and open completed jobs in the shared Library vi
   await page.getByRole('button', { name: 'All jobs', exact: true }).click()
 
   const liveDir = writeRun(liveId, 'Watched test run', 'running')
-  const live = snapshot(liveId, 'rendering', liveDir)
+  const live = { ...snapshot(liveId, 'downloading', liveDir), startedAt: new Date(Date.now() - 7000).toISOString(), progressAt: Date.now(), stages: [
+    { id: 'download', state: 'running', percent: 25, elapsed_ms: 2000, completed: 25000000, total: 100000000, unit: 'bytes' },
+    { id: 'planning', state: 'pending', percent: null, elapsed_ms: 0 }
+  ] }
   await publish(live)
   await page.getByRole('region', { name: 'Active jobs' }).getByRole('button').first().click()
   await page.getByRole('button', { name: 'Cancel', exact: true }).waitFor()
-  const finishedOutput = output(liveId, 'Watched test run')
+  const download = page.getByRole('progressbar', { name: 'Download / read video progress' })
+  await download.waitFor()
+  assert.equal(await download.getAttribute('value'), '25')
+  await page.getByText('25.0 MB of 100.0 MB', { exact: true }).waitFor()
+  await publish({ ...live, revision: 2, stages: [{ ...live.stages[0], percent: 80 }] })
+  await page.waitForFunction(() => document.querySelector('progress[aria-label="Download / read video progress"]')?.value === 80)
+  await publish({ ...live, revision: 3, status: 'planning', stages: [
+    { ...live.stages[0], state: 'completed', percent: 100, elapsed_ms: 5000 },
+    { id: 'planning', state: 'running', percent: null, elapsed_ms: 1000 }
+  ] })
+  const planning = page.getByRole('progressbar', { name: 'Find moments progress' })
+  await planning.waitFor()
+  assert.equal(await planning.getAttribute('value'), null)
+  if (process.env.BRIDGECLIP_E2E_SHOTS) await page.screenshot({ path: path.join(process.env.BRIDGECLIP_E2E_SHOTS, 'stage-progress.png') })
+  const finishedOutput = { ...output(liveId, 'Watched test run'), metrics: { pipeline_stages: [
+    { ...live.stages[0], state: 'completed', percent: 100, elapsed_ms: 5000 },
+    { id: 'planning', state: 'completed', percent: 100, elapsed_ms: 9000 }
+  ] } }
   fs.writeFileSync(path.join(liveDir, 'job_output.json'), JSON.stringify(finishedOutput))
-  await publish({ ...live, revision: 2, status: 'completed', percent: 100, output: finishedOutput, finishedAt: date })
+  await publish({ ...live, revision: 4, status: 'completed', percent: 100, output: finishedOutput, finishedAt: date })
   await expectLibrary('Watched test run')
+  await page.getByText('Processing time by stage', { exact: true }).click()
+  await page.getByRole('list', { name: 'Stage progress' }).getByText('0:05', { exact: true }).waitFor()
   // Returning to Jobs must stay at the list, without a stale completion redirect.
   await jobs()
   await page.getByRole('button', { name: 'Actions for Watched test run', exact: true }).waitFor()
   await page.getByTitle('Open in Library', { exact: true }).filter({ hasText: 'Watched test run' }).click()
   await expectLibrary('Watched test run')
+  await page.getByText('Processing time by stage', { exact: true }).click()
+  await page.getByRole('list', { name: 'Stage progress' }).getByText('0:05', { exact: true }).waitFor()
   assert.deepEqual(errors, [])
 })
 
@@ -184,5 +208,39 @@ test('Jobs marks review runs as Editing until every candidate is baked or discar
   await row(runs[0].title).getByLabel('Editing: 1 clip left to finish', { exact: true }).waitFor()
   await save(['discarded', 'baked'])
   await row(runs[0].title).locator('[aria-label^="Editing:"]').waitFor({ state: 'detached' })
+  assert.deepEqual(errors, [])
+})
+
+test('Jobs recovers live runs after missed events and refreshes them even when history fails', { timeout: 90000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-jobs-recovery-'))
+  const session = await launchApp({ appDir: buildApp(path.join(root, 'app')), userDataDir: path.join(root, 'user-data') })
+  t.after(async () => { await session.close(); fs.rmSync(root, { recursive: true, force: true }) })
+  const { app, page } = session
+  page.setDefaultTimeout(10000)
+  const errors = []; page.on('pageerror', error => errors.push(error.message))
+  // The initial list was empty. The job is created afterward, with all push
+  // events deliberately omitted. Only the authoritative jobs:list can find it.
+  await app.evaluate(({ ipcMain }, root) => {
+    const now = new Date().toISOString()
+    globalThis.recoveryJob = { id: 'missed-run', revision: 1, request: { videoUrl: 'missed-event.mp4' },
+      status: 'downloading', percent: 25, step: 'Downloading video', clipsDone: 0, clipsTotal: 0,
+      error: null, errorHint: null, output: null, outputDir: root, queuedAt: now, startedAt: now, finishedAt: null }
+    ipcMain.removeHandler('jobs:list')
+    ipcMain.handle('jobs:list', () => [globalThis.recoveryJob])
+  }, root)
+  await page.getByRole('button', { name: /^Jobs(?:,|$)/ }).click()
+  const active = page.getByRole('region', { name: 'Active jobs' })
+  await active.getByText('missed-event.mp4', { exact: true }).waitFor()
+  await active.getByRole('button').first().click()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).waitFor()
+  await page.getByRole('button', { name: 'All jobs', exact: true }).click()
+  await app.evaluate(({ ipcMain }) => {
+    globalThis.recoveryJob = { ...globalThis.recoveryJob, revision: 2, status: 'failed', error: 'Test download failure', finishedAt: new Date().toISOString() }
+    ipcMain.removeHandler('history:list')
+    ipcMain.handle('history:list', () => { throw new Error('History unavailable') })
+  })
+  await page.getByRole('button', { name: 'Refresh jobs', exact: true }).click()
+  await active.waitFor({ state: 'detached' })
+  await page.getByRole('alert').filter({ hasText: 'History unavailable' }).waitFor()
   assert.deepEqual(errors, [])
 })
