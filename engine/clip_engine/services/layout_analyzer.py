@@ -2,7 +2,9 @@
 Layout Analyzer - decides how each shot of a clip should be framed for 9:16.
 
 For a clip it:
-1. Decodes low-res frames (ANALYSIS_FPS) with FFmpeg.
+1. Decodes the window once with FFmpeg: low-res face samples (ANALYSIS_FPS)
+   and, when exact cuts matter, an every-frame camera-change scan from the
+   same decode plus the few frames that decide each change.
 2. Detects faces per frame (OpenCV YuNet), shot cuts (HSV histogram jumps),
    and sustained changes between corner webcams and full-screen speakers.
 3. Tracks faces within each shot and classifies the shot's layout:
@@ -21,14 +23,16 @@ heuristic classification is used.
 """
 
 import asyncio
-from bisect import bisect_left
 import base64
 import json
 import hashlib
 import logging
 import math
 import os
+import tempfile
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Optional
@@ -36,7 +40,7 @@ from typing import Any, Optional
 import httpx
 
 from clip_engine.config import LayoutStyle, get_settings
-from clip_engine.services.media_process import media_process, MediaProcessError, validate_video_dimensions
+from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, media_process, MediaProcessError, validate_video_dimensions
 from clip_engine.services.openrouter import (
     OpenRouterError,
     apply_reasoning,
@@ -77,6 +81,29 @@ MAX_FACES_PER_FRAME = 32
 CONTENT_BOX_WIDTH = 160
 
 
+# Face detection runs on a few threads while FFmpeg keeps decoding. YuNet
+# barely uses a second core by itself; separate detectors scale nearly
+# linearly. One pool is shared by concurrent clips to bound total CPU.
+DETECTION_WORKERS = max(1, min(4, (os.cpu_count() or 2) // 2))
+MAX_PENDING_DETECTIONS = 4 * DETECTION_WORKERS
+# How long the single-pass analysis waits for a frame's scan timestamp.
+SCAN_OUTPUT_WAIT_S = 30
+# The scan reads every frame, but frames closer together than this are not
+# streamed for face analysis (a 60 fps source sends every other frame).
+# Integer microseconds, so the reader reproduces FFmpeg's choice exactly.
+MIN_STREAMED_GAP_US = 24500
+_detection_pool: Optional[ThreadPoolExecutor] = None
+_detection_pool_lock = threading.Lock()
+
+
+def detection_pool() -> ThreadPoolExecutor:
+    global _detection_pool
+    with _detection_pool_lock:
+        if _detection_pool is None:
+            _detection_pool = ThreadPoolExecutor(DETECTION_WORKERS, thread_name_prefix="face-detection")
+        return _detection_pool
+
+
 def analysis_dimensions(width: int, height: int) -> tuple[int, int]:
     validate_video_dimensions(width, height)
     scale = min(ANALYSIS_WIDTH / width, MAX_ANALYSIS_HEIGHT / height)
@@ -93,6 +120,9 @@ MIN_SHOT_MS = 1200
 # need a longer hold: looking away must not be mistaken for a scene change.
 LAYOUT_CHANGE_MS = 500
 LAYOUT_CHANGE_SAMPLES = 3
+# Samples carry their frame's true time, up to half a frame from the 250 ms
+# grid, so three of them can span slightly less than 500 ms at 20-30 fps.
+SAMPLE_JITTER_MS = 50
 
 # A face track must be visible in this share of a shot's frames to count.
 MIN_TRACK_PRESENCE = 0.35
@@ -393,7 +423,7 @@ def content_boundaries(frames: list[FrameInfo]) -> list[int]:
         if pending and not same_content(frame.content_box, pending[0].content_box):
             pending = []
         pending.append(frame)
-        if len(pending) >= LAYOUT_CHANGE_SAMPLES and frame.t_ms - pending[0].t_ms >= LAYOUT_CHANGE_MS:
+        if len(pending) >= LAYOUT_CHANGE_SAMPLES and frame.t_ms - pending[0].t_ms >= LAYOUT_CHANGE_MS - SAMPLE_JITTER_MS:
             cuts.append(pending[0].t_ms)
             current, pending = frame.content_box, []
     return cuts
@@ -518,7 +548,7 @@ def split_layout_segments(
             pending, pending_start, count = evidence, frame.t_ms, 0
         count += 1
         hold_ms = MIN_SHOT_MS if evidence == LayoutType.SCREEN else LAYOUT_CHANGE_MS
-        if count >= LAYOUT_CHANGE_SAMPLES and frame.t_ms - pending_start >= hold_ms:
+        if count >= LAYOUT_CHANGE_SAMPLES and frame.t_ms - pending_start >= hold_ms - SAMPLE_JITTER_MS:
             if current is not None and pending_start > cuts[-1]:
                 cuts.append(pending_start)
                 if boundaries is not None:
@@ -921,12 +951,12 @@ def expanded_webcam_intervals(
                    and (face.cx < .3 or face.cx > .7)
                    and (face.cy < .4 or face.cy > .6))
         if not compact or (run and _overlay_moved(face, run[0][1])):
-            if len(run) >= LAYOUT_CHANGE_SAMPLES and run[-1][0] - run[0][0] >= LAYOUT_CHANGE_MS:
+            if len(run) >= LAYOUT_CHANGE_SAMPLES and run[-1][0] - run[0][0] >= LAYOUT_CHANGE_MS - SAMPLE_JITTER_MS:
                 runs.append(run)
             run = []
         if compact:
             run.append((frame.t_ms, face))
-    if len(run) >= LAYOUT_CHANGE_SAMPLES and run[-1][0] - run[0][0] >= LAYOUT_CHANGE_MS:
+    if len(run) >= LAYOUT_CHANGE_SAMPLES and run[-1][0] - run[0][0] >= LAYOUT_CHANGE_MS - SAMPLE_JITTER_MS:
         runs.append(run)
     if not runs:
         return []
@@ -949,7 +979,7 @@ def expanded_webcam_intervals(
         if count == 0:
             pending_start = frame.t_ms
         count += 1
-        if count >= LAYOUT_CHANGE_SAMPLES and frame.t_ms - pending_start >= LAYOUT_CHANGE_MS:
+        if count >= LAYOUT_CHANGE_SAMPLES and frame.t_ms - pending_start >= LAYOUT_CHANGE_MS - SAMPLE_JITTER_MS:
             if evidence:
                 start = pending_start
             else:
@@ -1115,6 +1145,105 @@ def apply_style(shot: ShotLayout, style: str, src_w: int, src_h: int) -> ShotLay
     return shot
 
 
+def evenly(items: list, count: int) -> list:
+    """`count` items spread evenly over the list (its first and last included)."""
+    if count <= 0:
+        return []
+    if len(items) <= count:
+        return list(items)
+    if count == 1:
+        return [items[len(items) // 2]]
+    return [items[round(i * (len(items) - 1) / (count - 1))] for i in range(count)]
+
+
+def retain_keyframes(
+    regular: list[tuple[float, bytes]], cuts: list[tuple[float, bytes]],
+    limit: int = MAX_RETAINED_KEYFRAMES, max_bytes: int = MAX_KEYFRAME_BYTES,
+) -> list[tuple[float, bytes]]:
+    """At most `limit` keyframes spread over the WHOLE window.
+
+    Images at camera changes are kept ahead of regular samples (a short shot
+    may have no other image); each kind is thinned evenly across time, never
+    by dropping the end of a long window.
+    """
+    cut_quota = min(len(cuts), max(limit // 2, limit - len(regular)))
+    kept = sorted(evenly(cuts, cut_quota) + evenly(regular, limit - cut_quota), key=lambda k: k[0])
+    while len(kept) > 1 and sum(len(image) for _, image in kept) > max_bytes:
+        kept = evenly(kept, len(kept) // 2)
+    return kept
+
+
+class _EvenSample:
+    """Bounded, evenly spaced subset of a stream of unknown length."""
+
+    def __init__(self, capacity: int):
+        self.capacity, self.stride, self.seen = capacity, 1, 0
+        self._items: list = []
+
+    def add(self, make):
+        if self.seen % self.stride == 0:
+            self._items.append(make())
+            if len(self._items) >= self.capacity:
+                self._items, self.stride = self._items[::2], self.stride * 2
+        self.seen += 1
+
+    def items(self) -> list:
+        return list(self._items)
+
+
+def _bgr(image):
+    """BGR copy of a planar I420 frame (height * 3/2 rows); BGR passes through."""
+    return cv2.cvtColor(image, cv2.COLOR_YUV2BGR_I420) if image.ndim == 2 else image
+
+
+def _jpeg(image) -> bytes:
+    ok, encoded = cv2.imencode(".jpg", _bgr(image), [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ok:
+        raise MediaProcessError("Layout keyframe could not be encoded")
+    return encoded.tobytes()
+
+
+class _Detections:
+    """Face detection for decoded frames on the shared pool, bounded in flight.
+
+    Each worker thread keeps its own detector. Results come back in time
+    order; leaving the block early cancels queued work.
+    """
+
+    def __init__(self, analyzer: "LayoutAnalyzer", width: int, height: int):
+        self.analyzer, self.width, self.height = analyzer, width, height
+        self._futures: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        for future in self._futures:
+            future.cancel()
+        return False
+
+    def _detect(self, image, t_ms):
+        if image.ndim == 2:
+            image = _bgr(image)
+        detector = self.analyzer._get_detector(self.width, self.height)
+        return self.analyzer._frame_info(image, t_ms, detector, self.width, self.height)
+
+    def submit(self, image, t_ms):
+        """Queue a BGR image, or a planar I420 one (converted on the worker)."""
+        waiting = [f for f in self._futures[-MAX_PENDING_DETECTIONS:] if not f.done()]
+        if len(waiting) >= MAX_PENDING_DETECTIONS:
+            waiting[0].result()
+        self._futures.append(detection_pool().submit(self._detect, image, t_ms))
+
+    def pending(self) -> bool:
+        return any(not f.done() for f in self._futures)
+
+    def results(self) -> list[FrameInfo]:
+        frames = [future.result() for future in self._futures]
+        self._futures = []
+        return sorted(frames, key=lambda f: f.t_ms)
+
+
 # ------------------------------------------------------------------
 # Vision refinement
 # ------------------------------------------------------------------
@@ -1263,11 +1392,15 @@ class LayoutAnalyzer:
         vision: bool = True,
         capture: bool = False,
         progress=None,
+        precise: Optional[bool] = None,
     ) -> Optional[ClipLayoutPlan]:
         """Plan the framing for the render window [start_ms, start_ms + duration_ms).
 
         `vision=False` skips the paid vision model: heuristics only, used when
         the plan only informs pacing (Classic style, 16:9 output).
+        `precise` (default: same as `vision`) scans every frame for camera
+        changes in the same decode as face sampling, to place cuts on exact
+        frames. Pacing-only plans do not need it.
         """
         if style == LayoutStyle.FIT:
             return ClipLayoutPlan(
@@ -1279,23 +1412,27 @@ class LayoutAnalyzer:
             return None
 
         loop = asyncio.get_running_loop()
-        if progress:
-            progress('Sampling faces', None)
-        frames, keyframes = await loop.run_in_executor(
-            None, self._decode_and_detect, video_path, start_ms, duration_ms, src_w, src_h,
-        )
+        scan = decoded = None
+        if vision if precise is None else precise:
+            # One decode samples faces, scans every frame for camera changes
+            # and examines the frames around them. If it cannot run, sample
+            # faces exactly as before.
+            try:
+                decoded = await loop.run_in_executor(
+                    None, self._precise_frames, video_path, start_ms, duration_ms, src_w, src_h, progress)
+            except (OSError, ValueError, MediaProcessError):
+                logger.warning("Detailed camera analysis unavailable; sampling faces only")
+        if decoded is None:
+            if progress:
+                progress('Sampling faces', None)
+            frames, keyframes = await loop.run_in_executor(
+                None, self._decode_and_detect, video_path, start_ms, duration_ms, src_w, src_h,
+            )
+        else:
+            scan, frames, keyframes = decoded
         if not frames:
             logger.warning("Layout analysis decoded no frames; using letterbox")
             return None
-
-        # Keep the cheap regular analysis, then examine likely transitions at
-        # source-frame precision. Failures retain the established heuristic plan.
-        scan = None
-        try:
-            scan, frames, keyframes = await loop.run_in_executor(
-                None, self._precise_frames, video_path, start_ms, duration_ms, src_w, src_h, frames, keyframes, progress)
-        except (OSError, ValueError, MediaProcessError):
-            logger.warning("Detailed camera analysis unavailable; retaining sampled layout evidence")
 
         shots: list[ShotLayout] = []
         vision_cost = 0.0
@@ -1478,7 +1615,7 @@ class LayoutAnalyzer:
             if (face is None and (not vision or not start <= mid < end)
                     and len(speaker_frames) >= LAYOUT_CHANGE_SAMPLES
                     and len(speaker_frames) >= 0.7 * len(local_frames)
-                    and speaker_frames[-1].t_ms - speaker_frames[0].t_ms >= LAYOUT_CHANGE_MS):
+                    and speaker_frames[-1].t_ms - speaker_frames[0].t_ms >= LAYOUT_CHANGE_MS - SAMPLE_JITTER_MS):
                 expanded.append((start, end))
         merged = []
         for start, end in sorted(expanded):
@@ -1546,15 +1683,13 @@ class LayoutAnalyzer:
             "-vf", f"fps={ANALYSIS_FPS},scale={width}:{height}",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
         ]
-        detector = self._get_detector(width, height)
         frame_bytes = width * height * 3
-        frames: list[FrameInfo] = []
         keyframes: list[tuple[int, bytes]] = []
         keyframe_every = max(1, int(round(ANALYSIS_FPS / KEYFRAME_FPS)),
                              math.ceil(frame_limit / MAX_RETAINED_KEYFRAMES))
         keyframe_bytes = 0
 
-        with media_process(cmd, timeout=30 * 60) as (proc, _stderr):
+        with _Detections(self, width, height) as detections, media_process(cmd, timeout=30 * 60) as (proc, _stderr):
             index = 0
             while True:
                 raw = proc.stdout.read(frame_bytes)
@@ -1567,7 +1702,7 @@ class LayoutAnalyzer:
                 image = np.frombuffer(raw, np.uint8).reshape(height, width, 3)
                 t_ms = int(index * 1000 / ANALYSIS_FPS)
 
-                frames.append(self._frame_info(image, t_ms, detector, width, height))
+                detections.submit(image, t_ms)
 
                 if index % keyframe_every == 0:
                     ok, jpg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -1578,6 +1713,7 @@ class LayoutAnalyzer:
                         keyframe_bytes += len(encoded)
                         keyframes.append((t_ms, encoded))
                 index += 1
+            frames = detections.results()
         if proc.returncode:
             raise MediaProcessError("Layout decoding failed")
         return frames, keyframes
@@ -1600,74 +1736,164 @@ class LayoutAnalyzer:
         return FrameInfo(t_ms=t_ms, faces=boxes, hist=hist, scores=scores,
                         content_box=detect_content_box(image))
 
+    def _precise_frames(self, video_path, start_ms, duration_ms, src_w, src_h, progress=None):
+        """Sample faces, scan every frame for camera changes, and examine the
+        frames that decide each change, all from ONE decode of the window.
 
-    def _precise_frames(self, video_path, start_ms, duration_ms, src_w, src_h, frames, keyframes, progress=None):
-        from .camera_scan import scan_camera_changes
-        from .layout_precision import detail_indices, select_expression
-        scan = scan_camera_changes(video_path, start_ms, start_ms + duration_ms,
-            progress=(lambda p: progress('Scanning camera changes', p)) if progress else None)
-        # Include low-score visual changes and changes in sampled face geometry.
-        hints = [m['at_ms'] for m in sorted(scan['markers'], key=lambda m: -m['score'])]
-        face_hints = []
-        for a, b in zip(frames, frames[1:]):
-            if frame_layout_evidence(a) != frame_layout_evidence(b) or (len(a.faces) == len(b.faces) == 1 and
-                (abs(a.faces[0].cx - b.faces[0].cx) > .15 or abs(a.faces[0].h - b.faces[0].h) > .08)):
-                face_hints.append(start_ms + (a.t_ms + b.t_ms) / 2)
-        indices = detail_indices(scan, list(dict.fromkeys(face_hints + hints)))
-        if not indices:
-            return scan, frames, keyframes
+        FFmpeg decodes once and splits the picture: a 320-px branch prints the
+        camera scan's timestamps and scene scores (the same chain as
+        scan_camera_changes, so the scan is identical), and an analysis-size
+        branch streams frames here: every frame up to ~40 fps, fewer above.
+        The reader applies the same integer rule to the scan's timestamps, so
+        every streamed frame is matched to its scan record and exact time.
+
+        Face samples are the frames nearest each 1/ANALYSIS_FPS tick, labelled
+        with their true time. Around a camera change only the frames
+        DetailSelector picks are analyzed. Detection runs on a small thread
+        pool while decoding continues.
+
+        Returns (scan or None, frames, keyframes). Raises only when the decode
+        itself fails; an unusable scan is dropped and sampling is kept.
+        """
+        from .camera_scan import SCAN_FILTER, ScanParser, check_frame_budget, filter_path, scan_window
+        from .layout_precision import DetailSelector
         width, height = analysis_dimensions(src_w, src_h)
-        # Bound decoding at the input. An output-only -t cannot stop when
-        # select emits no frame at the endpoint, so it may scan the whole source.
-        cmd = ['ffmpeg', '-nostdin', '-v', 'error', '-ss', f"{scan['start_ms']/1000:.6f}",
-               '-t', f"{(scan['end_ms']-scan['start_ms'])/1000:.6f}",
-               '-protocol_whitelist', 'file,pipe,fd', '-format_whitelist', 'mov,matroska,webm,avi,flv,mpegts', '-i', video_path,
-               '-map', '0:v:0', '-an', '-sn', '-dn',
-               '-vf', f"select='{select_expression(indices)}',scale={width}:{height}",
-               '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-']
-        detailed, images = [], []
-        image_bytes = 0
-        detector = self._get_detector(width, height)
-        size = width * height * 3
-        with media_process(cmd, timeout=30 * 60) as (proc, _):
-            for position, index in enumerate(indices):
-                if progress and position % 25 == 0:
-                    progress("Refining face tracking", round(100 * position / len(indices)))
-                raw = proc.stdout.read(size)
-                if len(raw) != size:
-                    raise MediaProcessError('Incomplete precise layout frame')
-                at = scan['frames'][index] - start_ms
-                if not 0 <= at < duration_ms:
-                    continue
-                image = np.frombuffer(raw, np.uint8).reshape(height, width, 3)
-                detailed.append(self._frame_info(image, at, detector, width, height))
-                # One image just after each suggested cut supports short-shot
-                # classification without borrowing an image from the previous shot.
-                if any(0 <= start_ms + at - m['at_ms'] < 1 for m in scan['markers']) and len(images) < MAX_RETAINED_KEYFRAMES:
-                    ok, jpg = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    if ok:
-                        encoded = jpg.tobytes()
-                        image_bytes += len(encoded)
-                        if image_bytes > MAX_KEYFRAME_BYTES:
-                            raise MediaProcessError('Layout keyframes exceed the size limit')
-                        images.append((at, encoded))
-            if proc.stdout.read(1):
-                raise MediaProcessError('Unexpected precise layout frame')
-        if proc.returncode:
-            raise MediaProcessError('Precise layout decoding failed')
-        # Replace nearby approximate samples, which can otherwise place the old
-        # camera on the new side of a real cut.
-        precise_times = [f.t_ms for f in detailed]
-        def near(times, t, distance):
-            i = bisect_left(times, t)
-            return any(abs(t-v) <= distance for v in times[max(0, i-1):i+1])
-        combined = [f for f in frames if not near(precise_times, f.t_ms, 125)] + detailed
-        image_times = sorted(t for t, _ in images)
-        combined_images = [k for k in keyframes if not near(image_times, k[0], 250)] + images
-        combined_images = sorted(combined_images)[:MAX_RETAINED_KEYFRAMES]
-        if sum(len(image) for _, image in combined_images) > MAX_KEYFRAME_BYTES:
-            raise MediaProcessError('Layout keyframes exceed the size limit')
-        return scan, sorted(combined, key=lambda f: f.t_ms), combined_images
+        if not 0 < duration_ms <= MAX_ANALYSIS_DURATION_MS or start_ms < 0:
+            raise MediaProcessError("Layout analysis window exceeds supported limits")
+        scan_start, scan_end = scan_window(start_ms, start_ms + duration_ms)
+        check_frame_budget(video_path, scan_start, scan_end)
+        frame_limit = min(MAX_ANALYSIS_FRAMES, math.ceil(duration_ms / 1000 * ANALYSIS_FPS) + 1)
+        keyframe_every = max(1, int(round(ANALYSIS_FPS / KEYFRAME_FPS)),
+                             math.ceil(frame_limit / MAX_RETAINED_KEYFRAMES))
+        step = 1000 / ANALYSIS_FPS
+        # Every frame crosses the pipe, so stream compact I420 and convert only
+        # the frames that are analyzed.
+        frame_bytes = width * height * 3 // 2
+        parser = ScanParser(scan_start, scan_end, strict=False)
+        selector = DetailSelector(duration_ms)
+        regular: list[tuple[float, bytes]] = []
+        cuts = _EvenSample(2 * MAX_RETAINED_KEYFRAMES)
+        with tempfile.TemporaryDirectory(prefix="bridgeclip-scan-") as folder:
+            scan_path = os.path.join(folder, "scan.txt")
+            open(scan_path, "xb").close()
+            graph = (f"[0:v:0]settb=1/1000000,split=2[scan][frames];"
+                     f"[scan]{SCAN_FILTER},metadata=mode=print:direct=1:file={filter_path(scan_path)},nullsink;"
+                     f"[frames]select='isnan(prev_selected_pts)+gte(pts-prev_selected_pts,{MIN_STREAMED_GAP_US})',"
+                     f"scale={width}:{height}[analysis]")
+            cmd = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{scan_start / 1000:.6f}",
+                   "-t", f"{(scan_end - scan_start) / 1000:.6f}", *MEDIA_INPUT_OPTIONS, "-i", video_path,
+                   "-filter_complex", graph, "-map", "[analysis]", "-an", "-sn", "-dn",
+                   "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]
+            with open(scan_path, "rb") as scan_output, _Detections(self, width, height) as detections, \
+                    media_process(cmd, timeout=30 * 60) as (proc, _):
+                def wait_for(index):
+                    """Block until scan record `index` (timestamp and score) is read."""
+                    waited = None
+                    while parser.complete <= index:
+                        data = scan_output.read(65536)
+                        if data:
+                            parser.feed(data)
+                            continue
+                        if proc.poll() is not None:
+                            parser.feed(scan_output.read())
+                            parser.finish()
+                            if parser.complete <= index:
+                                raise MediaProcessError("Camera scan is missing frames")
+                            break
+                        waited = waited or time.monotonic()
+                        if time.monotonic() - waited > SCAN_OUTPUT_WAIT_S:
+                            raise MediaProcessError("Camera scan output stalled")
+                        time.sleep(.0005)
+
+                record, streamed_pts = 0, math.nan
+                def streamed(pts):
+                    # FFmpeg: isnan(prev_selected_pts) + gte(pts - prev_selected_pts, gap)
+                    return math.isnan(streamed_pts) or (pts is not None and pts - streamed_pts >= MIN_STREAMED_GAP_US)
+
+                def next_streamed():
+                    """Scan record of the next streamed frame, and the highest
+                    in-window scene score among the records skipped before it."""
+                    nonlocal record, streamed_pts
+                    skipped = None
+                    while True:
+                        wait_for(record)
+                        pts, score, at = parser.pts[record], parser.scores[record], parser.records[record]
+                        record += 1
+                        if streamed(pts):
+                            streamed_pts = math.nan if pts is None else pts
+                            return record - 1, skipped
+                        if at is not None and score is not None and 0 < at - start_ms < duration_ms:
+                            skipped = score if skipped is None else max(skipped, score)
+
+                analyzed: set[int] = set()
+                samples = 0
+                def analyze_frame(index, t, image):
+                    if index not in analyzed:
+                        analyzed.add(index)
+                        detections.submit(image, t)
+
+                previous = None  # (index, t, image) of the last usable frame
+                tick, index, reported = 0.0, 0, 0
+                while raw := proc.stdout.read(frame_bytes):
+                    if len(raw) != frame_bytes:
+                        raise MediaProcessError("Incomplete layout analysis frame")
+                    current, skipped = next_streamed()
+                    at, score = parser.records[current], parser.scores[current]
+                    if skipped is not None:
+                        # A change on a frame that was not streamed starts on
+                        # this one, at most one frame later.
+                        score = skipped if score is None else max(score, skipped)
+                    t = None if at is None else round(at - start_ms, 3)
+                    if t is None or t >= duration_ms:
+                        index += 1
+                        continue
+                    image = np.frombuffer(raw, np.uint8).reshape(height * 3 // 2, width)
+                    if t >= 0:
+                        # Face samples: the frame nearest each tick, never a duplicate.
+                        while tick < duration_ms and tick <= t:
+                            nearest = previous if previous is not None and previous[1] >= 0 and tick - previous[1] <= t - tick else (index, t, image)
+                            if nearest[0] not in analyzed:
+                                if samples >= frame_limit:
+                                    raise MediaProcessError("Layout analysis exceeds the frame limit")
+                                analyze_frame(*nearest)
+                                if samples % keyframe_every == 0:
+                                    regular.append((nearest[1], _jpeg(nearest[2])))
+                                samples += 1
+                            tick += step
+                        take_previous, take_current, change = selector.select(
+                            t, score, previous[1] if previous is not None else None)
+                        if take_previous:
+                            analyze_frame(*previous)
+                        if take_current:
+                            analyze_frame(index, t, image)
+                        if change:
+                            # The first frame of each camera change: a keyframe
+                            # for short shots, which regular samples can miss.
+                            cuts.add(lambda image=image, t=t: (t, _jpeg(image)))
+                        if progress:
+                            percent = min(99, int(100 * t / duration_ms))
+                            if percent >= reported + 5:
+                                reported = percent
+                                progress("Sampling faces", percent)
+                    previous = (index, t, image)
+                    index += 1
+                if previous is not None and previous[1] >= 0 and tick < duration_ms and previous[0] not in analyzed:
+                    analyze_frame(*previous)
+                    if samples % keyframe_every == 0:
+                        regular.append((previous[1], _jpeg(previous[2])))
+                if proc.wait():
+                    raise MediaProcessError("Layout decoding failed")
+                parser.feed(scan_output.read())
+                parser.finish()
+                if any(streamed(pts) for pts in parser.pts[record:]):
+                    raise MediaProcessError("Camera scan and analysis frames differ")
+                if progress and detections.pending():
+                    progress("Refining face tracking", None)
+                frames = detections.results()
+        if selector.capped:
+            logger.info("Camera change details reached their frame budget; later changes use sampled faces")
+        scan = parser.result() if parser.usable and parser.frames else None
+        return scan, frames, retain_keyframes(regular, cuts.items())
 
     def _get_detector(self, width: int, height: int):
         detector = getattr(self._local, "detector", None)

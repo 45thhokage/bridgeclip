@@ -211,8 +211,8 @@ class TestPacingWithoutSmartFraming:
     def analyze_returning(self, monkeypatch, svc, plan_for):
         calls: list = []
 
-        async def analyze(video, start, window_ms, w, h, style, vision=True):
-            calls.append({"style": style, "vision": vision})
+        async def analyze(video, start, window_ms, w, h, style, vision=True, precise=None):
+            calls.append({"style": style, "vision": vision, "precise": vision if precise is None else precise})
             return plan_for(window_ms)
 
         monkeypatch.setattr(svc.layout_analyzer, "analyze", analyze)
@@ -230,7 +230,8 @@ class TestPacingWithoutSmartFraming:
             transcript_segments=paused_transcript(), layout_style=style, aspect_ratio=aspect,
         )
         result = render(plain_service, request)
-        assert calls == [{"style": "auto", "vision": False}]
+        # Pacing-only analysis: no paid vision and no every-frame camera scan.
+        assert calls == [{"style": "auto", "vision": False, "precise": False}]
         # Four 1.5s pauses cut down to a 260ms breath each.
         assert result.removed_ms >= 4 * 1000
         assert result.layout_type == "fit" and result.layout_cost_usd == 0.0

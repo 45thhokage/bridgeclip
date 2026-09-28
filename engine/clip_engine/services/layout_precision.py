@@ -1,34 +1,64 @@
 """Bounded, local refinement of layout boundaries using decoded source frames."""
 from bisect import bisect_left, bisect_right
+from typing import Optional
+
+from .camera_scan import MIN_SCORE
 
 MAX_DETAIL_FRAMES = 6000
-MAX_HINTS = 160
+# confirmed_cuts accepts a change this strong on its score alone.
+STRONG_CUT_SCORE = .15
+# Face evidence confirmed_cuts reads around a weaker change.
+BEFORE_MS = 250
+AFTER_MS = 350
 
 
-def detail_indices(scan, hints):
-    """Only run additional face detection around likely changes, not every frame."""
-    times = scan['frames']
-    selected = set()
-    for t in hints[:MAX_HINTS]:
-        selected.update(range(bisect_left(times, t - 300), bisect_right(times, t + 350)))
-    if len(selected) > MAX_DETAIL_FRAMES:
-        raise ValueError('Too many detailed layout frames')
-    return sorted(selected)
+class DetailSelector:
+    """Choose, while decoding, the few source frames that decide each camera change.
 
+    A strong visual cut is accepted on its score alone, so only its first frame
+    is analyzed (exact face samples and a keyframe for the new shot). A weaker
+    change is decided by face evidence: the frame before it plus frames about
+    a third and two thirds into the following AFTER_MS, which with the cut
+    frame are the three stable observations confirmed_cuts needs.
 
-def select_expression(indices):
-    # Balanced expressions avoid FFmpeg's parser depth limit on long sums.
-    runs = []
-    for n in indices:
-        if runs and n == runs[-1][1] + 1:
-            runs[-1][1] = n
-        else:
-            runs.append([n, n])
-    terms = [f'between(n,{a},{b})' for a, b in runs]
-    while len(terms) > 1:
-        terms = [f'({terms[i]}+{terms[i+1]})' if i + 1 < len(terms) else terms[i]
-                 for i in range(0, len(terms), 2)]
-    return terms[0] if terms else '0'
+    Frames are chosen in time order within a hard budget. Past it no more
+    detection work is added (it never raises): markers still align layout
+    boundaries, and strong cuts are still accepted.
+    """
+
+    def __init__(self, duration_ms: float, budget: int = MAX_DETAIL_FRAMES):
+        self.duration_ms, self.budget = duration_ms, budget
+        self.used = 0
+        self.capped = False
+        self._targets: list[tuple[float, float]] = []  # (earliest, latest) time
+
+    def _take(self, count: int) -> bool:
+        if self.used + count > self.budget:
+            self.capped = True
+            return False
+        self.used += count
+        return True
+
+    def select(self, t: float, score: Optional[float], previous_t: Optional[float]) -> tuple[bool, bool, bool]:
+        """(analyze the previous frame, analyze this frame, this frame starts a change)."""
+        take_previous = take_current = False
+        due = [target for target in self._targets if target[0] <= t]
+        if due:
+            self._targets = [target for target in self._targets if target[0] > t]
+            if any(t <= latest for _, latest in due) and self._take(1):
+                take_current = True
+        marker = score is not None and score >= MIN_SCORE and 0 < t < self.duration_ms
+        if not marker:
+            return take_previous, take_current, False
+        if score >= STRONG_CUT_SCORE:
+            if not take_current and self._take(1):
+                take_current = True
+            return take_previous, take_current, True
+        has_previous = previous_t is not None and 0 <= previous_t and t - previous_t <= BEFORE_MS
+        if self._take(int(has_previous) + int(not take_current)):
+            take_previous, take_current = has_previous, True
+            self._targets += [(t + AFTER_MS / 3, t + AFTER_MS), (t + AFTER_MS * 2 / 3, t + AFTER_MS)]
+        return take_previous, take_current, True
 
 
 def confirmed_cuts(markers, frames, duration_ms, evidence):
@@ -44,8 +74,8 @@ def confirmed_cuts(markers, frames, duration_ms, evidence):
         if any(abs(t - other['at_ms']) < 150 for other in markers[max(0, i-1):i+2] if other is not marker and other['score'] >= max(.12, score * .6)):
             continue
         first = bisect_left(times, t)
-        before = frames[bisect_left(times, t - 250):first]
-        after = frames[first:bisect_right(times, t + 350)]
+        before = frames[bisect_left(times, t - BEFORE_MS):first]
+        after = frames[first:bisect_right(times, t + AFTER_MS)]
         stable = len(after) >= 3 and after[-1].t_ms - after[0].t_ms >= 180
         changed = False
         if before and stable:
@@ -58,7 +88,7 @@ def confirmed_cuts(markers, frames, duration_ms, evidence):
                 jump = abs(a.cx - b.cx) > .22 or abs(a.cy - b.cy) > .22 or max(a.h, b.h) / max(.001, min(a.h, b.h)) > 1.8
                 settled = all(abs(f.faces[0].cx - b.cx) < .05 and abs(f.faces[0].cy - b.cy) < .05 and abs(f.faces[0].h - b.h) < .05 for f in after)
                 changed = jump and settled
-        if score >= .15 or changed:
+        if score >= STRONG_CUT_SCORE or changed:
             if not accepted or t - accepted[-1] >= 150:
                 accepted.append(t)
     return accepted

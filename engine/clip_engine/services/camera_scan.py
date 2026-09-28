@@ -81,7 +81,7 @@ class ScanParser:
 
     `records` holds one entry per decoded frame, in decode output order: its
     time, or None when it is outside [start, end) or not after the previous
-    frame. Strict parsing raises on any budget or validity problem (a camera
+    frame; `pts` holds its raw microsecond timestamp. Strict parsing raises on any budget or validity problem (a camera
     scan the user asked for). Lenient parsing only marks the scan unusable
     and keeps timing every frame, for a caller that needs the timestamps.
     """
@@ -91,6 +91,7 @@ class ScanParser:
         self.frames: list[float] = []
         self.markers: list[dict] = []
         self.records: list[Optional[float]] = []
+        self.pts: list[Optional[int]] = []
         self.scores: list[Optional[float]] = []
         # Records whose score line was read (or that a later frame closed).
         self.complete = 0
@@ -126,11 +127,13 @@ class ScanParser:
         if line.startswith('frame:'):
             self.complete = len(self.records)
             match = _FRAME_LINE.match(line + ' ')
-            at = round(self.start_ms + int(match[1]) / 1000, 3) if match else None
+            pts = int(match[1]) if match else None
+            at = None if pts is None else round(self.start_ms + pts / 1000, 3)
             # [start, end): a frame exactly at the end belongs to the next window.
             if at is not None and (at < self.start_ms or at >= self.end_ms or (self._last is not None and at <= self._last)):
                 at = None
             self.records.append(at)
+            self.pts.append(pts)
             self.scores.append(None)
             if at is not None:
                 self._last = at

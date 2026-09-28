@@ -391,3 +391,12 @@ def test_dropout_between_different_people_holds_only_the_first():
     shots = bridge_face_dropouts([left, gap, right], {0, 9000})
     assert [(s.start_ms, s.end_ms) for s in shots] == [(0, 6000), (6000, 9000)]
     assert shots[0].focus_path == [(0, .17, .35)]
+
+
+def test_exact_time_samples_at_25_fps_still_confirm_three_observation_changes():
+    # Precise sampling labels each tick with its nearest real frame (40 ms
+    # grid): 760, 1000, 1240 span 480 ms, still three sustained observations.
+    ticks = [min((round(n * 40.0, 3) for n in range(400)), key=lambda t: (abs(t - tick), t)) for tick in range(0, 4000, 250)]
+    frames = [FrameInfo(t, [HEAD] if 760 <= t < 1400 else [CAM_FACE], np.zeros((24, 16), np.float32)) for t in ticks]
+    assert ticks[3:7] == [760.0, 1000.0, 1240.0, 1480.0]
+    assert split_layout_segments(frames, 0, 4000) == [(0, 760.0), (760.0, 1480.0), (1480.0, 4000)]

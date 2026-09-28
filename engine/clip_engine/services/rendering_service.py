@@ -605,7 +605,8 @@ class RenderingService:
             return await self.layout_analyzer.analyze(
                 request.video_path, window_start_ms, window_ms, source_w, source_h, request.layout_style,
                 **({"capture": True} if request.debug_capture else {}),
-                **({'progress': lambda detail, percent: request.progress_callback(f'{detail} {percent}%', None)} if request.progress_callback else {}),
+                **({'progress': lambda detail, percent: request.progress_callback(
+                    detail if percent is None else f'{detail} {percent}%', None)} if request.progress_callback else {}),
             )
         except Exception as e:
             logger.warning(f"Layout analysis failed, falling back to letterbox: {e}", exc_info=True)
@@ -619,11 +620,15 @@ class RenderingService:
         window_start_ms: int,
         window_ms: int,
     ) -> Optional[ClipLayoutPlan]:
-        """Heuristic shot analysis for pacing only (no paid vision call). None if unavailable."""
+        """Heuristic shot analysis for pacing only (no paid vision call). None if unavailable.
+
+        Pacing needs to know what is on screen, not exact camera cuts, so the
+        every-frame camera scan is skipped (16:9 output, Classic style).
+        """
         try:
             return await self.layout_analyzer.analyze(
                 request.video_path, window_start_ms, window_ms, source_w, source_h, LayoutStyle.AUTO, vision=False,
-                **({"capture": True} if request.debug_capture else {}),
+                precise=False, **({"capture": True} if request.debug_capture else {}),
             )
         except Exception as e:
             logger.warning(f"Content analysis for pacing failed; using the default pause limit: {e}", exc_info=True)
