@@ -82,6 +82,9 @@ export interface BridgeClipAPI {
     /** Status counts only; cheap enough for list rows and polling. */
     progress: (path: string) => Promise<EditorProgressSummary>
     freeMedia: (path: string, revision: number) => Promise<EditorSession>
+    /** Main asks the open editor to save before a close or quit continues. */
+    onSaveBeforeClose: (callback: () => void) => () => void
+    closeReady: (saved: boolean) => Promise<void>
   }
   edits: { inspect: (outputDir: string) => Promise<EditAudit> }
   models: { list: (refresh?: boolean) => Promise<OpenRouterCatalog> }
@@ -233,7 +236,9 @@ const api: BridgeClipAPI = {
     cancel: (path) => ipcRenderer.invoke('editor:cancel', path),
     replaceSource: (path, revision, replacement) => ipcRenderer.invoke('editor:replaceSource', path, revision, replacement),
     progress: (path) => ipcRenderer.invoke('editor:progress', path),
-    freeMedia: (path, revision) => ipcRenderer.invoke('editor:freeMedia', path, revision)
+    freeMedia: (path, revision) => ipcRenderer.invoke('editor:freeMedia', path, revision),
+    onSaveBeforeClose: (callback) => subscribe<void>('editor:saveBeforeClose', () => callback()),
+    closeReady: (saved) => ipcRenderer.invoke('editor:closeReady', saved)
   },
   edits: { inspect: (outputDir) => ipcRenderer.invoke('edits:inspect', outputDir) },
   models: { list: (refresh = false) => ipcRenderer.invoke('models:list', refresh) },

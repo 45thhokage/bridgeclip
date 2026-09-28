@@ -1,5 +1,5 @@
-import { stopEditorsForQuit } from './clip-editor'
-import { app, BrowserWindow, nativeTheme, shell, protocol } from 'electron'
+import { awaitEditorSaveBeforeClose, stopEditorsForQuit } from './clip-editor'
+import { app, BrowserWindow, dialog, nativeTheme, shell, protocol } from 'electron'
 import { extname, join } from 'path'
 import { mkdirSync } from 'fs'
 import { Readable } from 'stream'
@@ -77,6 +77,24 @@ function refreshDevDockIcon(): void {
   if (is.dev && !hiddenForTests) app.dock?.setIcon(devIcon)
 }
 
+// What a close blocked by unsaved editor changes should resume after saving.
+let closeIntent: 'quit' | 'close' | null = null
+app.on('before-quit', () => { closeIntent = 'quit' })
+
+function unsavedEditsChoice(window: BrowserWindow): 'save' | 'discard' | 'cancel' {
+  if (hiddenForTests) {
+    // A native dialog would hang scripted runs; tests pick the answer.
+    const choice = process.env.BRIDGECLIP_E2E_UNLOAD_CHOICE
+    return choice === 'save' || choice === 'cancel' ? choice : 'discard'
+  }
+  const response = dialog.showMessageBoxSync(window, {
+    type: 'warning', buttons: ['Save', 'Discard', 'Cancel'], defaultId: 0, cancelId: 2, noLink: true,
+    message: 'Save your clip edits?',
+    detail: 'Your latest changes in the clip editor are not saved yet. If you discard them, the editor reopens at your last save.'
+  })
+  return (['save', 'discard', 'cancel'] as const)[response] ?? 'cancel'
+}
+
 function createWindow(): void {
   // The UI is dark-only; keep the vibrancy material and native menus dark too.
   nativeTheme.themeSource = 'dark'
@@ -122,6 +140,27 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+  })
+
+  // The editor blocks unload while edits are unsaved. Without this handler
+  // Electron silently cancels the close (and a quit), so ask what to do.
+  const window = mainWindow
+  window.on('close', () => { if (closeIntent !== 'quit') closeIntent = 'close' })
+  window.webContents.on('will-prevent-unload', (event) => {
+    const intent = closeIntent ?? 'reload'
+    closeIntent = null
+    const choice = unsavedEditsChoice(window)
+    logger.info('editor.unsavedClose', { intent, choice })
+    if (choice === 'discard') { event.preventDefault(); return }
+    if (choice === 'save') {
+      awaitEditorSaveBeforeClose(() => {
+        if (window.isDestroyed()) return
+        if (intent === 'quit') app.quit()
+        else if (intent === 'close') window.close()
+        else window.webContents.reload()
+      })
+      window.webContents.send('editor:saveBeforeClose')
+    }
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -255,7 +294,8 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+// Stop work only once the quit is certain: an unsaved-edits prompt can still cancel it.
+app.on('will-quit', () => {
   stopEditorsForQuit()
   cancelQueuedJobsForQuit()
   stopAllJobsForQuit()

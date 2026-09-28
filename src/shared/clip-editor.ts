@@ -66,6 +66,8 @@ export interface EditorProgressSummary {
   operation: EditorOperation | null; batch?: EditorBatch; progress?: EditorProgress
 }
 
+/** Main's stale-revision save error. The editor offers "Reload project" for it. */
+export const EDITOR_REVISION_CONFLICT = 'This project changed. Reopen it before saving.'
 /** Fixed worker failure codes (see bridge/editor_runner.py); no tool output crosses the bridge. */
 export const editorErrorCodes = ['duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
   'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable',

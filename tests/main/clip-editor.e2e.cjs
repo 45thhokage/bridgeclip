@@ -683,3 +683,47 @@ test('review editor refines candidates, restores discards, edits captions and ba
   assert.equal(JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'))).source_id, upgraded.source_id)
   assert.deepEqual(errors, [])
 })
+
+test('closing with unsaved edits asks first: Cancel keeps the window, Save writes the edit before closing', { timeout: 90000 }, async (t) => {
+  const tools = editorTools(t)
+  if (!tools) return
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-editor-close-'))
+  const userDataDir = path.join(root, 'user-data'), run = path.join(userDataDir, 'BridgeClip', 'close-run')
+  fs.mkdirSync(run, { recursive: true })
+  execFileSync(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=12', ...tools.encoder, '-pix_fmt', 'yuv420p', path.join(run, 'editor-source.mp4')])
+  fs.copyFileSync(path.join(run, 'editor-source.mp4'), path.join(run, 'editor-preview.mp4'))
+  const project = structuredClone(fixture); project.width = 320; project.height = 180
+  fs.writeFileSync(path.join(run, 'editor-project.json'), JSON.stringify(project))
+  fs.writeFileSync(path.join(run, 'job_output.json'), JSON.stringify({ job_id: 'close-run', source_video_title: 'Close prompt', clips: [], editor_project: true }))
+  const session = await launchApp({ appDir: buildApp(path.join(root, 'app')), userDataDir, env: { ...tools.appEnv, BRIDGECLIP_E2E_UNLOAD_CHOICE: 'cancel' } })
+  t.after(async () => {
+    // Never let a leftover unsaved edit cancel the harness's own quit.
+    await session.app.evaluate(() => { process.env.BRIDGECLIP_E2E_UNLOAD_CHOICE = 'discard' }).catch(() => {})
+    const stop = setTimeout(() => session.app.process().kill('SIGTERM'), 5000)
+    try { await session.close() } finally { clearTimeout(stop); fs.rmSync(root, { recursive: true, force: true }) }
+  })
+  const { app, page } = session
+  page.setDefaultTimeout(10000)
+  await page.getByRole('button', { name: 'Library', exact: true }).first().click()
+  await page.getByRole('button', { name: 'Open Close prompt', exact: true }).click()
+  // Main answers the blocked unload (will-prevent-unload); no browser dialog is shown for Playwright to accept.
+  page.on('dialog', () => {})
+  const title = page.getByLabel('Title', { exact: true })
+  const windows = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)
+  const log = () => fs.readFileSync(path.join(userDataDir, 'logs', 'bridgeclip.log'), 'utf8')
+  // Edits save 700 ms after typing stops; close well before that.
+  await title.fill('Kept open')
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close())
+  await page.waitForTimeout(300)
+  assert.equal(await windows(), 1)
+  assert.match(log(), /"event":"editor.unsavedClose","intent":"close","choice":"cancel"/)
+  await page.getByText('All changes saved', { exact: true }).waitFor()
+  await app.evaluate(() => { process.env.BRIDGECLIP_E2E_UNLOAD_CHOICE = 'save' })
+  await title.fill('Saved on close')
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close())
+  const deadline = Date.now() + 10000
+  while (await windows() && Date.now() < deadline) await new Promise(r => setTimeout(r, 50))
+  assert.equal(await windows(), 0)
+  assert.match(log(), /"choice":"save"/)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'))).candidates[0].title, 'Saved on close')
+})

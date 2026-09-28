@@ -35,12 +35,16 @@ export default function App(): React.JSX.Element {
   const navigateRoot = useCallback((destination: Page): void => {
     // Keep a modal's progress and cancel controls mounted during an upload.
     if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
-    void commitBeforeNavigation().then(() => {
+    const go = (): void => {
       if (destination === 'jobs') useJobStore.getState().focusJob(null)
       setLibraryRun(null)
       setPage(destination)
       setPageVisit((visit) => visit + 1)
-    }).catch(() => { /* The editor keeps the unsaved draft and shows the save error. */ })
+    }
+    // A failed save (e.g. the project changed elsewhere) must not trap the user in the editor.
+    void commitBeforeNavigation().then(go, () => {
+      if (window.confirm('Your latest clip edits could not be saved. Leave the editor and discard them?')) go()
+    })
   }, [])
 
   useEffect(() => { if (page !== 'library') setLibraryRun(null) }, [page])

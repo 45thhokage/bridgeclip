@@ -5,7 +5,7 @@ import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState,
 import { Archive, Check, ChevronLeft, ChevronRight, ChevronDown, Download, Film, Loader2, Pause, Pencil, Play, Redo2, RotateCcw, Scissors, SkipBack, Undo2, X } from 'lucide-react'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatTimecode, localFileUrl, parseTimecode } from '../lib/utils'
-import { cameraMarkers, snapFrame, stepFrame, candidateEdit, canAnimateScene, defaultCrop, editDuration, editSignature, editorProgress, framingAt, normalizeSceneTransitions, refineEdit, renderEditKey, resizeCrop, retimeScene, sceneAt, trimRange, type CandidateEdit, type Crop, type CropCorner, type EditorCandidate, type EditorQuestion, type EditorRange, type EditorScene, type EditorSession } from '../../shared/clip-editor'
+import { EDITOR_REVISION_CONFLICT, cameraMarkers, snapFrame, stepFrame, candidateEdit, canAnimateScene, defaultCrop, editDuration, editSignature, editorProgress, framingAt, normalizeSceneTransitions, refineEdit, renderEditKey, resizeCrop, retimeScene, sceneAt, trimRange, type CandidateEdit, type Crop, type CropCorner, type EditorCandidate, type EditorQuestion, type EditorRange, type EditorScene, type EditorSession } from '../../shared/clip-editor'
 import { CameraChanges, CameraScanButton } from './CameraChanges'
 import { ActionMenu } from './ui/ActionMenu'
 import { Button } from './ui/Button'
@@ -44,6 +44,8 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   const savePromise = useRef<Promise<void> | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A stale-revision save can never succeed; offer a reload instead of a retry loop.
+  const [conflict, setConflict] = useState(false)
   const [confirmFree, setConfirmFree] = useState(false)
   const closeFree = useCallback(() => setConfirmFree(false), [])
   /** Render identity of each clip when it left Baked, so undo can restore Baked. */
@@ -98,7 +100,7 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
       setSession(s); sessionRef.current = s; setEdits(s.project.candidates); editsRef.current = s.project.candidates
       savedKey.current = JSON.stringify(s.project.candidates.map(candidateEdit))
       keyRef.current = savedKey.current
-      setBusy(s.operation ?? null); setBatch(s.batch); setProgress(s.progress); setError(null)
+      setBusy(s.operation ?? null); setBatch(s.batch); setProgress(s.progress); setError(null); setConflict(false)
     } catch (e) { setError(errorMessage(e)) }
   }, [outputDir])
   useEffect(() => { void load() }, [load])
@@ -129,6 +131,9 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
           const s = await getApi().editor.save(outputDir, sessionRef.current!.project.revision, editsRef.current)
           savedKey.current = sentKey; sessionRef.current = s; setSession(s)
         }
+      } catch (e) {
+        if (errorMessage(e).includes(EDITOR_REVISION_CONFLICT)) setConflict(true)
+        throw e
       } finally { setSaving(false); savePromise.current = null }
     }
     savePromise.current = task()
@@ -144,11 +149,19 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   }), [save])
   // Flush in-memory edits on page navigation; main owns the durable write.
   useEffect(() => () => { void save().catch(() => {}) }, [save])
+  // Unsaved edits block unload; main then asks Save / Discard / Cancel and,
+  // for Save, asks this editor to save before it continues the close.
   useEffect(() => {
-    const prevent = (event: BeforeUnloadEvent): void => { if (keyRef.current !== savedKey.current) { event.preventDefault(); void save() } }
+    const prevent = (event: BeforeUnloadEvent): void => { if (keyRef.current !== savedKey.current) event.preventDefault() }
     window.addEventListener('beforeunload', prevent)
     return () => window.removeEventListener('beforeunload', prevent)
-  }, [save])
+  }, [])
+  useEffect(() => getApi().editor.onSaveBeforeClose?.(() => {
+    void save().then(() => getApi().editor.closeReady(true), (e) => {
+      setError(errorMessage(e))
+      return getApi().editor.closeReady(false)
+    }).catch(() => {})
+  }), [save])
 
   const change = (patch: Partial<CandidateEdit>, remember = true): void => {
     if (busy || !candidate || (candidate.status === 'discarded' && patch.status === undefined)) return
@@ -349,6 +362,7 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
       setError(action === 'scan-cameras' && message.includes('Invalid editor operation')
         ? 'Restart BridgeClip to load camera scanning. Your edits are saved.'
         : message)
+      if (message.includes(EDITOR_REVISION_CONFLICT)) setConflict(true)
     } finally { active = false; window.clearInterval(polling); setBusy(null); setBatch(undefined); setProgress(undefined) }
   }
   const chooseReplacement = async (): Promise<void> => {
@@ -505,7 +519,9 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
           : <Button size="sm" disabled={!!busy} icon={<RotateCcw size={13} />} onClick={() => change({ status: 'refining' })}>{status === 'discarded' ? 'Restore clip' : status === 'baked' ? 'Refine again' : 'Keep refining'}</Button>}
       </div>
     </div>
-    {error && <div role="alert" className="editor-notice text-danger">{error}<Button size="sm" variant="ghost" onClick={() => { setError(null); void save().catch((e) => setError(errorMessage(e))) }}>Retry save</Button></div>}
+    {error && <div role="alert" className="editor-notice text-danger">{conflict ? 'This project changed since the editor opened it, so your latest edits cannot be saved. Reload the project to continue from its saved state.' : error}{conflict
+      ? <Button size="sm" variant="ghost" icon={<RotateCcw size={13} />} onClick={() => { setUndo([]); setRedo([]); bakedKeys.current.clear(); void load() }}>Reload project</Button>
+      : key !== savedKey.current && <Button size="sm" variant="ghost" onClick={() => { setError(null); void save().catch((e) => setError(errorMessage(e))) }}>Retry save</Button>}</div>}
     {notice && !busy && <div role="status" className="editor-notice"><Check size={14} />{notice}<Button size="sm" variant="ghost" tooltip="Hide this completion message." aria-label="Dismiss bake notice" iconOnly icon={<X size={14} />} onClick={() => setNotice(null)} /></div>}
     {confirmFree && <ConfirmDialog onClose={closeFree} request={{
       title: 'Free editor media?', confirmLabel: 'Free media',

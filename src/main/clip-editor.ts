@@ -3,7 +3,7 @@ import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, join } from 'path'
 import { createHash, randomUUID } from 'crypto'
-import { editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
+import { EDITOR_REVISION_CONFLICT, editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
@@ -130,7 +130,7 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
   operations.set(run, { action: 'save' })
   try {
     const { project } = await openEditor(run)
-    if (!Number.isSafeInteger(revision) || project.revision !== revision) throw new Error('This project changed. Reopen it before saving.')
+    if (!Number.isSafeInteger(revision) || project.revision !== revision) throw new Error(EDITOR_REVISION_CONFLICT)
     if (project.media_freed) throw new Error('Editor media was freed. This project is read-only.')
     if (!Array.isArray(edits) || edits.length !== project.candidates.length) throw new Error('Invalid candidate edits')
     const clean = edits.map((c) => parseCandidateEdit(c, project.duration_ms, project.transcript.length))
@@ -159,7 +159,7 @@ export async function freeEditorMedia(path: unknown, revision: unknown): Promise
   operations.set(run, { action: 'save' })
   try {
     const { project } = await openEditor(run)
-    if (!Number.isSafeInteger(revision) || project.revision !== revision) throw new Error('This project changed. Reopen it before saving.')
+    if (!Number.isSafeInteger(revision) || project.revision !== revision) throw new Error(EDITOR_REVISION_CONFLICT)
     if (editorProgress(project.candidates).remaining) throw new Error('Bake or discard every clip before freeing editor media.')
     if (!project.media_freed) {
       project.media_freed = true
@@ -350,3 +350,12 @@ async function executeEditor(path: unknown, revision: unknown, candidateId: unkn
 }
 // Keep IPC's editable surface narrow; no media paths, reviews or export records come from React.
 export type { CandidateEdit }
+
+let resumeAfterSave: (() => void) | null = null
+/** Closing with unsaved edits: main asked the renderer to save, and resumes the close only after it succeeds. */
+export function awaitEditorSaveBeforeClose(resume: () => void): void { resumeAfterSave = resume }
+export function editorCloseReady(saved: unknown): void {
+  const resume = resumeAfterSave
+  resumeAfterSave = null
+  if (saved === true && resume) setImmediate(resume)
+}
