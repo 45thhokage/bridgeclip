@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from clip_engine.services.layout_analyzer import LayoutAnalyzer, Box, FrameInfo, frame_layout_evidence
 from clip_engine.services.layout_precision import confirmed_cuts, detail_indices, select_expression
-from .test_camera_scan import source_video, ffmpeg
+from .test_camera_scan import source_video, ffmpeg, available_encoder  # noqa: F401 (fixture)
 
 
 def frame(t, x=.2, faces=True):
@@ -39,7 +39,7 @@ def test_detail_budget_is_bounded_and_select_expression_balanced():
 
 @pytest.mark.parametrize('start', [0, 217, 503])
 @pytest.mark.parametrize('vfr', [False, True])
-def test_pipeline_refines_real_fractional_frames_and_retains_scan(tmp_path, monkeypatch, start, vfr):
+def test_pipeline_refines_real_fractional_frames_and_retains_scan(tmp_path, monkeypatch, start, vfr, available_encoder):
     source = source_video(tmp_path, vfr=vfr)
     analyzer = LayoutAnalyzer()
     monkeypatch.setattr(analyzer, '_get_detector', lambda *_: None)

@@ -46,13 +46,13 @@ def test_progress_messages_are_bounded_but_terminal_is_always_delivered():
 def test_real_encoding_progress_preserves_file_backed_long_filter_graph(tmp_path):
     import asyncio
     from clip_engine.services.rendering_service import RenderingService
-    from .test_camera_scan import source_video
+    from .test_camera_scan import encoder_args, source_video
     source = source_video(tmp_path)
     output = tmp_path / 'render.mp4'
     graph = '[0:v]' + ','.join(['null'] * 2200) + '[base]'
     updates = []
     asyncio.run(RenderingService()._run_cmd(['ffmpeg', '-v', 'error', '-i', str(source),
-        '-filter_complex', graph, '-map', '[base]', '-c:v', 'libx264', str(output)],
+        '-filter_complex', graph, '-map', '[base]', *encoder_args(), str(output)],
         progress=updates.append, duration_ms=2500))
     assert output.stat().st_size > 0
     assert updates[0] == 0 and updates[-1] == 100

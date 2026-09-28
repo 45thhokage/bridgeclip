@@ -299,6 +299,7 @@ def test_short_manual_export_contains_only_the_selected_frames(monkeypatch, tmp_
     from dataclasses import asdict
     import numpy as np
     from clip_engine.services import rendering_service
+    from tests.test_camera_scan import encoder_args
 
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         pytest.skip('FFmpeg and FFprobe are needed for the actual export check')
@@ -419,6 +420,7 @@ def test_caption_suppression_pixels_follow_source_cuts_and_speed(monkeypatch, tm
     import numpy as np
     from clip_engine.config import get_caption_preset
     from clip_engine.services import rendering_service
+    from tests.test_camera_scan import encoder_args
 
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         pytest.skip('FFmpeg and FFprobe are needed for the caption suppression render check')
@@ -428,7 +430,7 @@ def test_caption_suppression_pixels_follow_source_cuts_and_speed(monkeypatch, tm
     source = tmp_path / 'source.mp4'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
         'color=c=black:s=160x240:r=30:d=6,drawbox=x=10:y=10:w=30:h=10:color=yellow:t=fill',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(source)], check=True, capture_output=True, timeout=30)
+        *encoder_args(), '-pix_fmt', 'yuv420p', str(source)], check=True, capture_output=True, timeout=30)
     c = {**candidate(), 'ranges': [[1000, 3000], [4000, 6000]],
         'scenes': [{'at_ms': 0, 'layout': 'fill', 'crops': [[0, 0, 1, 1]]}],
         'caption_suppression_ranges': [[0, 1500], [2500, 4500], [5500, 6000]]}

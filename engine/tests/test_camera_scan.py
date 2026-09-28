@@ -20,6 +20,27 @@ def ffmpeg(args, data=None):
     return result.stdout
 
 
+def encoder_args():
+    """High-quality H.264 from whichever encoder the FFmpeg on PATH provides.
+
+    The shipped LGPL build has VideoToolbox (macOS) or OpenH264, not x264.
+    """
+    encoders = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'], capture_output=True, text=True, check=True).stdout
+    if 'libx264' in encoders:
+        return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '12']
+    if 'h264_videotoolbox' in encoders:
+        return ['-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '8M']
+    if 'libopenh264' in encoders:
+        return ['-c:v', 'libopenh264', '-b:v', '8M']
+    pytest.skip('No H.264 encoder in test FFmpeg')
+
+
+@pytest.fixture
+def available_encoder(monkeypatch):
+    """Previews use the test FFmpeg's encoder instead of the server's x264."""
+    monkeypatch.setattr(RenderingService, '_video_codec_args', lambda self, *args: encoder_args())
+
+
 def source_video(tmp_path, fps='24000/1001', vfr=False):
     frames = np.zeros((60, 90, 160, 3), dtype=np.uint8)
     for a, b, left, right in [(0, 17, (255, 0, 0), (0, 255, 0)), (17, 35, (255, 255, 0), (0, 0, 255)), (35, 60, (0, 255, 0), (255, 0, 0))]:
@@ -27,13 +48,13 @@ def source_video(tmp_path, fps='24000/1001', vfr=False):
     path = tmp_path / 'editor-source.mp4'
     filters = ['-vf', "settb=1/1000000,setpts=PTS+if(gte(N\\,20)\\,50000\\,0)+if(gte(N\\,40)\\,80000\\,0)"] if vfr else []
     ffmpeg(['-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '160x90', '-r', fps, '-i', 'pipe:0', *filters,
-            '-fps_mode', 'passthrough', '-enc_time_base', '1:1000000', '-c:v', 'libx264', '-crf', '12', str(path)], frames.tobytes())
+            '-fps_mode', 'passthrough', '-enc_time_base', '1:1000000', *encoder_args(), str(path)], frames.tobytes())
     return path
 
 
 @pytest.mark.parametrize('fps', ['24000/1001', '30000/1001', '60'])
 @pytest.mark.parametrize('vfr', [False, True])
-def test_scan_every_frame_and_preview_keeps_exact_source_timestamps(tmp_path, fps, vfr):
+def test_scan_every_frame_and_preview_keeps_exact_source_timestamps(tmp_path, fps, vfr, available_encoder):
     source = source_video(tmp_path, fps, vfr)
     scan = scan_camera_changes(source, 0, 3000)
     assert len(scan['frames']) == 60
@@ -137,7 +158,7 @@ def test_adding_layouts_cannot_change_which_source_frames_are_exported():
     assert frames(c) == frames(split)
 
 
-def test_real_scan_and_preview_report_measured_monotonic_progress(tmp_path):
+def test_real_scan_and_preview_report_measured_monotonic_progress(tmp_path, available_encoder):
     source = source_video(tmp_path)
     scan_progress, preview_progress = [], []
     scan_camera_changes(source, 0, 2500, progress=scan_progress.append)
