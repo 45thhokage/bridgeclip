@@ -752,6 +752,24 @@ test('idle editor runs sweep temporary folders and unreferenced media, never the
   } finally { f.cleanup() }
 })
 
+test('undoing "Refine again" can restore Baked only for the exact baked render', async () => {
+  const f = setup()
+  try {
+    const project = JSON.parse(fs.readFileSync(path.join(f.run, 'editor-project.json')))
+    Object.assign(project.candidates[0], { status: 'baked', exports: [0] })
+    fs.writeFileSync(path.join(f.run, 'editor-project.json'), JSON.stringify(project))
+    const baked = (await f.main.openEditor(f.run)).project.candidates
+    const refining = structuredClone(baked); refining[0].status = 'refining'
+    let saved = await f.main.saveEditor(f.run, 0, refining)
+    assert.match(saved.project.candidates[0].baked_hash, /^[a-f0-9]{64}$/)
+    const changed = structuredClone(refining); changed[0].title = 'Different'; changed[0].status = 'baked'
+    await assert.rejects(f.main.saveEditor(f.run, 1, changed), /completed render/)
+    saved = await f.main.saveEditor(f.run, 1, baked)
+    assert.equal(saved.project.candidates[0].status, 'baked')
+    assert.equal(saved.project.candidates[0].baked_hash, undefined)
+  } finally { f.cleanup() }
+})
+
 test('editor media can be freed only when nothing is left to finish, and the project becomes read-only', async () => {
   const f = setup()
   try {

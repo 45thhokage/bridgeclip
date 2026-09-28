@@ -115,6 +115,7 @@ async def replace_source(run, project, source_id):
     for candidate in project['candidates']:
         candidate.pop('camera_scan', None)
         candidate.pop('dismissed_camera_markers', None)
+        candidate.pop('baked_hash', None)  # Earlier bakes used the previous source.
         if candidate.get('status') == 'baked':
             candidate['status'] = 'ready'
     atomic_json(run / 'editor-project.json', project)
@@ -524,6 +525,7 @@ async def run_editor(config, progress=None):
                      and x['clip_index'] not in c['exports'] and (run / f"clip_{x['clip_index']:02d}.mp4").is_file()), None)
         c['exports'].append(done['clip_index'] if done else await export_clip(run, project, c, output, source, transcript))
         c['status'] = 'baked'
+        c.pop('baked_hash', None)
     else:
         raise ValueError('Unknown editor action')
     project['revision'] += 1

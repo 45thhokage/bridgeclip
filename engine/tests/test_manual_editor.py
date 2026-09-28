@@ -511,7 +511,7 @@ def test_invalid_caption_position_is_rejected(y):
 
 def export_fixture(tmp_path, monkeypatch, render):
     from dataclasses import asdict
-    c = {**candidate(), 'status': 'ready'}
+    c = {**candidate(), 'status': 'ready', 'baked_hash': 'a' * 64}
     project = {'version': 1, 'revision': 5, 'width': 1920, 'height': 1080, 'duration_ms': 12000, 'aspect_ratio': '9:16',
         'candidates': [c], 'transcript': [asdict(s) for s in transcript()]}
     (tmp_path / 'editor-project.json').write_text(json.dumps(project))
@@ -547,7 +547,8 @@ def test_export_killed_between_library_and_project_commits_finishes_without_a_du
     assert [x['clip_index'] for x in output['clips']] == [0] and not (tmp_path / 'clip_01.mp4').exists()
     saved = json.loads((tmp_path / 'editor-project.json').read_text())
     c = saved['candidates'][0]
-    assert (c['status'], c['exports'], saved['revision']) == ('baked', [0], 6)
+    # A new bake replaces the render that undoing "Refine again" could restore.
+    assert (c['status'], c['exports'], saved['revision']) == ('baked', [0], 6) and 'baked_hash' not in c
     # A later, changed edit renders again rather than reusing that export.
     c['status'] = 'ready'
     (tmp_path / 'editor-project.json').write_text(json.dumps(saved))

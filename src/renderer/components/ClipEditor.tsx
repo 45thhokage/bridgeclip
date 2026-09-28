@@ -5,7 +5,7 @@ import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState,
 import { Archive, Check, ChevronLeft, ChevronRight, ChevronDown, Download, Film, Loader2, Pause, Pencil, Play, Redo2, RotateCcw, Scissors, SkipBack, Undo2, X } from 'lucide-react'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatTimecode, localFileUrl, parseTimecode } from '../lib/utils'
-import { cameraMarkers, snapFrame, stepFrame, candidateEdit, canAnimateScene, defaultCrop, editDuration, editSignature, editorProgress, framingAt, normalizeSceneTransitions, refineEdit, resizeCrop, retimeScene, sceneAt, trimRange, type CandidateEdit, type Crop, type CropCorner, type EditorCandidate, type EditorQuestion, type EditorRange, type EditorScene, type EditorSession } from '../../shared/clip-editor'
+import { cameraMarkers, snapFrame, stepFrame, candidateEdit, canAnimateScene, defaultCrop, editDuration, editSignature, editorProgress, framingAt, normalizeSceneTransitions, refineEdit, renderEditKey, resizeCrop, retimeScene, sceneAt, trimRange, type CandidateEdit, type Crop, type CropCorner, type EditorCandidate, type EditorQuestion, type EditorRange, type EditorScene, type EditorSession } from '../../shared/clip-editor'
 import { CameraChanges, CameraScanButton } from './CameraChanges'
 import { ActionMenu } from './ui/ActionMenu'
 import { Button } from './ui/Button'
@@ -46,6 +46,8 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   const [error, setError] = useState<string | null>(null)
   const [confirmFree, setConfirmFree] = useState(false)
   const closeFree = useCallback(() => setConfirmFree(false), [])
+  /** Render identity of each clip when it left Baked, so undo can restore Baked. */
+  const bakedKeys = useRef(new Map<string, string>())
   const [busy, setBusy] = useState<EditorSession['operation']>(null)
   const [batch, setBatch] = useState<EditorSession['batch']>()
   const [progress, setProgress] = useState<EditorSession['progress']>()
@@ -151,15 +153,17 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   const change = (patch: Partial<CandidateEdit>, remember = true): void => {
     if (busy || !candidate || (candidate.status === 'discarded' && patch.status === undefined)) return
     if (patch.scenes) patch = { ...patch, scenes: normalizeSceneTransitions(patch.scenes) }
+    if (candidate.status === 'baked') bakedKeys.current.set(candidate.id, renderEditKey(candidate))
     if (remember) { setUndo((u) => [...u.slice(-49), edits]); setRedo([]) }
     setEdits((items) => items.map((c, i) => i === selected ? refineEdit(c, patch) : c))
   }
   const history = (direction: 'undo' | 'redo'): void => {
     const from = direction === 'undo' ? undo : redo
     if (busy || !from.length) return
-    // Undo can restore an old edit, but only a completed render creates Baked.
-    const next = from[from.length - 1].map((c, i) => c.status === 'baked' && edits[i].status !== 'baked'
-      ? { ...c, status: 'refining' as const } : c)
+    // Undo can restore an old edit, but only a completed render creates Baked:
+    // the exact render a clip left (main checks the same identity on save).
+    const next = from[from.length - 1].map((c, i) => c.status === 'baked' && edits[i].status !== 'baked' &&
+      bakedKeys.current.get(c.id) !== renderEditKey(c) ? { ...c, status: 'refining' as const } : c)
     setEditingCaption(null)
     if (direction === 'undo') { setUndo(from.slice(0, -1)); setRedo((r) => [...r, edits]) }
     else { setRedo(from.slice(0, -1)); setUndo((u) => [...u, edits]) }

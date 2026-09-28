@@ -534,16 +534,19 @@ test('review editor refines candidates, restores discards, edits captions and ba
   await page.getByRole('button', { name: 'Open editor', exact: true }).click()
   await editor.waitFor()
   assert.equal(await stage.innerText(), 'Baked')
-  // A correction after baking returns to Refining; undo must still save cleanly.
+  // A correction after baking returns to Refining; undoing it restores the
+  // untouched bake, and both states save cleanly.
   await seek(3300)
   await page.getByRole('button', { name: 'Transcript', exact: true }).click()
   await page.getByRole('button', { name: 'Edit caption at 0:03.000', exact: true }).click()
   await caption.fill('Another correction.')
   await page.getByRole('button', { name: 'Done', exact: true }).click()
   await page.getByText('All changes saved', { exact: true }).waitFor()
+  assert.equal(await stage.innerText(), 'Refining')
   await page.getByRole('button', { name: 'Undo', exact: true }).click()
   await page.getByText('All changes saved', { exact: true }).waitFor()
-  assert.equal(await stage.innerText(), 'Refining')
+  assert.equal(await stage.innerText(), 'Baked')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'))).candidates[0].status, 'baked')
   assert.equal(await page.locator('.editor-transcript-text').filter({ hasText: 'The corrected moment.' }).count(), 1)
   await page.getByRole('button', { name: 'Discard', exact: true }).click()
   await page.getByText('All changes saved', { exact: true }).waitFor()

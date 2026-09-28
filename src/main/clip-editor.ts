@@ -2,7 +2,7 @@ import { execFile, spawn, type ChildProcess } from 'child_process'
 import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, join } from 'path'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
@@ -123,6 +123,7 @@ export async function readEditorProgress(path: unknown): Promise<EditorProgressS
     ...(operation?.batch ? { batch: { ...operation.batch } } : {}), ...(operation?.progress ? { progress: { ...operation.progress } } : {}) }
 }
 
+const bakedHash = (c: CandidateEdit): string => createHash('sha256').update(renderEditKey(c)).digest('hex')
 export async function saveEditor(path: unknown, revision: unknown, edits: unknown): Promise<EditorSession> {
   const run = runPath(path)
   if (operations.has(run)) throw new Error('Wait for the current editor operation to finish')
@@ -137,8 +138,14 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
     project.candidates = project.candidates.map((c) => {
       const edit = clean.find((e) => e.id === c.id)
       if (!edit) throw new Error('Candidate is missing')
-      if (edit.status === 'baked' && (c.status !== 'baked' || renderEditKey(edit) !== renderEditKey(c))) throw new Error('Only a completed render can mark a clip as baked')
-      return { ...c, ...edit }
+      const next = { ...c, ...edit }
+      if (edit.status === 'baked') {
+        // Unchanged since its render, or restored to the exact render "Refine again" left.
+        const unchanged = c.status === 'baked' ? renderEditKey(edit) === renderEditKey(c) : !!c.baked_hash && c.exports.length > 0 && bakedHash(edit) === c.baked_hash
+        if (!unchanged) throw new Error('Only a completed render can mark a clip as baked')
+        delete next.baked_hash
+      } else if (c.status === 'baked') next.baked_hash = bakedHash(c)
+      return next
     })
     project.revision++
     writeProject(run, project)

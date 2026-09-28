@@ -34,6 +34,8 @@ export interface CandidateEdit {
 export interface EditorCandidate extends CandidateEdit {
   camera_scan?: CameraScan
   requires_visual_context?: boolean; score: number; reason: string; review: EditorReview | null; exports: number[]
+  /** Main-owned: SHA-256 of the last baked render identity, so undoing "Refine again" can restore Baked. */
+  baked_hash?: string
 }
 export interface EditorProject {
   version: 1; revision: number; title: string; duration_ms: number; width: number; height: number
@@ -219,7 +221,8 @@ export function parseEditorProject(value: unknown): EditorProject {
       if (markers.some((m, i) => !times.has(m.at_ms) || (i > 0 && m.at_ms <= markers[i - 1].at_ms))) fail()
       camera_scan = { start_ms, end_ms, frames, markers }
     }
-    return { ...edit, ...(camera_scan ? { camera_scan } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: clampText(c.reason, 4000), review,
+    const baked_hash = typeof c.baked_hash === 'string' && /^[a-f0-9]{64}$/.test(c.baked_hash) ? c.baked_hash : undefined
+    return { ...edit, ...(camera_scan ? { camera_scan } : {}), ...(baked_hash ? { baked_hash } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: clampText(c.reason, 4000), review,
       exports: arr(c.exports, 1000).map((n) => num(n, 0, 999)) }
   })
   if (!candidates.length) fail()
