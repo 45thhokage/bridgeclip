@@ -21,6 +21,7 @@ const labels: Record<string, string> = { not_sponsored: 'Not sponsored', opening
 const clock = (n: number): string => `${formatTimecode(n)}.${String(Math.floor(n % 1000)).padStart(3, '0')}`
 const cropCorners: CropCorner[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right']
 const statusLabels = { refining: 'Refining', ready: 'Ready', baked: 'Baked', discarded: 'Discarded' }
+const formatBytes = (n: number): string => n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`
 const reviewCurrent = (c: EditorCandidate): boolean => {
   try { return JSON.stringify(JSON.parse(c.review?.signature ?? 'null')) === editSignature(c) } catch { return false }
 }
@@ -43,6 +44,8 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   const savePromise = useRef<Promise<void> | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmFree, setConfirmFree] = useState(false)
+  const closeFree = useCallback(() => setConfirmFree(false), [])
   const [busy, setBusy] = useState<EditorSession['operation']>(null)
   const [batch, setBatch] = useState<EditorSession['batch']>()
   const [progress, setProgress] = useState<EditorSession['progress']>()
@@ -355,6 +358,17 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
       setError(errorMessage(e))
     } finally { setBusy(null) }
   }
+  const freeMedia = async (): Promise<void> => {
+    setBusy('save'); setError(null); setNotice(null)
+    try {
+      await save()
+      const s = await getApi().editor.freeMedia(outputDir, sessionRef.current!.project.revision)
+      setSession(s); sessionRef.current = s; setUndo([]); setRedo([])
+    } catch (e) { setError(errorMessage(e)) } finally { setBusy(null) }
+  }
+  if (session?.project.media_freed) return <div className="p-8 space-y-4">{leading}
+    <p role="status" className="text-sm">Editor media for this project was freed to save disk space. Your exported clips are unchanged; the project is now read-only.</p>
+    <Button onClick={() => { void onExports().catch((e) => setError(errorMessage(e))) }}>View exports</Button>{error && <p role="alert" className="text-danger">{error}</p>}</div>
   if (!session || !candidate || !currentScene) return <div className="p-8 space-y-4">{leading}<p role={error ? 'alert' : 'status'}>{error ?? 'Opening editor…'}</p><Button onClick={() => { void load() }}>Retry</Button></div>
   const safeLeading = isValidElement<{ onClick?: () => void }>(leading) && leading.props.onClick
     ? cloneElement(leading, { onClick: () => { void save().then(() => leading.props.onClick?.()).catch((e) => setError(errorMessage(e))) } }) : leading
@@ -366,6 +380,7 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   const moveCaption = (y: number, remember = true): void => { video.current?.pause(); change({ caption_y: Math.round(y * 1000) / 1000 }, remember) }
   const status = candidate.status ?? 'refining'
   const readyCount = edits.filter((c) => c.status === 'ready').length
+  const finished = editorProgress(edits).remaining === 0
   const editingDisabled = !!busy || status === 'discarded'
   const captionText = (index: number): string => candidate.caption_edits?.find((e) => e.segment === index)?.text ?? project.transcript[index].text
   const canEditCaption = (index: number): boolean => !editingDisabled && (candidate.caption_edits.length < 2000 || candidate.caption_edits.some((e) => e.segment === index))
@@ -460,6 +475,7 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   return <section ref={editorRoot} className="clip-editor" aria-label="Clip editor">
     <header className="editor-header"><div className="min-w-0 flex-1"><div className="flex items-center gap-3">{safeLeading}<span className="truncate text-sm font-medium">{project.title}</span></div><span className="text-2xs text-ink-subtle">{saving ? 'Saving…' : key !== savedKey.current ? 'Unsaved changes' : 'All changes saved'}</span></div>
       <Button variant="ghost" size="sm" onClick={() => setShowAudit(true)}>Transcript & edits</Button>
+      {finished && <Button variant="ghost" size="sm" disabled={!!busy} tooltip="Every clip is baked or discarded. Delete this project's source copy and preview; exports stay in the Library." onClick={() => setConfirmFree(true)}>Free editor media{session.mediaBytes ? ` (${formatBytes(session.mediaBytes)})` : ''}</Button>}
       <Button size="sm" disabled={!!busy} onClick={() => { void save().then(onExports).catch((e) => setError(errorMessage(e))) }}>Exports</Button>
       <div className="editor-bake-actions" role="group" aria-label="Bake clips">
       <Button variant="primary" size="sm" disabled={!!busy || status !== 'ready'} title={status !== 'ready' ? 'Mark this clip ready after refining it' : 'Render the final clip with your changes'} icon={<Download size={14} />} onClick={() => { void run('export') }}>{candidate.captions ? 'Bake captions' : 'Render clip'}</Button>
@@ -478,6 +494,11 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
     </div>
     {error && <div role="alert" className="editor-notice text-danger">{error}<Button size="sm" variant="ghost" onClick={() => { setError(null); void save().catch((e) => setError(errorMessage(e))) }}>Retry save</Button></div>}
     {notice && !busy && <div role="status" className="editor-notice"><Check size={14} />{notice}<Button size="sm" variant="ghost" tooltip="Hide this completion message." aria-label="Dismiss bake notice" iconOnly icon={<X size={14} />} onClick={() => setNotice(null)} /></div>}
+    {confirmFree && <ConfirmDialog onClose={closeFree} request={{
+      title: 'Free editor media?', confirmLabel: 'Free media',
+      body: <>Delete this project's copy of the source video and its editor preview{session.mediaBytes ? ` (${formatBytes(session.mediaBytes)})` : ''}?<br /><br />Your exported clips stay in the Library. The project becomes read-only: you won't be able to refine, re-bake or restore its clips again.</>,
+      onConfirm: () => { void freeMedia() }
+    }} />}
     {replacement && <ConfirmDialog onClose={closeReplacement} request={{
       title: 'Replace source video?', confirmLabel: 'Replace source', tone: 'primary',
       body: <>Use <strong>{replacement.split(/[\\/]/).pop()}</strong> for every clip in this project?<br /><br />Only recommended for the exact same video at higher quality: identical content, timing, audio and framing. Matching duration alone does not guarantee a match.<br /><br />Your cuts, layouts and caption edits will be kept. Previously baked clips will be ready to bake again. Existing exports will stay in the library.</>,

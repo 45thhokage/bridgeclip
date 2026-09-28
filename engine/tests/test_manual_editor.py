@@ -629,3 +629,16 @@ def test_titles_and_reasons_truncate_by_utf16_units_without_splitting_emoji(tmp_
     assert c['title'] == 'a' * 199 and c['reason'] == 'r' * 3999 and project['title'] == 't' * 1023
     validate_candidate(c, 12000)
 
+
+
+def test_freed_editor_media_refuses_every_operation(monkeypatch, tmp_path):
+    render = AsyncMock()
+    config = export_fixture(tmp_path, monkeypatch, render)
+    project = json.loads((tmp_path / 'editor-project.json').read_text())
+    project['media_freed'] = True
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+    for action in ('export', 'scan-cameras', 'review', 'replace-source'):
+        with pytest.raises(ValueError) as error:
+            asyncio.run(run_editor({**config, 'action': action, 'source_id': 'a' * 32}))
+        assert error.value.editor_code == 'source_missing'
+    render.assert_not_called()

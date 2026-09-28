@@ -734,3 +734,21 @@ test('idle editor runs sweep temporary folders and unreferenced media, never the
     assert.deepEqual(left, ['clip_00.mp4', 'editor-notes.mp4', 'editor-preview.mp4', 'editor-project.json', 'editor-source.mp4', 'job_output.json'])
   } finally { f.cleanup() }
 })
+
+test('editor media can be freed only when nothing is left to finish, and the project becomes read-only', async () => {
+  const f = setup()
+  try {
+    await assert.rejects(f.main.freeEditorMedia(f.run, 0), /Bake or discard every clip/)
+    const project = JSON.parse(fs.readFileSync(path.join(f.run, 'editor-project.json')))
+    project.candidates[0].status = 'discarded'; Object.assign(project.candidates[1], { status: 'baked', exports: [0] })
+    fs.writeFileSync(path.join(f.run, 'editor-project.json'), JSON.stringify(project))
+    assert.equal((await f.main.openEditor(f.run)).mediaBytes, 10)
+    await assert.rejects(f.main.freeEditorMedia(f.run, 7), /changed/)
+    const freed = await f.main.freeEditorMedia(f.run, 0)
+    assert.equal(freed.project.media_freed, true)
+    assert.deepEqual([freed.sourcePath, freed.previewPath], ['', ''])
+    assert.equal(fs.existsSync(path.join(f.run, 'editor-source.mp4')) || fs.existsSync(path.join(f.run, 'editor-preview.mp4')), false)
+    await assert.rejects(f.main.saveEditor(f.run, 1, freed.project.candidates), /read-only/)
+    await assert.rejects(f.main.runEditor(f.run, 1, 'candidate-2', 'export'), /read-only/)
+  } finally { f.cleanup() }
+})

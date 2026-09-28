@@ -79,6 +79,7 @@ export interface BridgeClipAPI {
     run: (path: string, revision: number, id: string, action: 'review' | 'export' | 'export-all' | 'scan-cameras') => Promise<EditorSession>
     cancel: (path: string) => Promise<void>
     replaceSource: (path: string, revision: number, replacement: string) => Promise<EditorSession>
+    freeMedia: (path: string, revision: number) => Promise<EditorSession>
   }
   edits: { inspect: (outputDir: string) => Promise<EditAudit> }
   models: { list: (refresh?: boolean) => Promise<OpenRouterCatalog> }
@@ -228,7 +229,8 @@ const api: BridgeClipAPI = {
     save: (path, revision, edits) => ipcRenderer.invoke('editor:save', path, revision, edits),
     run: (path, revision, id, action) => ipcRenderer.invoke('editor:run', path, revision, id, action),
     cancel: (path) => ipcRenderer.invoke('editor:cancel', path),
-    replaceSource: (path, revision, replacement) => ipcRenderer.invoke('editor:replaceSource', path, revision, replacement)
+    replaceSource: (path, revision, replacement) => ipcRenderer.invoke('editor:replaceSource', path, revision, replacement),
+    freeMedia: (path, revision) => ipcRenderer.invoke('editor:freeMedia', path, revision)
   },
   edits: { inspect: (outputDir) => ipcRenderer.invoke('edits:inspect', outputDir) },
   models: { list: (refresh = false) => ipcRenderer.invoke('models:list', refresh) },

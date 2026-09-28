@@ -442,6 +442,8 @@ async def run_editor(config, progress=None):
     project = read_json(run, 'editor-project.json')
     if project['version'] != 1 or project['revision'] != config['revision']:
         raise EditorError('project_changed', 'The editor project changed. Reopen it and retry.')
+    if project.get('media_freed'):
+        raise EditorError('source_missing', 'Editor media was freed')
     if config['action'] == 'replace-source':
         source_id = config['source_id']
         if not source_id or source_id == project.get('source_id'):

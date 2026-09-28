@@ -41,6 +41,8 @@ export interface EditorProject {
   source_id?: string
   preview_id?: string
   frame_preview?: boolean
+  /** Source and preview were deleted to save space; the project is read-only. */
+  media_freed?: boolean
   aspect_ratio: '9:16' | '16:9'; candidates: EditorCandidate[]
   transcript: { start_ms: number; end_ms: number; text: string }[]
 }
@@ -50,6 +52,8 @@ export interface EditorBatch { completed: number; total: number; failed?: number
 export interface EditorSession {
   progress?: EditorProgress; project: EditorProject; sourcePath: string; previewPath: string
   operation?: EditorOperation | null; batch?: EditorBatch
+  /** Bytes used by the editor's source and preview, freed by "Free editor media". */
+  mediaBytes?: number
 }
 
 /** Fixed worker failure codes (see bridge/editor_runner.py); no tool output crosses the bridge. */
@@ -213,7 +217,7 @@ export function parseEditorProject(value: unknown): EditorProject {
   if (!candidates.length) fail()
   return { version: 1, revision: num(v.revision, 0, Number.MAX_SAFE_INTEGER), title: clampText(v.title, 1024), duration_ms: duration,
     width: num(v.width, 2, 16384), height: num(v.height, 2, 16384), aspect_ratio: v.aspect_ratio as EditorProject['aspect_ratio'], candidates,
-    transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
+    transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.media_freed === true ? { media_freed: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }
 export function candidateEdit(c: CandidateEdit): CandidateEdit {
   const { id, title, ranges, scenes, captions, caption_preset, video_speed, status, caption_edits, caption_suppression_ranges = [], dismissed_camera_markers } = c

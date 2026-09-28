@@ -1,9 +1,9 @@
 import { execFile, spawn, type ChildProcess } from 'child_process'
-import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
+import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, join } from 'path'
 import { randomUUID } from 'crypto'
-import { editorFailureMessage, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProject, type EditorSession } from '../shared/clip-editor'
+import { editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProject, type EditorSession } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
@@ -60,7 +60,7 @@ function sweepEditorFiles(run: string, project?: EditorProject): void {
   let keep: Set<string> | null = null
   try {
     project ??= readProject(run)
-    keep = new Set(Object.values(mediaNames(project)))
+    keep = new Set(project.media_freed ? [] : Object.values(mediaNames(project)))
   } catch { /* Unreadable state: keep all media, still remove temporary entries. */ }
   let entries: Dirent[]
   try { entries = readdirSync(run, { withFileTypes: true }) } catch { return }
@@ -73,6 +73,9 @@ function sweepEditorFiles(run: string, project?: EditorProject): void {
   if (removed) logger.info('editor.sweep', { removed })
 }
 
+function mediaSize(paths: string[]): number {
+  return paths.reduce((total, file) => { try { return total + statSync(file).size } catch { return total } }, 0)
+}
 export async function openEditor(path: unknown): Promise<EditorSession> {
   const run = runPath(path)
   if (!(await getJobOutput(run, loadSettings().outputDirectory))?.editor_project) throw new Error('This run has no editor project')
@@ -80,12 +83,13 @@ export async function openEditor(path: unknown): Promise<EditorSession> {
   sweepEditorFiles(run, project)
   const operation = operations.get(run)
   const state = { progress: operation?.progress ? { ...operation.progress } : undefined, operation: operation?.action ?? null, batch: operation?.batch ? { ...operation.batch } : undefined }
+  if (project.media_freed) return { project, sourcePath: '', previewPath: '', mediaBytes: 0, ...state }
   const sourcePath = join(run, names.source), previewPath = join(run, names.preview)
   for (const file of [sourcePath, previewPath]) {
     if (lstatSync(file).isSymbolicLink() || !isWithinDirectory(file, run)) throw new Error('Editor source is missing')
     assertMediaPath(file, loadSettings().outputDirectory)
   }
-  return { project, sourcePath, previewPath, ...state }
+  return { project, sourcePath, previewPath, mediaBytes: mediaSize([sourcePath, previewPath]), ...state }
 }
 
 export async function saveEditor(path: unknown, revision: unknown, edits: unknown): Promise<EditorSession> {
@@ -95,6 +99,7 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
   try {
     const { project } = await openEditor(run)
     if (!Number.isSafeInteger(revision) || project.revision !== revision) throw new Error('This project changed. Reopen it before saving.')
+    if (project.media_freed) throw new Error('Editor media was freed. This project is read-only.')
     if (!Array.isArray(edits) || edits.length !== project.candidates.length) throw new Error('Invalid candidate edits')
     const clean = edits.map((c) => parseCandidateEdit(c, project.duration_ms, project.transcript.length))
     if (new Set(clean.map((c) => c.id)).size !== clean.length) throw new Error('Duplicate candidates')
@@ -107,6 +112,25 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
     project.revision++
     writeProject(run, project)
   } finally { operations.delete(run) }
+  return openEditor(run)
+}
+/** Delete the source and preview once every clip is baked or discarded. The project becomes read-only. */
+export async function freeEditorMedia(path: unknown, revision: unknown): Promise<EditorSession> {
+  const run = runPath(path)
+  if (operations.has(run)) throw new Error('Wait for the current editor operation to finish')
+  operations.set(run, { action: 'save' })
+  try {
+    const { project } = await openEditor(run)
+    if (!Number.isSafeInteger(revision) || project.revision !== revision) throw new Error('This project changed. Reopen it before saving.')
+    if (editorProgress(project.candidates).remaining) throw new Error('Bake or discard every clip before freeing editor media.')
+    if (!project.media_freed) {
+      project.media_freed = true
+      project.revision++
+      writeProject(run, project)
+    }
+  } finally { operations.delete(run) }
+  sweepEditorFiles(run)
+  logger.info('editor.mediaFreed')
   return openEditor(run)
 }
 function stop(child?: ChildProcess, force = false): void {
@@ -225,6 +249,7 @@ async function executeEditor(path: unknown, revision: unknown, candidateId: unkn
   const failed: { title: string; error: Error }[] = []
   try {
     const session = await openEditor(run)
+    if (session.project.media_freed) throw new Error('Editor media was freed. This project is read-only.')
     previousPreview = session.previewPath
     if (revision !== session.project.revision || (action !== 'export-all' && action !== 'replace-source' && !session.project.candidates.some((c) => c.id === candidateId))) throw new Error('Project changed. Reopen it and retry.')
     if (sourceId) {
