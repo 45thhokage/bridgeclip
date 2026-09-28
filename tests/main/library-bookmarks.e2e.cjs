@@ -4,14 +4,15 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { buildApp, launchApp, ROOT } = require('../zernio/support/electron-app.cjs')
+const { buildApp, launchApp } = require('../zernio/support/electron-app.cjs')
+const { editorTools } = require('./editor-e2e-tools.cjs')
 
-async function setupLibrary(t) {
+async function setupLibrary(t, tools) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-bookmarks-'))
   const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, 'BridgeClip')
   const titles = ['A better morning', 'The creative process', 'Small ideas, big changes', 'Behind the scenes', 'Finding your focus', 'The long conversation']
   const video = path.join(root, 'sample.mp4')
-  execFileSync(path.join(ROOT, 'engine-bin/ffmpeg'), ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=10:duration=1', '-c:v', 'mpeg4', video])
+  execFileSync(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=10:duration=1', ...tools.encoder, '-pix_fmt', 'yuv420p', video])
   const runs = titles.map((title, index) => {
     const jobId = `${String(index + 1).repeat(8)}-1111-4111-8111-111111111111`
     const dir = path.join(library, jobId)
@@ -23,7 +24,7 @@ async function setupLibrary(t) {
       total_clips: 1, clips: [{ clip_index: 0, summary: title, s3_url: clip, duration_ms: 1000, start_time_ms: 0, end_time_ms: 1000, virality_score: 90 }] }))
     return dir
   })
-  const session = await launchApp({ appDir: buildApp(path.join(root, 'app')), userDataDir })
+  const session = await launchApp({ appDir: buildApp(path.join(root, 'app')), userDataDir, env: tools.appEnv })
   t.after(async () => { await session.close(); fs.rmSync(root, { recursive: true, force: true }) })
   const { app, page } = session
   page.setDefaultTimeout(10000)
@@ -34,7 +35,9 @@ async function setupLibrary(t) {
 }
 
 test('Library bookmarks move existing cards, preserve thumbnails, persist and recover from failed writes', { timeout: 90000 }, async t => {
-  const { app, page, titles, runs, errors } = await setupLibrary(t)
+  const tools = editorTools(t, { playable: false })
+  if (!tools) return
+  const { app, page, titles, runs, errors } = await setupLibrary(t, tools)
   await page.getByRole('button', { name: 'Library', exact: true }).click()
   await page.waitForFunction(() => document.querySelectorAll('.library-run-slot img').length === 12)
   const card = title => page.locator('article').filter({ has: page.getByRole('button', { name: `Open ${title}`, exact: true }) })
@@ -108,7 +111,9 @@ test('Library bookmarks move existing cards, preserve thumbnails, persist and re
 
 
 test('Library reloads preserve pending bookmarks and ignore stale reads after a save or rollback', { timeout: 90000 }, async t => {
-  const { app, page, titles, runs, errors } = await setupLibrary(t)
+  const tools = editorTools(t, { playable: false })
+  if (!tools) return
+  const { app, page, titles, runs, errors } = await setupLibrary(t, tools)
   await page.getByRole('button', { name: 'Library', exact: true }).click()
   await page.waitForFunction(() => document.querySelectorAll('.library-run-slot img').length === 12)
   const initial = await page.evaluate(() => window.bridgeclip.history.list())
@@ -166,7 +171,9 @@ test('Library reloads preserve pending bookmarks and ignore stale reads after a 
 })
 
 test('Library Refresh retries failed previews without resetting healthy images on bookmark changes', { timeout: 90000 }, async t => {
-  const { app, page, titles, runs, errors } = await setupLibrary(t)
+  const tools = editorTools(t, { playable: false })
+  if (!tools) return
+  const { app, page, titles, runs, errors } = await setupLibrary(t, tools)
   const thumbnail = await page.evaluate(clip => window.bridgeclip.thumbnails.generate(clip), path.join(runs[0], 'clip.mp4'))
   assert.ok(thumbnail)
   await app.evaluate(({ ipcMain }, thumbnail) => {

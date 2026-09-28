@@ -94,7 +94,7 @@ test('Library deletes only selected clips through its icon action and refreshes 
   fs.renameSync(manifest, `${manifest}.backup`)
   await trash.click()
   await page.getByRole('button', { name: 'Delete clips', exact: true }).click()
-  await page.getByText(/This completed run is no longer available/).waitFor()
+  await page.getByText('This completed run is no longer available in your Library.', { exact: true }).waitFor()
   assert.ok(clips.slice(0, 3).every(clip => fs.existsSync(clip.s3_url)))
   fs.renameSync(`${manifest}.backup`, manifest)
   await trash.click()
