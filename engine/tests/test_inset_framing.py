@@ -136,3 +136,92 @@ def test_inset_counts_as_smart_framing_and_overlays_use_actual_foreground():
     assert foreground_geometry(shot, 640, 360, 1080, 1920) == (h, y)
     assert title_y(shot, 640, 360, 1080, 1920, 100) + 100 < y
     assert banner_y(shot, 640, 360, 1080, 1920) > y + h
+
+
+def pillarbox_frame():
+    """4:3 picture centered in 16:9 with black side bars (a common re-upload)."""
+    rng = np.random.default_rng(3)
+    image = np.zeros((360, 640, 3), np.uint8)
+    image[:, 80:560] = cv2.GaussianBlur(rng.integers(60, 200, (360, 480, 3), np.uint8), (9, 9), 0)
+    return image
+
+
+def pillarbox_shot(x=.45, duration_ms=8000):
+    box = detect_content_box(pillarbox_frame())
+    assert box is not None and box.h == 1
+    hist = np.zeros((24, 16), np.float32)
+    hist[1, 1] = 1
+    frames = [FrameInfo(t, [Box(x, .2, .1, .3)], hist, [.95], box) for t in range(0, duration_ms, 250)]
+    return box, frames, heuristic_layout(frames, 0, duration_ms, 1920, 1080)
+
+
+@pytest.mark.parametrize('x', [.45, .14, .76])
+def test_pillarboxed_talking_head_is_tracked_inside_the_picture(x):
+    box, _, shot = pillarbox_shot(x)
+    assert shot.layout == LayoutType.TALKING_HEAD
+    assert shot.content_box is None and shot.crop_bounds == box
+    assert shot.focus_path
+    left, right = box.x * 1920, (box.x + box.w) * 1920
+    for t in range(0, 8000, 500):
+        [((cx, cy, cw, ch), destination)] = shot_views(shot, t, 1920, 1080, 1080, 1920)
+        assert destination == (0, 0, 1080, 1920)
+        assert left <= cx and cx + cw <= right, 'the crop never shows the black bars'
+        assert ch == 1080
+
+
+def test_pillarboxed_speaker_skips_vision_and_honours_explicit_styles(monkeypatch):
+    from clip_engine.config import LayoutStyle
+    from clip_engine.services.layout_analyzer import apply_style
+    box, frames, _ = pillarbox_shot()
+    analyzer = LayoutAnalyzer()
+    monkeypatch.setattr(analyzer, '_decode_and_detect', lambda *_: (frames, [(0, b'x')]))
+    monkeypatch.setattr(analyzer, '_vision_enabled', lambda: True)
+    async def no_vision(*_, **__):
+        raise AssertionError('a sustained inset speaker needs no paid vision call')
+    monkeypatch.setattr(analyzer, '_vision_classify', no_vision)
+    plan = asyncio.run(analyzer.analyze('fixture.mp4', 0, 8000, 1920, 1080, capture=True))
+    assert [(s.layout, s.crop_bounds) for s in plan.shots] == [(LayoutType.TALKING_HEAD, box)]
+    assert plan.trace['decisions'][0]['vision']['status'] == 'content_region'
+
+    fitted = apply_style(heuristic_layout(frames, 0, 8000, 1920, 1080), LayoutStyle.FIT, 1920, 1080)
+    assert fitted.layout == LayoutType.SCREEN and fitted.content_box == box and fitted.crop_bounds is None
+    # A portrait inset keeps its composition automatically, but "fill" is honoured.
+    portrait = ShotLayout(0, 4000, LayoutType.SCREEN, content_box=Box(.3, .05, .4, .9))
+    assert apply_style(portrait, LayoutStyle.AUTO, 640, 360).content_box is not None
+    filled = apply_style(ShotLayout(0, 4000, LayoutType.SCREEN, content_box=Box(.3, .05, .4, .9)),
+                         LayoutStyle.FILL, 640, 360)
+    assert filled.layout == LayoutType.TALKING_HEAD and filled.content_box is None
+    [((x, _, w, _), _)] = shot_views(filled, 0, 640, 360, 180, 320)
+    assert .3 * 640 <= x and x + w <= .7 * 640
+
+
+def test_portrait_inset_and_brief_or_multiple_faces_keep_the_composition():
+    box = detect_content_box(inset_frame())
+    face = Box(.45, .3, .1, .3)
+    portrait = [FrameInfo(t, [face], None, [.95], box) for t in range(0, 4000, 250)]
+    assert heuristic_layout(portrait, 0, 4000, 640, 360).content_box == box
+    pillar = detect_content_box(pillarbox_frame())
+    brief = [FrameInfo(t, [face] if t < 1000 else [], None, [.95], pillar) for t in range(0, 4000, 250)]
+    two = [FrameInfo(t, [Box(.2, .3, .1, .3), Box(.6, .3, .1, .3)], None, [.95, .95], pillar) for t in range(0, 4000, 250)]
+    for frames in (brief, two):
+        assert heuristic_layout(frames, 0, 4000, 1920, 1080).content_box == pillar
+
+
+def test_render_of_pillarboxed_speaker_has_no_bars(tmp_path):
+    ffmpeg = os.environ.get('TEST_FFMPEG') or shutil.which('ffmpeg')
+    if not ffmpeg:
+        pytest.skip('ffmpeg unavailable')
+    image = pillarbox_frame()
+    _, _, shot = pillarbox_shot(.14, 1000)
+    plan = ClipLayoutPlan([shot], 640, 360)
+    raw = tmp_path / 'pillar.rgb'
+    raw.write_bytes(cv2.cvtColor(image, cv2.COLOR_BGR2RGB).tobytes() * 4)
+    rendered = subprocess.run([
+        ffmpeg, '-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '640x360',
+        '-r', '4', '-i', str(raw), '-filter_complex', build_layout_graph(plan, 180, 320, fps='4'),
+        '-map', '[base]', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1',
+    ], capture_output=True, check=True, timeout=30)
+    output = np.frombuffer(rendered.stdout, np.uint8).reshape(-1, 320, 180, 3)
+    assert len(output) == 4
+    # Every output column comes from the picture, never from a black bar.
+    assert output.max(axis=(0, 1, 3)).min() > 40

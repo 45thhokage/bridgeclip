@@ -77,21 +77,32 @@ def step_expr(boundaries: list[float], values: list[float]) -> str:
 def _fill_crop_path(
     shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int,
 ) -> tuple[int, int, list[tuple[float, float]], list[tuple[float, float]]]:
-    """Crop size and its (t_sec, x) / (t_sec, y) keyframes in window time."""
+    """Crop size and its (t_sec, x) / (t_sec, y) keyframes in window time.
+
+    A talking head inside a padded inset (`crop_bounds`) is cropped from the
+    inset only, with its edges rounded inward so no padding enters the frame.
+    """
     target = out_w / out_h
-    if src_w / src_h > target:
-        crop_h = even(src_h)
-        crop_w = even(src_h * target)
+    left, top, right, bottom = 0, 0, src_w, src_h
+    if shot.crop_bounds is not None:
+        bounds = shot.crop_bounds.clamp()
+        left, top = min(src_w - 2, ceil(bounds.x * src_w / 2) * 2), min(src_h - 2, ceil(bounds.y * src_h / 2) * 2)
+        right = max(left + 2, int((bounds.x + bounds.w) * src_w) // 2 * 2)
+        bottom = max(top + 2, int((bounds.y + bounds.h) * src_h) // 2 * 2)
+    width, height = right - left, bottom - top
+    if width / height > target:
+        crop_h = even(height)
+        crop_w = even(height * target)
     else:
-        crop_w = even(src_w)
-        crop_h = even(src_w / target)
+        crop_w = even(width)
+        crop_h = even(width / target)
 
     path = shot.focus_path or [(0, 0.5, 0.5)]
     xs, ys = [], []
     for t_ms, cx, cy in path:
         t = (shot.start_ms + t_ms) / 1000
-        xs.append((t, _clamp(cx * src_w - crop_w / 2, 0, src_w - crop_w)))
-        ys.append((t, _clamp(cy * src_h - crop_h * PERSON_FACE_Y, 0, src_h - crop_h)))
+        xs.append((t, _clamp(cx * src_w - crop_w / 2, left, right - crop_w)))
+        ys.append((t, _clamp(cy * src_h - crop_h * PERSON_FACE_Y, top, bottom - crop_h)))
     return crop_w, crop_h, xs, ys
 
 

@@ -962,6 +962,7 @@
           ],
           "people": [],
           "content_box": null,
+          "crop_bounds": null,
           "cam_box_refined": false
         }
       },
@@ -985,6 +986,7 @@
         ],
         "people": [],
         "content_box": null,
+        "crop_bounds": null,
         "cam_box_refined": false
       }
     },
@@ -1080,6 +1082,7 @@
             ]
           ],
           "content_box": null,
+          "crop_bounds": null,
           "cam_box_refined": false
         }
       },
@@ -1100,6 +1103,7 @@
           ]
         ],
         "content_box": null,
+        "crop_bounds": null,
         "cam_box_refined": false
       }
     },
@@ -1206,6 +1210,7 @@
           ],
           "people": [],
           "content_box": null,
+          "crop_bounds": null,
           "cam_box_refined": false
         }
       },
@@ -1229,6 +1234,7 @@
         ],
         "people": [],
         "content_box": null,
+        "crop_bounds": null,
         "cam_box_refined": false
       }
     }
@@ -1254,6 +1260,7 @@
       ],
       "people": [],
       "content_box": null,
+      "crop_bounds": null,
       "cam_box_refined": false,
       "detected_layout": "screen_cam",
       "cam_face": [
@@ -1312,6 +1319,7 @@
         ]
       ],
       "content_box": null,
+      "crop_bounds": null,
       "cam_box_refined": false,
       "detected_layout": "talking_head",
       "cam_face": null,
@@ -1376,6 +1384,7 @@
       ],
       "people": [],
       "content_box": null,
+      "crop_bounds": null,
       "cam_box_refined": false,
       "detected_layout": "screen_cam",
       "cam_face": [
@@ -1439,6 +1448,7 @@
       ],
       "people": [],
       "content_box": null,
+      "crop_bounds": null,
       "cam_box_refined": false,
       "detected_layout": "screen_cam",
       "cam_face": [
@@ -1497,6 +1507,7 @@
         ]
       ],
       "content_box": null,
+      "crop_bounds": null,
       "cam_box_refined": false,
       "detected_layout": "talking_head",
       "cam_face": null,
@@ -1561,6 +1572,7 @@
       ],
       "people": [],
       "content_box": null,
+      "crop_bounds": null,
       "cam_box_refined": false,
       "detected_layout": "screen_cam",
       "cam_face": [

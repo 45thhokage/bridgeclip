@@ -102,6 +102,13 @@ OVERLAY_MAX_FACE_HEIGHT = 0.17
 MIN_FACE_HEIGHT = 0.035
 # Share of a webcam overlay's height its face spans (head-and-shoulders framing).
 CAM_FACE_SHARE = 0.28
+# A face inside a padded landscape inset (4:3 pillarbox, a framed 16:9
+# picture) is followed rather than fitted when it is the only face, visible for
+# most of the shot, and the inset is tall enough that a crop inside it stays
+# sharp. Square and portrait insets already suit a 9:16 frame when fitted.
+INSET_SPEAKER_PRESENCE = 0.6
+INSET_FILL_MIN_HEIGHT = 0.6
+INSET_FILL_MIN_ASPECT = 1.2
 
 # Face-tracked crop camera: ignore motion inside this share of the crop
 # width, and cap how fast the virtual camera pans (crop widths per second).
@@ -205,6 +212,9 @@ class ShotLayout:
     # A video inset surrounded by padding. Preserve its composition, rather
     # than following faces inside it or carrying an anchor across the cut.
     content_box: Optional[Box] = None
+    # talking_head inside a padded inset (e.g. 4:3 pillarboxed in 16:9): the
+    # face-tracked crop must stay within these bounds so no padding shows.
+    crop_bounds: Optional[Box] = None
     cam_box_refined: bool = False
     manual_crops: list[tuple[float, float, float, float]] = field(default_factory=list)
     manual_from_crops: list[tuple[float, float, float, float]] = field(default_factory=list)
@@ -222,6 +232,7 @@ class ShotLayout:
             "cam_box": self.cam_box.to_list() if self.cam_box else None,
             "people": [p.to_list() for p in self.people],
             "content_box": self.content_box.to_list() if self.content_box else None,
+            "crop_bounds": self.crop_bounds.to_list() if self.crop_bounds else None,
             "cam_box_refined": self.cam_box_refined,
         }
 
@@ -473,16 +484,52 @@ def segment_content_box(frames: list[FrameInfo]) -> Optional[Box]:
     return None
 
 
+def inset_crop_width(bounds: Optional[Box], src_w: int, src_h: int) -> float:
+    """Width (share of the source) of the 9:16 fill crop inside `bounds`."""
+    box = bounds or Box(0, 0, 1, 1)
+    crop_h = min(box.h * src_h, box.w * src_w * 16 / 9)
+    return min(1.0, crop_h * 9 / 16 / src_w)
+
+
+def inset_speaker(
+    tracks: list[FaceTrack], shot_frames: int, content: Box, src_w: int, src_h: int,
+) -> Optional[FaceTrack]:
+    """The one sustained on-camera face inside a landscape inset, if any.
+
+    A pillarboxed 4:3 camera is an inset whose composition is a person; follow
+    them like any talking head. Other insets (portrait video, screens, groups,
+    brief faces) keep their composition.
+    """
+    present = [t for t in tracks
+               if len(t.samples) >= max(1, MIN_TRACK_PRESENCE * shot_frames)
+               and t.median_box().h >= MIN_FACE_HEIGHT]
+    if (len(present) != 1 or content.h < INSET_FILL_MIN_HEIGHT
+            or content.w * src_w < INSET_FILL_MIN_ASPECT * content.h * src_h):
+        return None
+    track = present[0]
+    face = track.median_box()
+    if (len(track.samples) < INSET_SPEAKER_PRESENCE * shot_frames or is_corner_overlay(face)
+            or face.h <= OVERLAY_MAX_FACE_HEIGHT * 1.3 or not content.contains(face.cx, face.cy)):
+        return None
+    return track
+
+
 def heuristic_layout(
     frames: list[FrameInfo], start_ms: int, end_ms: int, src_w: int, src_h: int,
     diagnostic: Optional[dict] = None,
 ) -> ShotLayout:
     """Classify and track only the faces belonging to this layout segment."""
     content = segment_content_box(frames)
-    if content is not None:
-        return ShotLayout(start_ms, end_ms, LayoutType.SCREEN, content_box=content)
     tracks = track_faces(frames)
-    shot, main_track = classify_shot(tracks, len(frames), src_w, src_h)
+    bounds = None
+    if content is not None:
+        main_track = inset_speaker(tracks, len(frames), content, src_w, src_h)
+        if main_track is None:
+            return ShotLayout(start_ms, end_ms, LayoutType.SCREEN, content_box=content)
+        shot, bounds = ShotLayout(0, 0, LayoutType.TALKING_HEAD, people=[main_track.median_box()],
+                                  crop_bounds=content), content
+    else:
+        shot, main_track = classify_shot(tracks, len(frames), src_w, src_h)
     if diagnostic is not None:
         lookup = {(f.t_ms, id(box)): i for f in frames for i, box in enumerate(f.faces)}
         diagnostic["tracks"] = [{"id": i, "selected": track is main_track,
@@ -491,8 +538,7 @@ def heuristic_layout(
     shot.start_ms, shot.end_ms = start_ms, end_ms
     if main_track is not None:
         samples = [(t - start_ms, box) for t, box in main_track.samples]
-        crop_w_frac = min(1.0, (src_h * 9 / 16) / src_w)
-        shot.focus_path = smooth_focus_path(samples, end_ms - start_ms, crop_w_frac)
+        shot.focus_path = smooth_focus_path(samples, end_ms - start_ms, inset_crop_width(bounds, src_w, src_h))
     return shot
 
 
@@ -898,7 +944,18 @@ def smooth_focus_path(
 def apply_style(shot: ShotLayout, style: str, src_w: int, src_h: int) -> ShotLayout:
     """Adjust a detected layout to the user's chosen framing style."""
     shot.detected_layout = shot.detected_layout or shot.layout
-    if shot.content_box is not None:
+    if shot.content_box is not None or shot.crop_bounds is not None:
+        # Insets keep their own picture: fill crops inside the inset, fit shows
+        # the whole inset. Automatic framing keeps the detected choice.
+        if style == LayoutStyle.FILL and shot.content_box is not None:
+            bounds = shot.content_box
+            focus = shot.people[0] if shot.people else bounds
+            shot.layout, shot.source = LayoutType.TALKING_HEAD, "style"
+            shot.content_box, shot.crop_bounds = None, bounds
+            shot.focus_path = shot.focus_path or [(0, focus.cx, focus.cy)]
+        elif style == LayoutStyle.FIT and shot.crop_bounds is not None:
+            shot.layout, shot.source = LayoutType.SCREEN, "style"
+            shot.content_box, shot.crop_bounds, shot.focus_path = shot.crop_bounds, None, []
         return shot
     if style == LayoutStyle.FIT:
         shot.layout = LayoutType.SCREEN
@@ -1163,9 +1220,10 @@ class LayoutAnalyzer:
                 decision["heuristic"] = shot.summary()
             reference_ms = (shot_start + shot_end) // 2
 
-            if shot.content_box is not None and decision is not None:
+            inset = shot.content_box is not None or shot.crop_bounds is not None
+            if inset and decision is not None:
                 decision["vision"] = {"status": "content_region"}
-            if vision and self._vision_enabled() and shot.content_box is None:
+            if vision and self._vision_enabled() and not inset:
                 keyframe = self._pick_keyframe(keyframes, reference_ms, shot_start, shot_end)
                 if decision is not None:
                     decision["vision"] = {"status": "no_image"}
