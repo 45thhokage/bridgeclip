@@ -88,6 +88,16 @@ async function launchApp({ appDir, userDataDir, mock, apiUrl, env = {} }) {
     throw new Error(`The test app is not isolated from ${userDataDir}: ${outside.join(', ')}`)
   }
   const page = await app.firstWindow()
+  if (process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true') {
+    // Linux CI runs inside Xvfb. Map the window onto that virtual display so
+    // Chromium advances media, requestAnimationFrame and CSS animations.
+    // Local test runs still stay hidden on the developer's desktop.
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      window.webContents.setBackgroundThrottling(false)
+      window.show()
+    })
+  }
   await page.waitForLoadState('domcontentloaded')
   const settings = await page.evaluate(() => window.bridgeclip.settings.load())
   if (!real(settings.outputDirectory).startsWith(root) && !path.resolve(settings.outputDirectory).startsWith(path.resolve(userDataDir))) {

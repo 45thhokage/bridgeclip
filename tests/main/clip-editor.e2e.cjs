@@ -720,10 +720,11 @@ test('closing with unsaved edits asks first: Cancel keeps the window, Save write
   await page.getByText('All changes saved', { exact: true }).waitFor()
   await app.evaluate(() => { process.env.BRIDGECLIP_E2E_UNLOAD_CHOICE = 'save' })
   await title.fill('Saved on close')
+  const closed = page.waitForEvent('close')
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close())
-  const deadline = Date.now() + 10000
-  while (await windows() && Date.now() < deadline) await new Promise(r => setTimeout(r, 50))
-  assert.equal(await windows(), 0)
+  // Linux and Windows quit when their last window closes; macOS stays alive.
+  await closed
+  assert.equal(page.isClosed(), true)
   assert.match(log(), /"choice":"save"/)
   assert.equal(JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'))).candidates[0].title, 'Saved on close')
 })
