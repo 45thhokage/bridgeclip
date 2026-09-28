@@ -31,7 +31,7 @@ export function OutputStorage({ outputDirectory }: { outputDirectory: string }):
             if (!cancelled) setFailure('Restart BridgeClip to load the storage display.')
             return
           }
-          const result = await storageUsage()
+          const result = await storageUsage(refresh > 0)
           if (!cancelled) {
             if (result.outputDirectory === outputDirectory) setUsage(result)
             else setFailure('The output folder changed. Refresh to recalculate its size.')
@@ -62,11 +62,12 @@ export function OutputStorage({ outputDirectory }: { outputDirectory: string }):
           <p className="text-xs text-warning">{failure}</p>
         ) : usage && (
           <>
-            <p className="text-xl font-semibold tabular-nums text-ink">{usage.unreadableCount > 0 && 'At least '}{formatSize(usage.bytes)}</p>
+            <p className="text-xl font-semibold tabular-nums text-ink">{(usage.unreadableCount > 0 || usage.truncated) && 'At least '}{formatSize(usage.bytes)}</p>
             <p className="mt-0.5 text-2xs text-ink-muted">
               {usage.exists ? `${usage.fileCount.toLocaleString()} ${usage.fileCount === 1 ? 'file' : 'files'} · Total file size in your output folder` : 'Your output folder has not been created yet.'}
             </p>
             {usage.unreadableCount > 0 && <p className="mt-1 text-2xs text-warning">Some files or folders could not be read. Refresh to try again.</p>}
+            {usage.truncated && <p className="mt-1 text-2xs text-ink-muted">This folder is very large or deeply nested, so counting stopped early.</p>}
           </>
         )}
       </div>

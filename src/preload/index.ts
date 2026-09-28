@@ -107,7 +107,8 @@ export interface BridgeClipAPI {
   }
   settings: {
     load: () => Promise<ClipSettings>
-    storageUsage: () => Promise<OutputStorageUsage>
+    /** Pass true to count again instead of reusing a result from the last few seconds. */
+    storageUsage: (fresh?: boolean) => Promise<OutputStorageUsage>
     save: (settings: ClipSettings) => Promise<ClipSettings>
     replaceApiKey: (key: 'openrouterApiKey' | 'zernioApiKey', value: string) => Promise<ClipSettings>
     selectOutputDir: () => Promise<string | null>
@@ -256,7 +257,7 @@ const api: BridgeClipAPI = {
   },
   settings: {
     load: () => ipcRenderer.invoke('settings:load'),
-    storageUsage: () => ipcRenderer.invoke('settings:storageUsage'),
+    storageUsage: (fresh) => ipcRenderer.invoke('settings:storageUsage', fresh === true),
     save: (settings) => ipcRenderer.invoke('settings:save', settings),
     replaceApiKey: (key, value) => ipcRenderer.invoke('settings:replaceApiKey', key, value),
     selectOutputDir: () => ipcRenderer.invoke('settings:selectOutputDir')

@@ -7,7 +7,7 @@ const path = require('node:path')
 const { loadMain, tempDir } = require('../zernio/support/load-main.cjs')
 const { directoryLinkType, fileLinksAvailable } = require('../support/symlinks.cjs')
 const source = "export * from './src/main/output-storage'"
-const { measureOutputStorage } = loadMain(source)
+const { scanOutputStorage: measureOutputStorage } = loadMain(source)
 
 test('storage totals include nested and hidden files, and reflect added/deleted files', async (t) => {
   const temp = tempDir()
@@ -66,5 +66,40 @@ test('unreadable entries mark totals as partial and files removed during scannin
       return promises.lstat(file)
     }
   } })
-  assert.deepEqual(await scanner.measureOutputStorage(temp.dir), { outputDirectory: temp.dir, bytes: 4, fileCount: 1, exists: true, unreadableCount: 2 })
+  assert.deepEqual(await scanner.scanOutputStorage(temp.dir), { outputDirectory: temp.dir, bytes: 4, fileCount: 1, exists: true, unreadableCount: 2 })
+})
+
+test('Settings requests share one walk, reuse a recent result, and Refresh counts again', async (t) => {
+  const temp = tempDir()
+  t.after(temp.cleanup)
+  fs.writeFileSync(path.join(temp.dir, 'clip.mp4'), Buffer.alloc(100))
+  let walks = 0
+  const storage = loadMain(source, { 'fs/promises': { ...promises, readdir: async (dir) => { if (dir === temp.dir) walks++; return promises.readdir(dir) } } })
+  const [first, second] = await Promise.all([storage.measureOutputStorage(temp.dir), storage.measureOutputStorage(temp.dir)])
+  assert.equal(walks, 1, 'concurrent requests share the walk in progress')
+  assert.equal(first, second)
+  fs.writeFileSync(path.join(temp.dir, 'new.mp4'), Buffer.alloc(50))
+  assert.equal((await storage.measureOutputStorage(temp.dir)).bytes, 100, 'a recent result is reused')
+  assert.equal(walks, 1)
+  assert.equal((await storage.measureOutputStorage(temp.dir, { fresh: true })).bytes, 150, 'Refresh counts again')
+  assert.equal(walks, 2)
+  const other = path.join(temp.dir, 'other'); fs.mkdirSync(other)
+  assert.equal((await storage.measureOutputStorage(other)).outputDirectory, other, 'a different folder is never served from the cache')
+})
+
+test('a huge or deeply nested folder stops at the scan limits and reports a lower bound', async (t) => {
+  const temp = tempDir()
+  t.after(temp.cleanup)
+  for (let index = 0; index < 20; index++) fs.writeFileSync(path.join(temp.dir, `file-${index}`), Buffer.alloc(10))
+  const wide = await measureOutputStorage(temp.dir, { maxEntries: 5, maxDepth: 32 })
+  assert.equal(wide.truncated, true)
+  assert.ok(wide.fileCount <= 5 && wide.bytes <= 50)
+  let deep = path.join(temp.dir, 'nested')
+  for (let level = 0; level < 6; level++) { fs.mkdirSync(deep); fs.writeFileSync(path.join(deep, 'file'), Buffer.alloc(1)); deep = path.join(deep, 'more') }
+  const shallow = await measureOutputStorage(temp.dir, { maxEntries: 1000, maxDepth: 2 })
+  assert.equal(shallow.truncated, true)
+  assert.equal(shallow.fileCount, 20 + 2, 'files below the depth limit are not counted')
+  const full = await measureOutputStorage(temp.dir)
+  assert.equal(full.truncated, undefined)
+  assert.equal(full.fileCount, 26)
 })

@@ -69,7 +69,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('settings:load', () => {
     return publicSettings(loadSettings())
   })
-  handle('settings:storageUsage', () => measureOutputStorage(loadSettings().outputDirectory))
+  handle('settings:storageUsage', (_event, fresh: unknown = false) => measureOutputStorage(loadSettings().outputDirectory, { fresh: fresh === true }))
   handle('models:list', (_event, refresh: unknown = false) => getModelCatalog(refresh))
   handle('source:youtubePreview', (_event, source: unknown, details: unknown = false) => getYouTubePreview(source, details))
 
