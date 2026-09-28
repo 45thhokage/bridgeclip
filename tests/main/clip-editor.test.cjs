@@ -708,7 +708,7 @@ test('worker failures map fixed codes to specific messages and log only a redact
       const { child, options } = spawned; spawned = undefined
       assert.equal(options.env.PYTHONDONTWRITEBYTECODE, '1')
       child.stderr.write('2026-09-28 10:00:00,000 - editor_runner - ERROR - Editor export failed (render_failed)\n')
-      child.stderr.write("RenderingError: Error opening /Users/someone/Movies/clip.mp4 api_key=sk-or-v1-abcdef123456 https://example.com/x\nNo such filter: 'perspective'\n")
+      child.stderr.write("RenderingError: Error opening /Users/someone/Movies/clip.mp4 api_key=sk-or-v1-abcdef123456 https://example.com/x\nNo such filter: 'perspective'\n") // gitleaks:allow -- synthetic credential exercises log redaction
       child.stdout.write(JSON.stringify({ ok: false, error: code }) + '\n'); child.emit('close', 1, null)
       const error = await pending.then(() => null, (e) => e)
       assert.match(error.message, expected)
