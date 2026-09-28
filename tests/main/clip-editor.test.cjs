@@ -21,6 +21,23 @@ test('editor project validates cuts, geometry and candidate identity; strips ext
   ]) { const p = clone(); modify(p); assert.throws(() => schema.parseEditorProject(p)) }
 })
 
+test('long display text with emoji is clamped by UTF-16 length instead of rejecting the project', () => {
+  const p = clone()
+  p.candidates[0].title = 'a'.repeat(199) + '😀'
+  p.candidates[0].reason = 'r'.repeat(3999) + '👍🏽'
+  p.title = 't'.repeat(1030)
+  p.transcript[0].text = 'w'.repeat(19999) + '😀'
+  const parsed = schema.parseEditorProject(p)
+  assert.equal(parsed.candidates[0].title, 'a'.repeat(199))
+  assert.equal(parsed.candidates[0].reason, 'r'.repeat(3999))
+  assert.equal(parsed.title.length, 1024)
+  assert.equal(parsed.transcript[0].text, 'w'.repeat(19999))
+  assert.equal(schema.clampText('ab😀c', 4), 'ab😀')
+  for (const bad of [null, 5, ['a']]) assert.throws(() => schema.clampText(bad, 10))
+  const blank = clone(); blank.candidates[0].title = ' '.repeat(300)
+  assert.throws(() => schema.parseEditorProject(blank))
+})
+
 test('editor progress prioritizes unfinished candidates, then baked ones, over discards', () => {
   for (const [statuses, remaining, initialCandidate] of [
     [['discarded', 'refining', 'ready'], 2, 1],

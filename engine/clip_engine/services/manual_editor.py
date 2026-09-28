@@ -52,6 +52,16 @@ def failure_code(code):
         raise
 
 
+def utf16_prefix(text, limit):
+    """At most `limit` UTF-16 units (the editor UI's string length), never half a surrogate pair."""
+    units = 0
+    for i, char in enumerate(text):
+        units += 2 if ord(char) > 0xFFFF else 1
+        if units > limit:
+            return text[:i]
+    return text
+
+
 def media_name(kind, source_id=None):
     if source_id is not None and (not isinstance(source_id, str) or not re.fullmatch(r'[a-f0-9]{32}', source_id)):
         raise ValueError('Invalid source generation')
@@ -160,9 +170,10 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
     w, h = await renderer._get_video_dimensions(download.video_path)
     duration = round(download.metadata.duration_seconds * 1000)
     aspect = 9 / 16 if request.aspect_ratio == '9:16' else 16 / 9
-    project = {'version': 1, 'revision': 0, 'title': download.metadata.title, 'width': w, 'height': h,
+    project = {'version': 1, 'revision': 0, 'title': utf16_prefix(download.metadata.title or '', 1024), 'width': w, 'height': h,
         'duration_ms': duration, 'aspect_ratio': request.aspect_ratio, 'candidates': [],
-        'transcript': [{'start_ms': max(0, min(duration, s.start_time_ms)), 'end_ms': max(0, min(duration, s.end_time_ms)), 'text': s.text} for s in transcript]}
+        'transcript': [{'start_ms': max(0, min(duration, s.start_time_ms)), 'end_ms': max(0, min(duration, s.end_time_ms)),
+                        'text': utf16_prefix(s.text, 20000)} for s in transcript]}
     loop = asyncio.get_running_loop()
     from .run_diagnostics import CURRENT
     diagnostics = CURRENT.get()
@@ -212,10 +223,10 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
                 raise
             except Exception:
                 pass  # Centered framing is editable if detection isn't available.
-        c = {'id': f'candidate-{i + 1}', 'title': (segment.summary or f'Clip {i + 1}')[:200],
+        c = {'id': f'candidate-{i + 1}', 'title': utf16_prefix(segment.summary or f'Clip {i + 1}', 200),
             'ranges': [[a, b]], 'scenes': scenes, 'score': max(0, min(100, segment.virality_score)),
             'requires_visual_context': bool((getattr(segment, 'moment', None) or {}).get('requires_visual_context')),
-            'reason': (getattr(segment, 'reasoning', '') or '')[:4000], 'captions': request.include_captions,
+            'reason': utf16_prefix(getattr(segment, 'reasoning', '') or '', 4000), 'captions': request.include_captions,
             'caption_preset': request.caption_preset, 'video_speed': request.video_speed, 'exports': [], 'review': None,
             'status': 'refining', 'caption_edits': [], 'caption_suppression_ranges': []}
         if plan is not None and getattr(plan, 'camera_scan', None):

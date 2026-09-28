@@ -65,6 +65,13 @@ const fail = (): never => { throw new Error('Invalid editor project') }
 const record = (x: unknown): Record<string, unknown> => x && typeof x === 'object' && !Array.isArray(x) ? x as Record<string, unknown> : fail()
 const num = (x: unknown, lo: number, hi: number): number => typeof x === 'number' && Number.isFinite(x) && x >= lo && x <= hi ? x : fail()
 const str = (x: unknown, max: number): string => typeof x === 'string' && x.length <= max ? x : fail()
+/** Display text: clamp to `max` UTF-16 units without splitting a surrogate pair, never reject for length. */
+export function clampText(x: unknown, max: number): string {
+  if (typeof x !== 'string') return fail()
+  if (x.length <= max) return x
+  const end = /[\uD800-\uDBFF]/.test(x[max - 1] ?? '') ? max - 1 : max
+  return x.slice(0, end)
+}
 const arr = (x: unknown, max: number): unknown[] => Array.isArray(x) && x.length <= max ? x : fail()
 export function parseCandidateEdit(value: unknown, duration: number, transcriptCount = 100000): CandidateEdit {
   const v = record(value)
@@ -90,7 +97,7 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
   if (!scenes.length || scenes[0].at_ms !== 0 || scenes.some((s, i) => i > 0 && s.at_ms <= scenes[i - 1].at_ms)) fail()
   if (scenes.some((s, i) => s.transition_ms && !canAnimateScene(scenes, i))) fail()
   const id = str(v.id, 64); if (!/^[a-zA-Z0-9_-]+$/.test(id)) fail()
-  const title = str(v.title, 200); if (!title.trim()) fail()
+  const title = clampText(v.title, 200); if (!title.trim()) fail()
   const caption_preset = str(v.caption_preset, 64); if (!/^[a-z0-9_-]+$/i.test(caption_preset)) fail()
   if (typeof v.captions !== 'boolean') fail()
   const status = v.status === undefined ? 'refining' : v.status
@@ -114,7 +121,7 @@ export function parseCandidateEdit(value: unknown, duration: number, transcriptC
 }
 function question(value: unknown): EditorQuestion {
   const v = record(value)
-  return { id: str(v.id, 64), prompt: str(v.prompt, 4000), yes: str(v.yes, 4000), no: str(v.no, 4000),
+  return { id: str(v.id, 64), prompt: clampText(v.prompt, 4000), yes: clampText(v.yes, 4000), no: clampText(v.no, 4000),
     probability: v.probability === null ? null : num(v.probability, 0, 1), threshold: num(v.threshold, 0, 1), status: str(v.status, 64) }
 }
 export function parseEditorProject(value: unknown): EditorProject {
@@ -123,7 +130,7 @@ export function parseEditorProject(value: unknown): EditorProject {
   if (v.preview_id !== undefined && (typeof v.preview_id !== 'string' || !/^[a-f0-9]{32}$/.test(v.preview_id))) fail()
   if (v.version !== 1 || !['9:16', '16:9'].includes(v.aspect_ratio as string)) fail()
   const duration = num(v.duration_ms, 100, 24 * 3600000)
-  const transcript = arr(v.transcript, 100000).map((row) => { const t = record(row); return { start_ms: num(t.start_ms, 0, duration), end_ms: num(t.end_ms, 0, duration), text: str(t.text, 20000) } })
+  const transcript = arr(v.transcript, 100000).map((row) => { const t = record(row); return { start_ms: num(t.start_ms, 0, duration), end_ms: num(t.end_ms, 0, duration), text: clampText(t.text, 20000) } })
   const ids = new Set<string>()
   const candidates = arr(v.candidates, 100).map((item): EditorCandidate => {
     const c = record(item), edit = parseCandidateEdit(c, duration, transcript.length)
@@ -148,11 +155,11 @@ export function parseEditorProject(value: unknown): EditorProject {
       if (markers.some((m, i) => !times.has(m.at_ms) || (i > 0 && m.at_ms <= markers[i - 1].at_ms))) fail()
       camera_scan = { start_ms, end_ms, frames, markers }
     }
-    return { ...edit, ...(camera_scan ? { camera_scan } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: str(c.reason, 4000), review,
+    return { ...edit, ...(camera_scan ? { camera_scan } : {}), requires_visual_context: c.requires_visual_context === true, score: num(c.score, 0, 100), reason: clampText(c.reason, 4000), review,
       exports: arr(c.exports, 1000).map((n) => num(n, 0, 999)) }
   })
   if (!candidates.length) fail()
-  return { version: 1, revision: num(v.revision, 0, Number.MAX_SAFE_INTEGER), title: str(v.title, 1024), duration_ms: duration,
+  return { version: 1, revision: num(v.revision, 0, Number.MAX_SAFE_INTEGER), title: clampText(v.title, 1024), duration_ms: duration,
     width: num(v.width, 2, 16384), height: num(v.height, 2, 16384), aspect_ratio: v.aspect_ratio as EditorProject['aspect_ratio'], candidates,
     transcript, ...(v.preview_id ? { preview_id: v.preview_id as string } : {}), ...(v.frame_preview === true ? { frame_preview: true } : {}), ...(v.source_id ? { source_id: v.source_id as string } : {}) }
 }

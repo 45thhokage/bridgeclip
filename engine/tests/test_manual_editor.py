@@ -608,3 +608,24 @@ def test_editor_preview_is_encoded_near_3_mbps_at_720p(monkeypatch, tmp_path):
         asyncio.run(renderer.capture_framing_source('in.mp4', str(tmp_path / f'preview-{fps}.mp4')))
         cmd = commands[-1]
         assert 'scale=1280:720,setsar=1' in cmd and cmd[cmd.index('-b:v') + 1] == expected
+
+def test_titles_and_reasons_truncate_by_utf16_units_without_splitting_emoji(tmp_path):
+    """The UI counts UTF-16 units; one emoji at the limit must not break the project."""
+    from clip_engine.services.manual_editor import utf16_prefix
+    assert utf16_prefix('ab😀', 3) == 'ab' and utf16_prefix('ab😀', 4) == 'ab😀' and utf16_prefix('', 5) == ''
+    gate, _ = reviewer(lambda state, q: False)
+    source = tmp_path / 'original.mov'
+    source.write_bytes(b'source')
+    out = tmp_path / 'run'; out.mkdir()
+    async def preview(src, dest, **kwargs): Path(dest).write_bytes(b'preview')
+    renderer = SimpleNamespace(_get_video_dimensions=AsyncMock(return_value=(1920, 1080)),
+        capture_framing_source=AsyncMock(side_effect=preview))
+    request = SimpleNamespace(aspect_ratio='9:16', layout_style='fit', include_captions=True, caption_preset='pop', video_speed=1)
+    segments = [ClipPlanSegment(0, 5000, .9, summary='a' * 199 + '😀')]
+    segments[0].reasoning = 'r' * 3999 + '👍🏽'
+    project = asyncio.run(prepare_project(request, segments, transcript(), SimpleNamespace(video_path=str(source),
+        metadata=SimpleNamespace(title='t' * 1023 + '😀', duration_seconds=12)), renderer, gate, str(out), lambda *_: None))
+    c = project['candidates'][0]
+    assert c['title'] == 'a' * 199 and c['reason'] == 'r' * 3999 and project['title'] == 't' * 1023
+    validate_candidate(c, 12000)
+
