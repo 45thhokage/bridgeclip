@@ -377,3 +377,22 @@ test('explicit Jev opt-out is shown as skipped, never as a passed or missing rev
   assert.match(html, /Jev review was turned off for this run/)
   assert.doesNotMatch(html, /No Jev question trace|Below threshold|saved requests/)
 })
+
+test('out-of-credits judgments and answers without optional probabilities or confidence stay readable', () => {
+  const { JevTrace } = load('src/renderer/components/JevTrace.tsx')
+  const copy = structuredClone(editFixture)
+  const attempts = copy.candidates[0].report.coherence.attempts
+  attempts[0].judgment.answers.evidence = { type: 'choice', choice: 'sufficient', confidence: null,
+    probabilities: { sufficient: .51, insufficient: .49 }, probabilities_reported: false }
+  attempts[1].judgment.status = 'out_of_credits'
+  attempts[1].judgment.answers = {}
+  const audit = parseEditAudit(copy)
+  const evidence = audit.candidates[0].report.coherence.attempts[0].judgment.answers.evidence
+  assert.equal(evidence.confidence, null)
+  assert.equal(evidence.estimated, true)
+  assert.equal(audit.candidates[0].report.coherence.attempts[1].judgment.status, 'out_of_credits')
+  const html = renderToStaticMarkup(React.createElement(JevTrace, { trace: audit.candidates[0].report }))
+  assert.match(html, /Probabilities not reported by Jev; conservative estimate shown/)
+  attempts[1].judgment.status = 'invented_status'
+  assert.throws(() => parseEditAudit(copy))
+})

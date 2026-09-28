@@ -2,6 +2,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -11,6 +12,13 @@ from clip_engine.services.editorial_context import analyze_reactions, repair_con
 from clip_engine.services.clip_editor import TimeMap, WindowWord, compute_keep_intervals, subtract_intervals
 from clip_engine.services.layout_analyzer import ClipLayoutPlan, ShotLayout
 from clip_engine.services.editorial_review import protect_acknowledgments, review_retained_clip, review_duplicate_candidates
+
+
+@pytest.fixture(autouse=True)
+def instant_backoff(monkeypatch):
+    """Transient-status retries must not slow the offline suite."""
+    from clip_engine.services import jev_service as module
+    monkeypatch.setattr(module, '_sleep', AsyncMock())
 
 
 def segment(a, b, text):
@@ -294,7 +302,9 @@ def test_vision_failure_records_attempt_and_budget_prevents_requests(monkeypatch
 
 
 
-def test_local_render_time_does_not_exhaust_editorial_request_budget(monkeypatch):
+def test_provider_or_render_time_never_exhausts_the_review_budget(monkeypatch):
+    # Clip count must not depend on provider speed: only request, token and
+    # per-request timeout limits apply.
     from clip_engine.services import jev_service as module
     now = [100.0]
     monkeypatch.setattr(module.time, 'monotonic', lambda: now[0])
@@ -304,9 +314,11 @@ def test_local_render_time_does_not_exhaust_editorial_request_budget(monkeypatch
         assert (await client.evaluate({'stage': 'before rendering'}, q))['status'] == 'success'
         now[0] += 600  # Local FFmpeg work must not consume provider time.
         assert (await client.evaluate({'stage': 'retained QA'}, q))['status'] == 'success'
-        client.request_seconds = 120
-        assert (await client.evaluate({'stage': 'duplicate review'}, q))['status'] == 'budget_exhausted'
-        assert len(calls) == 2
+        client.request_seconds = 10_000
+        assert (await client.evaluate({'stage': 'duplicate review'}, q))['status'] == 'success'
+        assert len(calls) == 3
+        client.max_requests = 3
+        assert (await client.evaluate({'stage': 'over the request cap'}, q))['status'] == 'budget_exhausted'
     asyncio.run(run())
 
 
@@ -356,7 +368,175 @@ def test_time_between_candidates_does_not_exhaust_visual_review_budget(monkeypat
         assert (await observer.observe([1000, 9000]))['status'] == 'observed'
         now[0] += 300  # Repairing other candidates is outside the visual-work budget.
         assert (await observer.observe([10000, 18000]))['status'] == 'observed'
-        observer.work_seconds = 90
-        assert (await observer.observe([11000, 19000]))['status'] == 'budget_exhausted'
+        observer.work_seconds = 10_000  # Slow providers do not exhaust the budget either.
+        assert (await observer.observe([11000, 19000]))['status'] == 'observed'
+        observer.requests = 8
+        assert (await observer.observe([12000, 20000]))['status'] == 'budget_exhausted'
     asyncio.run(run())
-    assert observer.requests == 2
+    assert observer.requests == 8
+
+
+def scripted(statuses, *, headers=None, body=None):
+    """A Jev endpoint that answers each attempt with the next status."""
+    calls = []
+    def handler(request):
+        payload = json.loads(request.content)
+        calls.append(payload)
+        status = statuses[min(len(calls), len(statuses)) - 1]
+        if status != 200:
+            return httpx.Response(status, headers=(headers or {}).get(status, {}), content=b'{"error":"provider detail"}')
+        return httpx.Response(200, json=body(payload['questions']) if body else response(payload['questions']))
+    return JevService('fixture', transport=httpx.MockTransport(handler)), calls
+
+
+@pytest.fixture
+def sleeps(monkeypatch):
+    from clip_engine.services import jev_service as module
+    waits = []
+    async def sleep(seconds):
+        waits.append(seconds)
+    monkeypatch.setattr(module, '_sleep', sleep)
+    return waits
+
+
+@pytest.mark.parametrize('status', [408, 429, 500, 502, 503, 504, 529])
+def test_transient_statuses_retry_with_backoff(status, sleeps):
+    client, calls = scripted([status, status, 200])
+    result = asyncio.run(client.evaluate({'x': 1}, {'n': noul('Q?', 'Yes', 'No')}))
+    assert result['status'] == 'success' and result['attempts'] == 3
+    assert len(calls) == 3 and sleeps == [1.0, 3.0]
+    assert client.requests == 3
+
+
+def test_retries_stop_after_two_and_never_retry_client_errors(sleeps):
+    client, calls = scripted([503])
+    result = asyncio.run(client.evaluate({'x': 1}, {'n': noul('Q?', 'Yes', 'No')}))
+    assert result['status'] == 'unavailable' and len(calls) == 3
+    assert 'provider detail' not in json.dumps(result)
+    client, calls = scripted([400])
+    assert asyncio.run(client.evaluate({'x': 1}, {'n': noul('Q?', 'Yes', 'No')}))['status'] == 'unavailable'
+    assert len(calls) == 1
+
+
+def test_retry_after_is_honored_within_a_cap(sleeps):
+    client, calls = scripted([429, 200], headers={429: {'Retry-After': '7'}})
+    assert asyncio.run(client.evaluate({'x': 1}, {'n': noul('Q?', 'Yes', 'No')}))['status'] == 'success'
+    assert sleeps == [7.0] and len(calls) == 2
+    sleeps.clear()
+    # A longer requested wait ends the request instead of stalling the job.
+    client, calls = scripted([429, 200], headers={429: {'Retry-After': '120'}})
+    assert asyncio.run(client.evaluate({'x': 1}, {'n': noul('Q?', 'Yes', 'No')}))['status'] == 'unavailable'
+    assert sleeps == [] and len(calls) == 1
+
+
+def test_retries_respect_the_request_cap(sleeps):
+    client, calls = scripted([503, 503, 200])
+    client.max_requests = 2
+    assert asyncio.run(client.evaluate({'x': 1}, {'n': noul('Q?', 'Yes', 'No')}))['status'] == 'unavailable'
+    assert len(calls) == 2 and client.requests == 2
+
+
+def test_cancellation_during_backoff_propagates(monkeypatch):
+    from clip_engine.services import jev_service as module
+    async def run():
+        started = asyncio.Event()
+        async def sleep(seconds):
+            started.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr(module, '_sleep', sleep)
+        client, calls = scripted([503, 200])
+        task = asyncio.create_task(client.evaluate({'x': 1}, {'n': noul('Q?', 'Yes', 'No')}))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(calls) == 1
+    asyncio.run(run())
+
+
+def test_payment_required_reports_out_of_credits_without_retrying(sleeps):
+    client, calls = scripted([402])
+    q = {'n': noul('Q?', 'Yes', 'No')}
+    first = asyncio.run(client.evaluate({'x': 1}, q))
+    assert first['status'] == 'out_of_credits' and len(calls) == 1 and sleeps == []
+    # Later requests in the same job do not keep paying the round trip.
+    assert asyncio.run(client.evaluate({'x': 2}, q))['status'] == 'out_of_credits'
+    assert len(calls) == 1
+
+
+def test_repeated_failures_mark_the_endpoint_unavailable_for_the_job(sleeps):
+    from clip_engine.services.jev_service import MAX_CONSECUTIVE_FAILURES
+    client, calls = scripted([401])
+    q = {'n': noul('Q?', 'Yes', 'No')}
+    for i in range(MAX_CONSECUTIVE_FAILURES + 2):
+        assert asyncio.run(client.evaluate({'x': i}, q))['status'] == 'unavailable'
+    assert len(calls) == MAX_CONSECUTIVE_FAILURES
+    # A success resets the count.
+    client, calls = scripted([401, 401, 200, 401, 401, 401, 200])
+    for i in range(6):
+        asyncio.run(client.evaluate({'x': i}, q))
+    assert len(calls) == 6
+
+
+@pytest.mark.parametrize('text', ['東京で起きたことを最初から最後まで説明します。' * 300, 'هذا شرح كامل لما حدث في المدينة. ' * 300,
+                                  'Это полное объяснение того, что произошло. ' * 300], ids=['japanese', 'arabic', 'russian'])
+def test_non_latin_excerpts_are_sent_as_utf8_within_the_byte_budget(text):
+    from clip_engine.services.jev_service import MAX_REQUEST_BYTES
+    sent = []
+    def handler(request):
+        sent.append(request.content)
+        return httpx.Response(200, json=response(json.loads(request.content)['questions']))
+    client = JevService('fixture', transport=httpx.MockTransport(handler))
+    q = {'n': noul('Q?', 'Yes', 'No')}
+    assert len(json.dumps({'retained_dialogue': text})) > 24_000  # The old ASCII-escaped size cap.
+    assert len(text.encode()) < MAX_REQUEST_BYTES - 2000
+    result = asyncio.run(client.evaluate({'retained_dialogue': text}, q))
+    assert result['status'] == 'success'
+    assert text.encode() in sent[0] and b'\\u' not in sent[0]
+    # Reported usage replaces the byte-based reservation.
+    assert client.reserved_tokens == 360
+    oversized = asyncio.run(client.evaluate({'retained_dialogue': text * (MAX_REQUEST_BYTES // len(text.encode()) + 1)}, q))
+    assert oversized['status'] == 'evidence_limit' and len(sent) == 1
+
+
+def test_optional_probabilities_and_confidence_are_accepted_conservatively():
+    from clip_engine.services.jev_service import validate_answers
+    questions = {'e': choice('Enough evidence?', {'sufficient': 'Yes', 'insufficient': 'No'}),
+                 'd': choice('Relationship?', {'same_takeaway': 'Same', 'distinct': 'Distinct', 'insufficient': 'Unknown'}),
+                 's': score('Hook?', ['Weak', 'Fair', 'Strong'])}
+    answers = validate_answers({'e': {'type': 'choice', 'choice': 'sufficient'},
+                                'd': {'type': 'choice', 'choice': 'same_takeaway'},
+                                's': {'type': 'score', 'score': 1.5}}, questions)
+    assert answers['e']['probabilities'] == pytest.approx({'sufficient': .51, 'insufficient': .49})
+    assert answers['e']['confidence'] is None and answers['e']['probabilities_reported'] is False
+    assert answers['d']['probabilities']['same_takeaway'] < .8  # Never enough to flag a duplicate.
+    assert answers['s']['probabilities'] == pytest.approx({'0': 0, '1': .5, '2': .5})
+    rejected = validate_answers({'e': {'type': 'choice', 'choice': 'insufficient'}, 'd': {'type': 'choice', 'choice': 'distinct'},
+                                 's': {'type': 'score', 'score': 2}}, questions)
+    assert rejected['e']['probabilities']['sufficient'] < .5
+    assert rejected['s']['probabilities'] == {'0': 0, '1': 0, '2': 1.0}
+    reported = validate_answers({'e': {'type': 'choice', 'choice': 'sufficient', 'probabilities': {'sufficient': .9, 'insufficient': .1}},
+                                 'd': {'type': 'choice', 'choice': 'distinct', 'confidence': .4, 'probabilities': {'same_takeaway': .1, 'distinct': .8, 'insufficient': .1}},
+                                 's': {'type': 'score', 'score': 1, 'probabilities': {'0': 0, '1': 1, '2': 0}}}, questions)
+    assert reported['e']['probabilities']['sufficient'] == .9 and 'probabilities_reported' not in reported['e']
+    assert reported['d']['confidence'] == .4
+    for bad in [{'type': 'choice'}, {'type': 'choice', 'choice': 'other'}, {'type': 'choice', 'choice': 'sufficient', 'confidence': 2},
+                {'type': 'choice', 'choice': 'sufficient', 'probabilities': {'sufficient': .9}}]:
+        with pytest.raises(ValueError):
+            validate_answers({'e': bad}, {'e': questions['e']})
+    with pytest.raises(ValueError):
+        validate_answers({'s': {'type': 'score'}}, {'s': questions['s']})
+
+
+def test_answers_without_probabilities_pass_default_gates_but_not_strict_ones():
+    from clip_engine.services.coherence_review import CLIP_QUESTIONS, approved
+    from clip_engine.services.jev_service import validate_answers
+    raw = response(CLIP_QUESTIONS)['answers']
+    raw['evidence'] = {'type': 'choice', 'choice': 'sufficient'}
+    answers = validate_answers(raw, CLIP_QUESTIONS)
+    names = [k for k in CLIP_QUESTIONS if k != 'evidence']
+    assert approved({'status': 'success', 'answers': answers}, names)
+    strict = {'threshold': .75, 'evidence_threshold': .8}
+    assert not approved({'status': 'success', 'answers': answers}, names, policy=strict)
+    raw['evidence'] = {'type': 'choice', 'choice': 'insufficient'}
+    assert not approved({'status': 'success', 'answers': validate_answers(raw, CLIP_QUESTIONS)}, names)

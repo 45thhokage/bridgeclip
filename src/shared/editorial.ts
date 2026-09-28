@@ -1,9 +1,10 @@
 /** Saved editorial evidence. Parsers copy only allowlisted bounded fields. */
 export const scoreNames = ['hook', 'standalone', 'arc', 'quotability', 'ending'] as const
 export type ScoreName = typeof scoreNames[number]
+/** `confidence` is optional in the Decisions API. `estimated` marks probabilities the API omitted, filled conservatively by the engine. */
 export type JudgmentAnswer = { type: 'noul'; noul: number } |
-  { type: 'choice'; choice: string; confidence: number; probabilities: Record<string, number> } |
-  { type: 'score'; score: number; confidence: number; probabilities: Record<string, number>; legend: Record<string, string> }
+  { type: 'choice'; choice: string; confidence: number | null; probabilities: Record<string, number>; estimated?: true } |
+  { type: 'score'; score: number; confidence: number | null; probabilities: Record<string, number>; legend: Record<string, string>; estimated?: true }
 export interface Judgment {
   status: string; model: string; requested_model: string; rule_version: string; cache_id: string; cache_hit: boolean
   latency_ms: number; input_tokens: number | null; output_tokens: number | null
@@ -29,7 +30,7 @@ export interface EditorialTrace {
   prevented_cuts: { interval: [number, number]; kind: string }[]
 }
 const keys = ['not_sponsored', 'opening_context', 'self_contained', 'complete_ending', 'logical_flow', 'faithful_to_source', 'removal_safe', 'join_logical', 'introduces_event', 'refers_back', 'necessary_event', 'evidence', 'missing_context', 'unresolved_payoff', 'title_supported', 'acknowledgment', 'relationship', ...scoreNames]
-const statuses = ['disabled', 'success', 'unavailable', 'evidence_limit', 'budget_exhausted']
+const statuses = ['disabled', 'success', 'unavailable', 'out_of_credits', 'evidence_limit', 'budget_exhausted']
 const obj = (v: unknown): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('Invalid editorial object')
   return v as Record<string, unknown>
@@ -68,17 +69,18 @@ function answers(value: unknown): Record<string, JudgmentAnswer> {
     if (!entries.length || entries.length > 10) throw new Error('Invalid distribution')
     const probabilities = Object.fromEntries(entries.map(([k, v]) => [str(k, 80), num(v, 1)]))
     if (Math.abs(Object.values(probabilities).reduce((a, b) => a + b, 0) - 1) > .005) throw new Error('Invalid distribution')
-    const confidence = num(a.confidence, 1)
+    const confidence = a.confidence == null ? null : num(a.confidence, 1)
+    const estimated = a.probabilities_reported === false ? { estimated: true as const } : {}
     if (a.type === 'choice') {
       const selected = str(a.choice, 80)
       if (!Object.hasOwn(probabilities, selected) || probabilities[selected] < Math.max(...Object.values(probabilities)) - .005) throw new Error('Invalid choice')
-      result[key] = { type: 'choice', choice: selected, confidence, probabilities }
+      result[key] = { type: 'choice', choice: selected, confidence, probabilities, ...estimated }
     } else {
       const legend = obj(a.legend)
       if (entries.length !== 3 || !['0', '1', '2'].every((k) => Object.hasOwn(probabilities, k))) throw new Error('Invalid score levels')
       const score = num(a.score, 2)
       if (Math.abs(score - probabilities['1'] - 2 * probabilities['2']) > .02) throw new Error('Inconsistent editorial score')
-      result[key] = { type: 'score', score, confidence, probabilities,
+      result[key] = { type: 'score', score, confidence, probabilities, ...estimated,
         legend: Object.fromEntries(entries.map(([k]) => [k, str(legend[k])])) }
     }
   }

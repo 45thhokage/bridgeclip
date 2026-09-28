@@ -71,7 +71,7 @@ function QuestionResult({ name, entry }: { name: string; entry: Entry }): React.
     <p className="whitespace-pre-wrap text-sm">{question?.instructions || 'Exact question text was not saved for this evaluation.'}</p>
     {answer ? <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
       <span className="font-semibold">{answer.type === 'noul' ? `${percent(answer.noul)} yes` : answer.type === 'choice' ? `Result: ${label(answer.choice)} · ${percent(answer.probabilities[answer.choice])}` : `Score: ${answer.score.toFixed(2)} / 2`}</span>
-      {answer.type !== 'noul' && <span className="text-xs text-ink-muted">Confidence (distribution concentration): {percent(answer.confidence)}</span>}
+      {answer.type !== 'noul' && <span className="text-xs text-ink-muted">{answer.estimated ? 'Probabilities not reported by Jev; conservative estimate shown' : answer.confidence == null ? 'Confidence not reported' : `Confidence (distribution concentration): ${percent(answer.confidence)}`}</span>}
       {gate && <span className="text-xs text-ink-muted">Required: {gate.required}</span>}
     </div> : <p className="text-xs text-amber-200">No answer recorded · {label(entry.judgment?.status ?? 'not requested')}</p>}
     {answer && answer.type !== 'noul' && <ul className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-muted" aria-label="Answer probabilities">

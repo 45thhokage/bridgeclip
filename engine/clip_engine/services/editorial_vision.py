@@ -31,7 +31,7 @@ class EditorialVision:
         self.requests = 0
         self.cost_usd = 0.0
         self._cache = {}
-        self.work_seconds = 0.0
+        self.work_seconds = 0.0  # Diagnostics only.
 
     async def observe(self, interval):
         disabled = not (getattr(self.settings, 'jev_visual_context', False) and self.settings.openrouter_api_key)
@@ -50,7 +50,9 @@ class EditorialVision:
         with tempfile.TemporaryDirectory(prefix='reaction-frames-', dir=self.work_dir) as directory:
             images = {}
             for timestamps in [first, second]:
-                if self.requests >= 8 or self.cost_usd >= .10 or self.work_seconds >= 90:
+                # Request and cost caps plus per-step timeouts; never cumulative time,
+                # so provider speed cannot change which clips pass.
+                if self.requests >= 8 or self.cost_usd >= .10:
                     record['status'] = 'budget_exhausted'
                     break
                 attempt = None
