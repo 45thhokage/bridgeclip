@@ -63,7 +63,7 @@ export async function deleteLibraryRun(outputDir: unknown): Promise<void> {
   renameSync(path, trash)
   const moved = lstatSync(trash)
   if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== identity.dev || moved.ino !== identity.ino) {
-    try { renameSync(trash, path) } catch { /* Leave it hidden; startup never removes anything but .deleting-<uuid> folders. */ }
+    try { renameSync(trash, path) } catch { /* Best effort: it is still a folder directly inside the Library. */ }
     throw new Error('The Library run changed. Refresh and try again.')
   }
   dismissJob(basename(path))
