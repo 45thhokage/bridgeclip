@@ -162,6 +162,42 @@ export function evidenceInTranscript(evidence: string, transcript: string): bool
   return false
 }
 
+/** File and language suffixes that are not top-level domains, so platforms do not link them ("Node.js"). */
+const NON_TLD_SUFFIXES = new Set(['cjs', 'cfg', 'csv', 'css', 'dll', 'docx', 'exe', 'gif', 'htm', 'html', 'ini', 'jpeg', 'jpg', 'js', 'json', 'jsx', 'log',
+  'mjs', 'pdf', 'png', 'pptx', 'scss', 'svg', 'ts', 'tsv', 'tsx', 'txt', 'wav', 'webp', 'xlsx', 'yaml', 'yml'])
+
+/** Comparable text: compatibility forms folded ("ｅｖｉｌ．ｃｏｍ"), invisible format characters removed. */
+function linkText(value: string): string {
+  return value.normalize('NFKC').replace(/\p{Cf}/gu, '').toLocaleLowerCase()
+}
+
+/** Bare domains ("scamcoin.io", "evil.com/x") and @handles, which platforms turn into links and mentions. Linear time. */
+function linkLikeTokens(value: string): string[] {
+  const text = linkText(value)
+  const tokens: string[] = [...(text.match(/@[\p{L}\p{N}_]+/gu) ?? [])]
+  for (const word of text.split(/[^\p{L}\p{N}._-]+/u)) {
+    // An ellipsis separates sentences, but "Wow...scamcoin.io" still links its domain.
+    for (const part of word.split(/\.{2,}/)) {
+      let start = 0, end = part.length
+      while (start < end && '._-'.includes(part[start])) start++
+      while (end > start && '._-'.includes(part[end - 1])) end--
+      const host = part.slice(start, end)
+      const labels = host.split('.')
+      const tld = labels[labels.length - 1]
+      if (labels.length >= 2 && labels.every(Boolean) && /^[a-z]{2,63}$/.test(tld) && !NON_TLD_SUFFIXES.has(tld)) tokens.push(host)
+    }
+  }
+  return tokens
+}
+
+/** A transcript can be prompt-injected. Only links and handles actually spoken in the clip may appear. */
+function hasUnspokenLink(value: string, transcript: string): boolean {
+  const tokens = linkLikeTokens(value)
+  if (!tokens.length) return false
+  const heard = linkText(transcript)
+  return tokens.some((token) => !heard.includes(token))
+}
+
 /** Validate fields a platform uses; discard fields that cannot enter its post request. */
 export function parseGeneratedMetadata(value: unknown, platforms: readonly Platform[], transcript: string, context: MetadataContext = {}): GeneratedPlatformMetadata[] {
   const body = value as { posts?: unknown } | null
@@ -179,6 +215,11 @@ export function parseGeneratedMetadata(value: unknown, platforms: readonly Platf
         // Platforms auto-link scheme-less "www." addresses too; a transcript must not smuggle a clickable link into a post.
         (platform === 'youtube' && Buffer.byteLength(post.caption, 'utf8') > 5000) || /:\/\/|www\./i.test(post.caption) ||
         (post.caption.match(/#[\p{L}\p{N}_]+/gu)?.length ?? 0) > 5) throw new Error(`AI metadata for ${platform} was invalid. The clip was not posted.`)
+    const unspokenLink = (value: unknown): boolean => typeof value === 'string' && hasUnspokenLink(value, transcript)
+    if (unspokenLink(post.caption) || (platform === 'youtube' && (unspokenLink(post.title) || (Array.isArray(post.tags) && post.tags.some(unspokenLink)))) ||
+        (platform === 'facebook' && context.facebookFormat === 'reel' && unspokenLink(post.title))) {
+      throw new Error(`AI metadata for ${platform} included a link or @mention that is not in the transcript. The clip was not posted.`)
+    }
     if (typeof post.evidence !== 'string' || post.evidence.trim().length < 10 || !evidenceInTranscript(post.evidence, transcript)) {
       throw new Error(`AI metadata for ${platform} was not grounded in the transcript. The clip was not posted.`)
     }

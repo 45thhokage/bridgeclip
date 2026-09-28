@@ -879,7 +879,10 @@ async function prepareMetadata(workspace: string, automation: Automation, item: 
     }
     if (!item.generatedMetadata || item.generatedMetadata.some((post) => post.topicTag === undefined) ||
         !platforms.every((platform) => item.generatedMetadata?.some((post) => post.platform === platform))) {
-      const metadata = await generateAutomationMetadata(item.transcript, item.title, item.caption, platforms, { facebookFormat, source: item.sourceContext })
+      // Unattended posting: the uploader-controlled description never reaches
+      // the writer here. Reviewed drafts (Enhance, then Apply) may use it.
+      const source = item.sourceContext ? { ...item.sourceContext, description: '' } : null
+      const metadata = await generateAutomationMetadata(item.transcript, item.title, item.caption, platforms, { facebookFormat, source })
       if (currentWorkspace() !== workspace || !cached.includes(automation)) throw new Error('The Zernio workspace changed. Please try again.')
       item.generatedMetadata = metadata
       save(workspace)
