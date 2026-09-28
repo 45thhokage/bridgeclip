@@ -76,7 +76,7 @@ test('enhancement preserves current copy until review, holds scheduling, survive
     assert.equal(item.metadataDraft.research.status, 'complete')
     assert.equal(posting.state.creates.length, 0)
     await main.automations.runAutomation(created.id)
-    assert.match(main.automations.listAutomations()[0].lastError, /Review the next clip/)
+    assert.match(main.automations.listAutomations()[0].lastError, /Apply or discard the enhanced metadata drafts/)
     assert.equal(posting.state.creates.length, 0)
     assert.throws(() => main.automations.resolveAutomationMetadataDraft(created.id, item.id, 'stale-id', true), /no longer available/)
     assert.throws(() => main.automations.updateAutomationContent(created.id, item.id, { title: 'Changed', caption: 'Changed' }), /Apply or discard/)

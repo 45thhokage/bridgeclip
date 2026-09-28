@@ -821,6 +821,7 @@ test('held linked clips use fresh post evidence before requeuing or marking subm
         assert.equal(item.status, expected === 'submitted' ? 'posted' : expected === 'queued' ? 'queued' : 'needs_review')
         assert.equal(item.postId, expected === 'queued' ? null : postId)
         if (expected === 'queued') assert.ok(item.postingAttemptId && item.postingAttemptId !== item.id)
+        assert.equal(Boolean(item.postedAt), expected === 'submitted', 'moving to Submitted records when')
       }
     }
     assert.ok(mock.state.requests.every((request) => request.method === 'GET'), 'reviewing never posts or retries')

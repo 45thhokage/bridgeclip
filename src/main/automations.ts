@@ -36,6 +36,44 @@ const MAX_TOTAL_CONTENT = 1000
 let cachedWorkspace: string | null = null
 let cached: Automation[] = []
 const busy = new Set<string>()
+/** Scheduled slots that came due while another operation (such as enhancement) held the automation. */
+const deferredSlots = new Map<string, Map<string, { slot: { time: string; date: string }; since: number }>>()
+/** A deferred slot still posts when the lock frees within this time; after it, the slot is reported as missed. */
+const MAX_SLOT_DEFERRAL_MS = 60 * 60_000
+/** The last scheduled slot that reported "nothing ready", so repeat ticks in its grace period stay quiet. */
+const blockedSlots = new Map<string, string>()
+
+const DRAFTS_PENDING = 'Apply or discard the enhanced metadata drafts before these clips can post.'
+const TIKTOK_REVIEW_PENDING = 'Review a queued clip for TikTok before it can post automatically.'
+const NO_QUEUED_CLIPS = 'No queued clips are available.'
+
+/**
+ * Posting takes priority over other work. Releasing the lock runs any slot
+ * that came due meanwhile; runAutomation takes the lock synchronously, before
+ * another request (for example, the next enhancement batch) can.
+ */
+function release(automationId: string): void {
+  busy.delete(automationId)
+  const waiting = deferredSlots.get(automationId)
+  if (!waiting?.size) return
+  deferredSlots.delete(automationId)
+  void (async () => {
+    for (const entry of waiting.values()) await runDeferredSlot(automationId, entry)
+  })().catch((error) => logger.warn('automation.scheduler.failed', { message: error instanceof Error ? error.message : 'Unknown error' }))
+}
+
+async function runDeferredSlot(automationId: string, entry: { slot: { time: string; date: string }; since: number }): Promise<void> {
+  const { workspace, automation } = find(automationId)
+  const { slot } = entry
+  if (!automation.enabled || !automation.times.includes(slot.time) || automation.lastSlots[slot.time] === slot.date) return
+  if (Date.now() - entry.since <= MAX_SLOT_DEFERRAL_MS) { await runAutomation(automationId, slot); return }
+  if (busy.has(automation.id)) return
+  automation.lastSlots[slot.time] = slot.date
+  automation.lastError = `The ${slot.time} post was skipped because another task on this automation ran for too long. The next scheduled time will post as usual.`
+  automation.lastErrorAcknowledged = false
+  save(workspace)
+  logger.warn('automation.slot.missed', { automationId })
+}
 // One review per bank item; a newer preview replaces the previous one.
 const reviews = new Map<string, { id: string; fingerprint: string }>()
 
@@ -540,7 +578,7 @@ export async function addAutomationContent(id: unknown, paths: string[], titles?
     for (const item of pruned) rmSync(join(directory, item.fileName), { force: true })
   } finally {
     if (!committed) for (const file of copiedFiles) await unlink(file).catch(() => {})
-    busy.delete(automation.id)
+    release(automation.id)
   }
   return listAutomations()
 }
@@ -627,6 +665,7 @@ export async function reviewAutomationContent(id: unknown, contentId: unknown, r
       message = 'Zernio no longer has this post, so its status can’t be checked. Confirm it was not published, then use Return to queue, or remove the clip.'
     } else if (post?.submitted) {
       item.status = 'posted'
+      item.postedAt ??= new Date().toISOString()
       item.error = null
       item.warningsAcknowledged = false
       outcome = 'submitted'
@@ -652,7 +691,7 @@ export async function reviewAutomationContent(id: unknown, contentId: unknown, r
     Object.assign(item, previous)
     if (previousReview) reviews.set(item.id, previousReview)
     throw error
-  } finally { busy.delete(automation.id) }
+  } finally { release(automation.id) }
 }
 
 export function removeAutomationContent(id: unknown, contentId: unknown): Automation[] {
@@ -797,7 +836,7 @@ export async function enhanceAutomationBatch(id: unknown, rawIds: unknown, rawKe
     for (const item of selected) if (!item.metadataDraft && !errors.some((failure) => failure.contentId === item.id)) errors.push({ contentId: item.id, message })
     recordErrors()
     return { automations: listAutomations(), completed: selected.filter((item) => item.metadataDraft).length, skipped, errors }
-  } finally { busy.delete(automation.id) }
+  } finally { release(automation.id) }
 }
 
 /** Resolve context separately so the user can inspect/correct it before paid generation. */
@@ -816,7 +855,7 @@ export async function automationContentSource(id: unknown, contentId: unknown): 
     item.sourceContext = source
     save(workspace)
     return source
-  } finally { busy.delete(automation.id) }
+  } finally { release(automation.id) }
 }
 
 export async function enhanceAutomationContent(id: unknown, contentId: unknown, raw: unknown): Promise<Automation[]> {
@@ -856,7 +895,7 @@ export async function enhanceAutomationContent(id: unknown, contentId: unknown, 
     item.metadataDraft = { id: randomUUID(), createdAt: new Date().toISOString(), platforms, posts, source, research }
     try { save(workspace) } catch (error) { item.metadataDraft = previous; throw error }
     return listAutomations()
-  } finally { busy.delete(automation.id) }
+  } finally { release(automation.id) }
 }
 
 async function prepareMetadata(workspace: string, automation: Automation, item: AutomationContent, path: string): Promise<{ facebookFormat: 'feed' | 'reel'; generated: GeneratedPlatformMetadata[] | null }> {
@@ -943,7 +982,7 @@ export async function prepareAutomationTikTokReview(id: unknown, contentId: unkn
     if (reviews.size >= MAX_CONTENT) reviews.delete(reviews.keys().next().value!)
     reviews.set(item.id, { id: reviewId, fingerprint: reviewFingerprint(workspace, automation, item) })
     return { reviewId, clipPath: path, caption: item.tiktokDraftCaption ?? generated?.find((post) => post.platform === 'tiktok')?.caption ?? item.caption, media, creators }
-  } finally { busy.delete(automation.id) }
+  } finally { release(automation.id) }
 }
 
 export async function approveAutomationTikTokReview(id: unknown, contentId: unknown, raw: unknown): Promise<Automation[]> {
@@ -991,7 +1030,7 @@ export async function approveAutomationTikTokReview(id: unknown, contentId: unkn
     item.tiktokApproval = { caption: value.caption, options, reviewedAt: new Date().toISOString(), fileStamp: fileStamp(join(bankPath(workspace, automation.id), item.fileName)) }
     item.tiktokDraftCaption = null
     item.error = null
-    automation.lastError = null
+    if (automation.lastError === TIKTOK_REVIEW_PENDING) automation.lastError = null
     try { save(workspace) }
     catch (error) {
       automation.content[automation.content.indexOf(item)] = previous
@@ -1000,7 +1039,7 @@ export async function approveAutomationTikTokReview(id: unknown, contentId: unkn
     }
     reviews.delete(item.id)
     return listAutomations()
-  } finally { busy.delete(automation.id) }
+  } finally { release(automation.id) }
 }
 
 /** Only a stored, validated draft can be applied; renderer cannot substitute generated posts. */
@@ -1025,7 +1064,8 @@ export function resolveAutomationMetadataDraft(id: unknown, contentId: unknown, 
   }
   item.metadataDraft = null
   item.error = null
-  automation.lastError = null
+  // Only the drafts warning is resolved here; keep unrelated failures visible.
+  if (automation.lastError === DRAFTS_PENDING) automation.lastError = null
   try { save(workspace) } catch (error) {
     Object.assign(item, previous)
     automation.lastError = previousError
@@ -1037,19 +1077,29 @@ export function resolveAutomationMetadataDraft(id: unknown, contentId: unknown, 
 
 export async function runAutomation(id: unknown, slot?: { time: string; date: string }): Promise<Automation[]> {
   const { workspace, automation } = find(id)
-  if (busy.has(automation.id)) return listAutomations()
   if (slot && (!automation.enabled || automation.lastSlots[slot.time] === slot.date)) return listAutomations()
-  const item = nextAutomationContent(automation)
-  if (!item) {
-    const message = automation.content.some((content) => content.status === 'queued')
-      ? 'Review a queued clip for TikTok before it can post automatically.' : 'No queued clips are available.'
-    if (automation.lastError !== message) { automation.lastError = message; automation.lastErrorAcknowledged = false; save(workspace) }
+  if (busy.has(automation.id)) {
+    // Keep a due slot instead of dropping it; release() runs it next.
+    if (slot) {
+      const waiting = deferredSlots.get(automation.id) ?? new Map()
+      const key = `${slot.date}/${slot.time}`
+      if (!waiting.has(key)) waiting.set(key, { slot, since: Date.now() })
+      deferredSlots.set(automation.id, waiting)
+    }
     return listAutomations()
   }
-  if (item.metadataDraft) {
-    if (automation.lastError !== 'Review the next clip’s enhanced metadata draft: apply or discard it before posting.') automation.lastErrorAcknowledged = false
-    automation.lastError = 'Review the next clip’s enhanced metadata draft: apply or discard it before posting.'
-    save(workspace)
+  const item = nextAutomationContent(automation)
+  if (!item) {
+    const queued = automation.content.filter((content) => content.status === 'queued')
+    const message = queued.some((content) => content.metadataDraft) ? DRAFTS_PENDING : queued.length ? TIKTOK_REVIEW_PENDING : NO_QUEUED_CLIPS
+    // Warn again for every new blocked slot or manual run, even with the same message.
+    const key = slot ? `${slot.date}/${slot.time}` : null
+    if (automation.lastError !== message || !key || blockedSlots.get(automation.id) !== key) {
+      automation.lastError = message
+      automation.lastErrorAcknowledged = false
+      if (key) blockedSlots.set(automation.id, key)
+      save(workspace)
+    }
     return listAutomations()
   }
   const hadTikTokApproval = automation.accounts.some((account) => account.platform === 'tiktok') && item.tiktokApproval != null
@@ -1057,7 +1107,7 @@ export async function runAutomation(id: unknown, slot?: { time: string; date: st
   // grace period can still use the slot; actual attempts reserve it once.
   if (slot) { automation.lastSlots[slot.time] = slot.date; save(workspace) }
   if (!automation.profileId || automation.accounts.length === 0) {
-    if (automation.lastError !== 'Choose one Zernio profile and at least one of its accounts.') automation.lastErrorAcknowledged = false
+    automation.lastErrorAcknowledged = false
     automation.lastError = 'Choose one Zernio profile and at least one of its accounts.'
     save(workspace)
     return listAutomations()
@@ -1139,7 +1189,7 @@ export async function runAutomation(id: unknown, slot?: { time: string; date: st
       save(workspace)
     }
     logger.warn('automation.post.failed', { automationId: automation.id, contentId: item.id })
-  } finally { busy.delete(automation.id) }
+  } finally { release(automation.id) }
   return listAutomations()
 }
 

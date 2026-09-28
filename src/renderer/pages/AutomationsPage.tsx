@@ -492,7 +492,7 @@ export function AutomationsPage({ onNavigate, onViewLibrary }: { onNavigate: (pa
                       icon={<Play className="h-3 w-3" />}
                       loading={busy === 'run'}
                       disabled={Boolean(busy) || !nextClip || dirty}
-                      title={dirty ? 'Save automation changes first' : !nextClip ? 'Add a clip and complete any TikTok reviews first' : 'Post the next ready clip now'}
+                      title={dirty ? 'Save automation changes first' : !nextClip ? 'Add a clip, then complete any TikTok reviews and enhanced drafts first' : 'Post the next ready clip now'}
                       onClick={() => void runNow()}
                     >Run now</Button>
                     <Button size="sm" variant="ghost" iconOnly aria-label={`Delete ${selected.name}`} title="Delete automation" icon={<Trash2 className="h-3.5 w-3.5" />} disabled={Boolean(busy)} onClick={remove} />

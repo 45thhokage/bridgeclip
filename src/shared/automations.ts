@@ -179,7 +179,8 @@ export function needsTikTokReview(automation: Pick<Automation, 'accounts'>, item
 }
 
 export function nextAutomationContent(automation: Pick<Automation, 'accounts' | 'content'>): AutomationContent | undefined {
-  const ready = automation.content.filter((item) => item.status === 'queued' && !needsTikTokReview(automation, item))
+  // A pending enhanced draft holds only its own clip until it is applied or discarded.
+  const ready = automation.content.filter((item) => item.status === 'queued' && !item.metadataDraft && !needsTikTokReview(automation, item))
   // A clip whose last attempt failed waits behind clips that have not, so one
   // clip that cannot be prepared (for example, unverifiable AI metadata) does
   // not stop every later slot. It is retried once nothing else is ready.
