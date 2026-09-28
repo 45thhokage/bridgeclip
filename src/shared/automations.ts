@@ -64,6 +64,8 @@ export interface MetadataResearch {
 }
 
 export const MAX_ENHANCEMENT_GUIDANCE = 2000
+/** Longest stored research citation URL, measured after URL normalization. */
+export const MAX_RESEARCH_URL = 2048
 
 export interface MetadataEnhancement {
   /** User context and editorial direction used to prepare this draft. */

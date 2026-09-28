@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
-import { AUTOMATION_PLATFORMS, type GeneratedPlatformMetadata, type AutomationSourceContext, type MetadataResearch } from '../shared/automations'
+import { AUTOMATION_PLATFORMS, MAX_RESEARCH_URL, type GeneratedPlatformMetadata, type AutomationSourceContext, type MetadataResearch } from '../shared/automations'
 import { PLATFORM_RULES, captionLength, youtubeTitleFor, type FacebookFormat } from '../shared/zernio-posts'
 import { loadSettings, vocabularyTerms } from './settings-store'
 import { resolveBinary } from './tools'
@@ -302,10 +302,12 @@ export async function researchAutomationTopic(transcript: string, source: Automa
     const sources: MetadataResearch['sources'] = []
     if (Array.isArray(message?.annotations)) for (const annotation of message.annotations.slice(0, 20)) {
       const citation = annotation?.type === 'url_citation' ? annotation.url_citation : null
-      if (!citation || typeof citation.url !== 'string' || citation.url.length > 2048) continue
+      // Bound parsing, then validate the normalized form that is stored: percent-
+      // encoding can grow a short non-ASCII URL past the store's length limit.
+      if (!citation || typeof citation.url !== 'string' || citation.url.length > 4 * MAX_RESEARCH_URL) continue
       try {
         const url = new URL(citation.url)
-        if (url.protocol !== 'https:' || url.username || url.password) continue
+        if (url.protocol !== 'https:' || url.username || url.password || url.href.length > MAX_RESEARCH_URL) continue
         if (sources.some((source) => source.url === url.href)) continue
         sources.push({ url: url.href, title: typeof citation.title === 'string' ? citation.title.slice(0, 300) : url.hostname })
       } catch { /* Ignore malformed provider citations. */ }

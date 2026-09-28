@@ -5,7 +5,7 @@ import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, rena
 import { open, unlink } from 'fs/promises'
 import { basename, extname, join } from 'path'
 import { pipeline } from 'stream/promises'
-import { MAX_ENHANCEMENT_GUIDANCE, AUTOMATION_PLATFORMS, dueSlots, type Automation, type AutomationAccount, type AutomationContent, type AutomationUpdate, type GeneratedPlatformMetadata, type AutomationSourceContext, type MetadataEnhancement, type MetadataResearch, type AutomationSourceGroup, type AutomationBatchResult, nextAutomationContent, type AutomationTikTokReview, type AutomationTikTokReviewUpdate } from '../shared/automations'
+import { MAX_ENHANCEMENT_GUIDANCE, MAX_RESEARCH_URL, AUTOMATION_PLATFORMS, dueSlots, type Automation, type AutomationAccount, type AutomationContent, type AutomationUpdate, type GeneratedPlatformMetadata, type AutomationSourceContext, type MetadataEnhancement, type MetadataResearch, type AutomationSourceGroup, type AutomationBatchResult, nextAutomationContent, type AutomationTikTokReview, type AutomationTikTokReviewUpdate } from '../shared/automations'
 import { isPostableAccount, isZernioId, type ZernioOverview } from '../shared/zernio'
 import { checkCaption, checkClip, defaultFacebookFormat, isValidTimeZone, tiktokOptionsError, youtubeTitleFor, type PostClipRequest } from '../shared/zernio-posts'
 import { loadSettings } from './settings-store'
@@ -119,7 +119,59 @@ function validEnhancement(value: MetadataEnhancement): boolean {
 function validResearch(research: MetadataResearch): boolean {
   return research && ['complete', 'skipped', 'unavailable'].includes(research.status) && typeof research.summary === 'string' && research.summary.length <= 6000 &&
     Array.isArray(research.sources) && research.sources.length <= 3 && research.sources.every((source) => source && typeof source.title === 'string' && source.title.length <= 300 &&
-      typeof source.url === 'string' && source.url.length <= 2048 && /^https:\/\//.test(source.url))
+      typeof source.url === 'string' && source.url.length <= MAX_RESEARCH_URL && /^https:\/\//.test(source.url))
+}
+
+function validSourceResearchEntry(entry: NonNullable<Automation['sourceResearch']>[number]): boolean {
+  try {
+    return Boolean(entry && /^[a-f0-9]{64}$/.test(entry.key) && typeof entry.createdAt === 'string' && Number.isFinite(Date.parse(entry.createdAt)) &&
+      parseSourceContext(entry.source) && validResearch(entry.research))
+  } catch { return false }
+}
+
+/**
+ * Optional context attached to an automation or clip. An invalid value is
+ * dropped on load rather than making the whole store unreadable; dropping any
+ * of these can only ask for review or regeneration again, never post sooner.
+ */
+const OPTIONAL_CONTENT_FIELDS: { [K in keyof AutomationContent]?: (value: AutomationContent[K], item: AutomationContent) => boolean } = {
+  sourceContext: (value) => { try { parseSourceContext(value); return true } catch { return false } },
+  metadataDraft: (value) => value == null || validEnhancement(value),
+  metadataEnhancement: (value) => value == null || validEnhancement(value),
+  metadataError: (value) => value == null || (typeof value === 'string' && value.length <= 500),
+  warningsAcknowledged: (value) => value === undefined || typeof value === 'boolean',
+  sourceClipPath: (value) => value === undefined || (typeof value === 'string' && value.length <= 8192 && !value.includes('\0')),
+  tiktokApproval: (_value, item) => validTikTokApproval(item),
+  tiktokDraftCaption: (value) => value == null || (typeof value === 'string' && !value.includes('\0') && !checkCaption('tiktok', value).error)
+}
+
+/** Remove invalid optional fields in place. Returns true when the store needs rewriting. */
+function dropInvalidOptionalFields(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const automation = value as Automation
+  let changed = false
+  const drop = (field: string, contentId?: string): void => {
+    changed = true
+    logger.warn('automation.store.field_dropped', { automationId: typeof automation.id === 'string' ? automation.id.slice(0, 64) : null, contentId: contentId?.slice(0, 64) ?? null, field })
+  }
+  if (automation.sourceResearch !== undefined) {
+    if (!Array.isArray(automation.sourceResearch)) { delete automation.sourceResearch; drop('sourceResearch') }
+    else {
+      const kept = automation.sourceResearch.filter(validSourceResearchEntry).slice(-50)
+      if (kept.length !== automation.sourceResearch.length) { automation.sourceResearch = kept; drop('sourceResearch') }
+    }
+  }
+  if (!Array.isArray(automation.content)) return changed
+  for (const item of automation.content as unknown[]) {
+    if (!item || typeof item !== 'object') continue
+    const content = item as AutomationContent
+    for (const [field, valid] of Object.entries(OPTIONAL_CONTENT_FIELDS) as [keyof AutomationContent, (value: unknown, item: AutomationContent) => boolean][]) {
+      let ok: boolean
+      try { ok = valid(content[field], content) } catch { ok = false }
+      if (!ok) { delete content[field]; drop(field, typeof content.id === 'string' ? content.id : undefined) }
+    }
+  }
+  return changed
 }
 
 function validContent(value: unknown): value is AutomationContent {
@@ -155,15 +207,8 @@ function validContent(value: unknown): value is AutomationContent {
 function validAutomation(value: unknown): value is Automation {
   if (!value || typeof value !== 'object') return false
   const item = value as Automation
-  if (item.sourceResearch !== undefined) {
-    if (!Array.isArray(item.sourceResearch) || item.sourceResearch.length > 50) return false
-    for (const entry of item.sourceResearch) {
-      try {
-        if (!entry || !/^[a-f0-9]{64}$/.test(entry.key) || typeof entry.createdAt !== 'string' || !Number.isFinite(Date.parse(entry.createdAt)) ||
-            !parseSourceContext(entry.source) || !validResearch(entry.research)) return false
-      } catch { return false }
-    }
-  }
+  if (item.sourceResearch !== undefined &&
+      (!Array.isArray(item.sourceResearch) || item.sourceResearch.length > 50 || !item.sourceResearch.every(validSourceResearchEntry))) return false
   return UUID.test(item.id) && typeof item.name === 'string' && item.name.length <= 80 &&
     (item.lastErrorAcknowledged === undefined || typeof item.lastErrorAcknowledged === 'boolean') &&
     typeof item.enabled === 'boolean' && (item.profileId === null || isZernioId(item.profileId)) &&
@@ -206,6 +251,7 @@ function data(): { workspace: string; automations: Automation[] } {
           })
           migrated = true
         } else cached = record.automations
+        for (const automation of cached) if (dropInvalidOptionalFields(automation)) migrated = true
         if (!cached.every(validAutomation)) throw new Error('Invalid automation data')
       } catch {
         throw new Error('Automation data could not be read. The file was preserved for recovery.')

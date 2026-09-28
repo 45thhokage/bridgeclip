@@ -161,3 +161,92 @@ test('enhancement preserves current copy until review, holds scheduling, survive
     await mock.close(); cleanup()
   }
 })
+
+test('research citations are validated after normalization, and damaged optional fields never lock the store', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-citations-')
+  const posting = createPostingMock()
+  const LONG = 'https://ja.wikipedia.org/wiki/' + '東'.repeat(240)
+  const mock = await createMockZernio({ apiKey: 'citation-key', extraRoutes: [...posting.routes,
+    { method: 'POST', path: '/speech', auth: false, handler: (ctx) => ctx.json(200, { text: TRANSCRIPT }) },
+    { method: 'POST', path: '/chat', auth: false, handler: (ctx) => {
+      if (ctx.body.tools) {
+        ctx.json(200, { choices: [{ message: { content: 'Speech recognition notes.', annotations: [
+          { type: 'url_citation', url_citation: { url: LONG, title: 'Grows past the limit when percent-encoded' } },
+          { type: 'url_citation', url_citation: { url: 'https://example.com/docs', title: 'Speech recognition' } }
+        ] } }] })
+      } else ctx.json(200, { choices: [{ message: { content: JSON.stringify({ posts: [POST] }) } }] })
+    } }
+  ] })
+  const env = { BRIDGECLIP_ZERNIO_API_URL: mock.apiUrl, BRIDGECLIP_E2E_TRANSCRIPTION_URL: `${mock.url}/speech`, BRIDGECLIP_E2E_OPENROUTER_URL: `${mock.url}/chat`, PATH: `${process.env.PATH}${path.delimiter}${path.join(ROOT, 'engine-bin')}` }
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]))
+  Object.assign(process.env, env)
+  try {
+    assert.ok(LONG.length < 2048 && new URL(LONG).href.length > 2048, 'fixture grows past the limit only after normalization')
+    const { electron } = fakeElectron(dir)
+    let main = loadMain(entry, { electron })
+    main.settings.replaceApiKey('zernioApiKey', 'citation-key')
+    main.settings.replaceApiKey('openrouterApiKey', 'test-only')
+    const library = path.join(dir, 'library'); const run = path.join(library, 'run-one'); fs.mkdirSync(run, { recursive: true })
+    main.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    const ffmpeg = fs.existsSync(path.join(ROOT, 'engine-bin/ffmpeg')) ? path.join(ROOT, 'engine-bin/ffmpeg') : 'ffmpeg'
+    const clips = ['a', 'b'].map((name, index) => {
+      const clip = path.join(run, `${name}.mp4`)
+      execFileSync(ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${index ? 'red' : 'blue'}:s=360x640:d=2:r=15`, '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-shortest', '-c:v', 'mpeg4', '-c:a', 'aac', clip])
+      return clip
+    })
+    fs.writeFileSync(path.join(run, 'job_output.json'), JSON.stringify({ source_video_title: SOURCE.title, source_video_description: SOURCE.description, source_video_channel: SOURCE.channel, source_video_url: SOURCE.url,
+      clips: clips.map((clip, index) => ({ clip_index: index, s3_url: `file://${clip}`, duration_ms: 2000, start_time_ms: 0, end_time_ms: 2000, summary: `Clip ${index}`, virality_score: 0.8 })) }))
+    const [created] = main.automations.createAutomation('Citations')
+    const profile = mock.state.profiles[0]; const account = mock.addAccount('youtube', profile._id)
+    await main.automations.updateAutomation(created.id, { name: created.name, enabled: false, profileId: profile._id, metadataMode: 'manual', timezone: 'UTC', times: [], youtubeVisibility: 'unlisted', youtubeMadeForKids: false, accounts: [{ platform: 'youtube', accountId: account._id }] })
+    await main.automations.addLibraryClipsToAutomation(created.id, run, [0, 1])
+    const [first, second] = main.automations.listAutomations()[0].content
+    await main.automations.enhanceAutomationContent(created.id, first.id, { source: SOURCE, research: true })
+    const draft = main.automations.listAutomations()[0].content[0].metadataDraft
+    assert.deepEqual(draft.research.sources, [{ url: 'https://example.com/docs', title: 'Speech recognition' }])
+    main = loadMain(entry, { electron })
+    assert.ok(main.automations.listAutomations()[0].content[0].metadataDraft, 'the store reloads after research with long citations')
+
+    // Stores written before the fix, or damaged by hand, lose only the invalid optional field.
+    const storePath = path.join(dir, 'userData', fs.readdirSync(path.join(dir, 'userData')).find((name) => /^automations-.*\.json$/.test(name)))
+    const stored = JSON.parse(fs.readFileSync(storePath, 'utf8'))
+    const bank = stored.automations[0]
+    bank.content[0].metadataDraft.research.sources = [{ url: new URL(LONG).href, title: 'Too long' }]
+    bank.content[0].metadataEnhancement = { ...bank.content[0].metadataDraft, id: 'not-a-uuid' }
+    bank.content[1].sourceContext = { ...SOURCE, url: 'https://evil.example/watch?v=hqP9fivmBqI' }
+    bank.content[1].tiktokApproval = { caption: 42 }
+    bank.content[1].metadataError = 'x'.repeat(501)
+    const validResearch = bank.sourceResearch[0]
+    bank.sourceResearch = [validResearch, { ...validResearch, key: 'bad' }]
+    fs.writeFileSync(storePath, JSON.stringify(stored))
+    const warnings = []
+    const originalWarn = console.warn
+    console.warn = (...args) => { warnings.push(args.map(String).join(' ')); }
+    try { main = loadMain(entry, { electron }) ; main.automations.listAutomations() } finally { console.warn = originalWarn }
+    const [loaded] = main.automations.listAutomations()
+    assert.equal(loaded.content[0].metadataDraft, undefined)
+    assert.equal(loaded.content[0].metadataEnhancement, undefined)
+    assert.equal(loaded.content[0].title, first.title, 'required fields are kept')
+    assert.equal(loaded.content[1].sourceContext, undefined)
+    assert.equal(loaded.content[1].tiktokApproval, undefined)
+    assert.equal(loaded.content[1].metadataError, undefined)
+    assert.equal(loaded.content[1].id, second.id)
+    assert.deepEqual(loaded.sourceResearch.map((entry) => entry.key), [validResearch.key])
+    assert.ok(warnings.some((line) => line.includes('automation.store.field_dropped')), 'dropped fields are logged')
+    assert.ok(!warnings.some((line) => line.includes('evil.example') || line.includes('wikipedia')), 'dropped values are not logged')
+    const repaired = JSON.parse(fs.readFileSync(storePath, 'utf8'))
+    assert.equal(repaired.automations[0].content[0].metadataDraft, undefined, 'the repaired store is saved')
+    await main.automations.runAutomation(created.id)
+    assert.equal(posting.state.creates.length, 1, 'posting resumes after the repair')
+
+    // Required fields and the store version stay strict.
+    for (const damage of [(data) => { data.version = 9 }, (data) => { data.automations[0].content[0].status = 'bogus' }, (data) => { data.automations[0].content[0].postingAttemptId = 'x' }]) {
+      const copy = JSON.parse(JSON.stringify(repaired)); damage(copy)
+      fs.writeFileSync(storePath, JSON.stringify(copy))
+      assert.throws(() => loadMain(entry, { electron }).automations.listAutomations(), /preserved for recovery/)
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    await mock.close(); cleanup()
+  }
+})
