@@ -23,8 +23,22 @@ def parse_moment(value, segments):
             'requires_visual_context': value['requires_visual_context']}
 
 
-def discovery_feedback(entries, duration_ms):
-    """A second search explores up to six largest unproposed spans, never a quota."""
+def preferred_range_ms(preferred_range, duration_ms):
+    """The user's preferred range in ms, clamped to the source; None ends mean unbounded."""
+    start, end = (list(preferred_range or []) + [None, None])[:2]
+    low = 0 if start is None else round(start * 1000)
+    high = duration_ms if end is None else round(end * 1000)
+    low, high = max(0, min(low, duration_ms)), max(0, min(high, duration_ms))
+    return (low, high) if low < high else (0, duration_ms)
+
+
+def discovery_feedback(entries, duration_ms, preferred_range=None):
+    """A second search explores up to six largest unproposed spans, never a quota.
+
+    Spans are limited to the user's preferred range (seconds, as saved in the
+    edit audit): the second pass must not look for clips the user excluded.
+    """
+    low, high = preferred_range_ms(preferred_range, duration_ms)
     previous = []
     for c in entries:
         a, b = c['original_interval']
@@ -32,9 +46,9 @@ def discovery_feedback(entries, duration_ms):
         if accepted:
             a, b = min(a, accepted[0]), max(b, accepted[1])
         previous.append({'interval': [a, b], 'title': c['title'], 'status': c['status']})
-    covered = sorted(c['interval'] for c in previous)
-    gaps, end = [], 0
-    for a, b in covered + [[duration_ms, duration_ms]]:
+    covered = sorted([min(max(a, low), high), min(max(b, low), high)] for a, b in (c['interval'] for c in previous))
+    gaps, end = [], low
+    for a, b in covered + [[high, high]]:
         if a - end >= 30000:
             gaps.append([end, a])
         end = max(end, b)

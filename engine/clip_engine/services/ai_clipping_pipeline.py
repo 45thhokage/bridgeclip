@@ -479,7 +479,7 @@ class AIClippingPipeline:
                         or not any((a.get('judgment') or {}).get('status') == 'success'
                             for c in edit_audit['candidates'] for a in c['report'].get('coherence', {}).get('attempts', []))):
                     break
-                feedback = discovery_feedback(edit_audit['candidates'], round(video_duration * 1000))
+                feedback = discovery_feedback(edit_audit['candidates'], round(video_duration * 1000), edit_audit['preferred_range'])
                 edit_audit['discovery'] = {'status': 'searching' if feedback['search_intervals'] else 'exhausted', **feedback}
                 if not feedback['search_intervals']:
                     break

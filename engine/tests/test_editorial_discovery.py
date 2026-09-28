@@ -212,3 +212,31 @@ def test_automatic_jev_opt_out_skips_review_but_enabled_failures_do_not(monkeypa
     else:
         assert live_calls
         assert audit['candidates'][0]['report']['coherence']['status'] == 'accepted'
+
+
+def test_second_pass_searches_only_inside_the_preferred_range():
+    entries = [{'original_interval': [i * 60000, i * 60000 + 10000], 'title': str(i), 'status': 'rejected'} for i in range(12)]
+    unbounded = discovery_feedback(entries, 720000)
+    assert discovery_feedback(entries, 720000, [None, None]) == unbounded
+    feedback = discovery_feedback(entries, 720000, [125, 360])
+    assert feedback['search_intervals'] == [[130000, 180000], [190000, 240000], [250000, 300000], [310000, 360000]]
+    assert all(125000 <= a < b <= 360000 for a, b in feedback['search_intervals'])
+    assert len(feedback['previous_candidates']) == 12  # Exclusions still list every earlier proposal.
+    # Candidates outside the range do not hide it; a too-short remainder yields no search.
+    assert discovery_feedback(entries[:2], 720000, [300, 420])['search_intervals'] == [[300000, 420000]]
+    assert discovery_feedback(entries, 720000, [60, 80])['search_intervals'] == []
+    # An open-ended or out-of-bounds range is clamped to the source.
+    assert discovery_feedback([], 720000, [None, 9999])['search_intervals'] == [[0, 720000]]
+    assert discovery_feedback([], 720000, [700, None])['search_intervals'] == []
+
+
+def test_pipeline_second_pass_receives_the_saved_preferred_range(monkeypatch, tmp_path):
+    from clip_engine.services import ai_clipping_pipeline as module
+    seen = []
+    real = module.discovery_feedback
+    def spy(entries, duration_ms, preferred_range=None):
+        seen.append(preferred_range)
+        return real(entries, duration_ms, preferred_range)
+    monkeypatch.setattr(module, 'discovery_feedback', spy)
+    test_pipeline_rediscovery_is_bounded_and_preserves_approved_clips(monkeypatch, tmp_path, False)
+    assert seen == [[None, None]]
