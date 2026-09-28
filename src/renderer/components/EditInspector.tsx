@@ -41,7 +41,7 @@ export function EditInspector({ outputDir, onClose }: { outputDir: string; onClo
       <div className="min-w-0 flex-1"><h2 className="text-base font-semibold">Details</h2><p className="mt-0.5 truncate text-xs text-ink-muted" title={audit?.title}>{audit?.title || 'Saved transcript and decisions'}</p></div>
       <Button iconOnly variant="ghost" aria-label="Close edit inspector" icon={<X className="h-4 w-4" />} onClick={onClose} />
     </header>
-    {error ? <div className="p-5"><Callout tone="danger">{error}</Callout></div> : audit ? <RecordedEditView key={outputDir} audit={audit} /> : <p role="status" className="p-8 text-center text-sm text-ink-muted">Loading saved transcript and decisions…</p>}
+    {error ? <div className="p-5"><Callout tone={/^No transcript saved/.test(error) ? 'info' : 'danger'}>{error}</Callout></div> : audit ? <RecordedEditView key={outputDir} audit={audit} /> : <p role="status" className="p-8 text-center text-sm text-ink-muted">Loading saved transcript and decisions…</p>}
   </Dialog>
 }
 
@@ -132,10 +132,11 @@ function SourceContextView({ context }: { context: SourceContextAudit }): React.
         {([['Topics', brief.topics], ['Perspectives to distinguish', brief.perspectives], ['What to look for', brief.clip_guidance], ['Uncertainties', brief.uncertainties]] as const).map(([label, items]) => items.length > 0 && <div key={label}>
           <p className="font-medium">{label}</p><ul className="mt-1 list-disc space-y-1 pl-5 text-ink-muted">{items.map((item, i) => <li key={i}>{item}</li>)}</ul>
         </div>)}
-        {brief.background.length > 0 && <div><p className="font-medium">Researched background</p><ul className="mt-1 list-disc space-y-1 pl-5 text-ink-muted">{brief.background.map((item, i) => <li key={i}>{item.claim}<span className="block break-all text-xs">{item.url}</span></li>)}</ul></div>}
+        {brief.background.length > 0 && <div><p className="font-medium">Researched background</p><ul className="mt-1 list-disc space-y-1 pl-5 text-ink-muted">{brief.background.map((item, i) => <li key={i}>{item.claim}<span className="block break-all text-xs" data-selectable>{item.url}</span></li>)}</ul></div>}
         {brief.vocabulary.length > 0 && <p className="text-xs text-ink-muted">Transcription hints from metadata: {brief.vocabulary.join(', ')}</p>}
       </>}
-      {context.citations.length > 0 && <div><p className="font-medium">Research sources</p><ul className="mt-1 space-y-2">{context.citations.map(source => <li key={source.url} className="text-xs"><button className="text-left text-accent hover:underline" onClick={() => void getApi().shell.openPath(source.url)}>{source.title}</button><span className="block break-all text-ink-muted">{source.url}</span></li>)}</ul></div>}
+      {/* Citations are shown as selectable text, not links: research URLs are never opened from here. */}
+      {context.citations.length > 0 && <div><p className="font-medium">Research sources</p><ul className="mt-1 space-y-2">{context.citations.map(source => <li key={source.url} className="text-xs" data-selectable><span className="block text-ink">{source.title}</span><span className="block break-all text-ink-muted">{source.url}</span></li>)}</ul></div>}
       <p className="text-xs text-ink-subtle">{context.requests.map(r => r.model).filter((m, i, all) => all.indexOf(m) === i).join(', ')} · Recorded {new Date(context.created_at).toLocaleString()}</p>
     </div>
   </details>
