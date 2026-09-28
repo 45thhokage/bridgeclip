@@ -378,6 +378,20 @@ test('explicit Jev opt-out is shown as skipped, never as a passed or missing rev
   assert.doesNotMatch(html, /No Jev question trace|Below threshold|saved requests/)
 })
 
+test('edit audits with a full second discovery pass (108 candidates) stay readable', () => {
+  const { MAX_AUDIT_CANDIDATES } = load('src/shared/editorial.ts')
+  assert.equal(MAX_AUDIT_CANDIDATES, 128)
+  const copy = structuredClone(editFixture)
+  const template = copy.candidates[1]
+  copy.candidates = Array.from({ length: 108 }, (_, i) => ({ ...structuredClone(template), candidate_index: i, discovery_pass: i < 100 ? 1 : 2 }))
+  copy.discovery = { status: 'completed', search_intervals: [[0, 60000]], previous_candidates: Array.from({ length: 100 }, (_, i) => ({ interval: [i * 100, i * 100 + 50], title: `Candidate ${i}`, status: 'rejected' })) }
+  const audit = parseEditAudit(copy)
+  assert.equal(audit.candidates.length, 108)
+  assert.equal(audit.candidates[107].discovery_pass, 2)
+  copy.candidates = Array.from({ length: MAX_AUDIT_CANDIDATES + 1 }, () => structuredClone(template))
+  assert.throws(() => parseEditAudit(copy), /Invalid editorial list/)
+})
+
 test('out-of-credits judgments and answers without optional probabilities or confidence stay readable', () => {
   const { JevTrace } = load('src/renderer/components/JevTrace.tsx')
   const copy = structuredClone(editFixture)

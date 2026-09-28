@@ -242,20 +242,26 @@ export interface EditAudit {
   planner: { requests: { discovery_pass: number; model: string; requested_model: string; request_parameters: string | null; status: string; messages: { role: string; content: string }[]; response: string | null; usage: Record<string, number | null> | null }[] }
   candidates: { discovery_pass: number; candidate_index: number; title: string; original_interval: [number, number]; clip_index: number | null; status: string; report: EditorialTrace | null }[]
 }
+/**
+ * First-pass discovery keeps up to 100 candidates and the second pass adds up
+ * to 8, so 108 is reachable. Headroom above that; the whole file stays capped
+ * at 32 MB when it is read.
+ */
+export const MAX_AUDIT_CANDIDATES = 128
 export function parseEditAudit(value: unknown): EditAudit {
   const v = obj(value), planner = obj(v.planner)
   if (v.version !== 1) throw new Error('Unsupported edit trace')
   return { version: 1, title: str(v.title, 2000), duration_ms: num(v.duration_ms),
     source_context: v.source_context == null ? null : parseSourceContext(v.source_context),
     preferred_range: list(v.preferred_range, 2, maybeNumber), outcome: str(v.outcome, 80),
-    discovery: v.discovery == null ? null : (() => { const d = obj(v.discovery); return { status: str(d.status, 40), search_intervals: list(d.search_intervals, 6, span), previous_candidates: list(d.previous_candidates, 100, (x) => { const c = obj(x); return { interval: span(c.interval), title: str(c.title, 2000), status: str(c.status, 40) } }) } })(),
+    discovery: v.discovery == null ? null : (() => { const d = obj(v.discovery); return { status: str(d.status, 40), search_intervals: list(d.search_intervals, 6, span), previous_candidates: list(d.previous_candidates, MAX_AUDIT_CANDIDATES, (x) => { const c = obj(x); return { interval: span(c.interval), title: str(c.title, 2000), status: str(c.status, 40) } }) } })(),
     transcript: list(v.transcript, 100000, (x) => { const t = obj(x); return { start_ms: num(t.start_ms), end_ms: num(t.end_ms), text: str(t.text, 100000), speaker: t.speaker == null ? null : str(t.speaker, 100) } }),
     planner: { requests: list(planner.requests, 4, (x) => { const r = obj(x); return {
       discovery_pass: num(r.discovery_pass ?? 1, 2), model: str(r.model, 160), requested_model: str(r.requested_model ?? r.model, 160),
       request_parameters: r.request_parameters == null ? null : str(r.request_parameters, 40000), status: str(r.status, 40), response: r.response == null ? null : str(r.response, 1000000),
       messages: list(r.messages, 5, (x) => { const m = obj(x); return { role: str(m.role, 40), content: typeof m.content === 'string' ? str(m.content, 8000000) : list(m.content, 100, (x) => str(obj(x).text, 8000000)).join('\n') } }),
       usage: parseUsage(r.usage) } }) },
-    candidates: list(v.candidates, 100, (x) => { const c = obj(x); return { discovery_pass: num(c.discovery_pass ?? 1, 2), candidate_index: num(c.candidate_index, 999), title: str(c.title, 2000),
+    candidates: list(v.candidates, MAX_AUDIT_CANDIDATES, (x) => { const c = obj(x); return { discovery_pass: num(c.discovery_pass ?? 1, 2), candidate_index: num(c.candidate_index, 999), title: str(c.title, 2000),
       original_interval: span(c.original_interval), clip_index: maybeNumber(c.clip_index), status: str(c.status, 40), report: parseEditorialTrace(c.report) } }) }
 }
 
