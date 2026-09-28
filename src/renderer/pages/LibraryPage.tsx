@@ -88,25 +88,24 @@ export function LibraryPage({ onNavigate, initialRun, initialClipIndex }: { onNa
   }, [configured, open])
 
   const entryPaths = JSON.stringify(entries?.map((entry) => entry.outputDir).sort() ?? [])
+  // The posts store refreshes every 30 s with a new array. Re-check posting
+  // status only when a post's link to a clip or its outcome actually changed.
+  const postsRevision = useMemo(() => JSON.stringify(posts.map((post) => [post.id, post.clipPath, post.status,
+    post.targets.map((target) => [target.platform, target.status, target.inbox])])), [posts])
   useEffect(() => {
     if (open) return
+    const paths = JSON.parse(entryPaths) as string[]
+    if (!paths.length) return
     let active = true
-    // Resolve counts progressively, with one run at a time to bound disk I/O
-    // while recovering older automation copies by byte identity.
-    void (async () => {
-      for (const path of JSON.parse(entryPaths) as string[]) {
-        if (!active) return
-        try {
-          const statuses = await getApi().history.postingStatus(path)
-          const posted = statuses.filter((status) => status.state === 'posted').length
-          if (active) setCounts((current) => ({ ...current, [path]: { posted, notPosted: statuses.length - posted } }))
-        } catch {
-          if (active) setCounts((current) => ({ ...current, [path]: null }))
-        }
-      }
-    })()
+    // One request for every run: the main process reads settings, post history
+    // and automation banks once, and recovers older bank copies by byte identity.
+    getApi().history.postingSummary(paths).then((results) => {
+      if (active) setCounts(Object.fromEntries(results.map((result) => [result.outputDir, result.counts])))
+    }).catch(() => {
+      if (active) setCounts(Object.fromEntries(paths.map((path) => [path, null])))
+    })
     return () => { active = false }
-  }, [entryPaths, posts, open, configured])
+  }, [entryPaths, postsRevision, open, configured])
 
   const filtered = useMemo(() => {
     if (!entries) return []

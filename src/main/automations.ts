@@ -430,16 +430,28 @@ export async function automationLibraryClip(id: unknown, contentId: unknown): Pr
 
 /** Recognize only a recorded bank file in the current workspace. */
 export function isAutomationMedia(path: unknown): path is string {
-  if (typeof path !== 'string') return false
+  return automationMediaMatcher()(path)
+}
+
+/** isAutomationMedia for many paths, reading the automation store once. */
+export function automationMediaMatcher(): (path: unknown) => path is string {
+  let owners: Map<string, string>
+  let workspace: string
   try {
-    const { workspace, automations } = data()
-    const automation = automations.find((entry) => entry.content.some((item) =>
-      path === join(bankPath(workspace, entry.id), item.fileName)
-    ))
-    if (!automation || lstatSync(path).isSymbolicLink()) return false
-    const directory = bankPath(workspace, automation.id)
-    return !lstatSync(directory).isSymbolicLink() && isWithinDirectory(path, directory) && isWithinDirectory(path, app.getPath('userData'))
-  } catch { return false }
+    const current = data()
+    workspace = current.workspace
+    owners = new Map(current.automations.flatMap((automation) => automation.content.map((item) => [join(bankPath(workspace, automation.id), item.fileName), automation.id] as const)))
+  } catch { return (_path: unknown): _path is string => false }
+  return (path: unknown): path is string => {
+    if (typeof path !== 'string') return false
+    const automationId = owners.get(path)
+    if (!automationId) return false
+    try {
+      if (lstatSync(path).isSymbolicLink()) return false
+      const directory = bankPath(workspace, automationId)
+      return !lstatSync(directory).isSymbolicLink() && isWithinDirectory(path, directory) && isWithinDirectory(path, app.getPath('userData'))
+    } catch { return false }
+  }
 }
 
 export function createAutomation(rawName: unknown): Automation[] {

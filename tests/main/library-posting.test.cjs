@@ -41,27 +41,38 @@ test('queue reordering leaves submitted and uncertain slots fixed and preserves 
   assert.equal(hasEnhancedMetadata({ ...a, metadataEnhancement: undefined }, ['youtube']), false)
 })
 
-function fixture(mocks = {}) {
-  const temp = tempDir('bridgeclip-library-status-')
-  const library = path.join(temp.dir, 'library')
-  const run = path.join(library, 'run')
+function makeRun(library, name, count = 3) {
+  const run = path.join(library, name)
   fs.mkdirSync(run, { recursive: true })
-  const clips = [0, 1, 2].map((index) => {
+  const clips = Array.from({ length: count }, (_, index) => {
     const file = path.join(run, `clip_${index}.mp4`)
-    fs.writeFileSync(file, `clip-${index}`)
+    fs.writeFileSync(file, `${name}-clip-${index}`)
     return { clip_index: index, s3_url: `file://${file}`, summary: 'Same title', duration_ms: 1000, start_time_ms: 0, end_time_ms: 1000, virality_score: 0.8 }
   })
   fs.writeFileSync(path.join(run, 'job_output.json'), JSON.stringify({ clips }))
+  return { run, clips }
+}
+
+function fixture(mocks = {}) {
+  const temp = tempDir('bridgeclip-library-status-')
+  const library = path.join(temp.dir, 'library')
+  const { run, clips } = makeRun(library, 'run')
+  for (const [index, clip] of clips.entries()) fs.writeFileSync(clip.s3_url.slice(7), `clip-${index}`)
   const posts = [], automations = []
+  const { electron } = fakeElectron(temp.dir)
+  const decrypt = electron.safeStorage.decryptString
+  const counters = { decrypts: 0 }
+  electron.safeStorage.decryptString = (value) => { counters.decrypts++; return decrypt(value) }
+  const isBankFile = (file) => typeof file === 'string' && file.startsWith(path.join(temp.dir, 'bank'))
   const main = loadMain("export * from './src/main/library-posting'; export * as settings from './src/main/settings-store'", {
-    electron: fakeElectron(temp.dir).electron,
+    electron,
     './zernio/posts': { listPosts: () => posts },
-    './automations': { listAutomations: () => automations, isAutomationMedia: (file) => file.startsWith(path.join(temp.dir, 'bank')) },
+    './automations': { listAutomations: () => automations, automationMediaMatcher: () => isBankFile },
     ...mocks
   })
   main.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
   main.settings.replaceApiKey('zernioApiKey', 'test-key')
-  return { ...temp, main, run, clips, posts, automations }
+  return { ...temp, main, library, run, clips, posts, automations, counters }
 }
 
 test('library history matches original paths, source provenance and byte-identical legacy bank copies', async () => {
@@ -134,5 +145,38 @@ test('manual marks work without an account and undo reveals provider status with
     assert.deepEqual(statuses.map(s => s.state), ['posted', 'failed', 'not_posted'])
     assert.equal(statuses[0].manuallyPosted, undefined)
     assert.equal(JSON.stringify(f.posts), original)
+  } finally { f.cleanup() }
+})
+
+test('the Library summary checks many runs in one request, reading settings a fixed number of times', async () => {
+  const f = fixture()
+  try {
+    const runs = [f.run, ...Array.from({ length: 8 }, (_, index) => makeRun(f.library, `run-${index}`, 10).run)]
+    const second = makeRun(f.library, 'run-0', 10)
+    f.posts.push({ id: 'direct', clipPath: second.clips[3].s3_url.slice(7), status: 'published', targets: [{ platform: 'youtube', status: 'published' }] })
+    const bank = path.join(f.dir, 'bank-copy.mp4')
+    fs.copyFileSync(f.clips[2].s3_url.slice(7), bank)
+    f.posts.push({ id: 'legacy', clipPath: bank, status: 'published', targets: [{ platform: 'instagram', status: 'published' }] })
+    fs.writeFileSync(path.join(runs[2], '.bridgeclip-posted-0'), '')
+
+    f.counters.decrypts = 0
+    await f.main.libraryPostingSummary([f.run])
+    const single = f.counters.decrypts
+    f.counters.decrypts = 0
+    const results = await f.main.libraryPostingSummary([...runs, 'relative/run', path.join(f.dir, 'outside'), f.run])
+    assert.equal(f.counters.decrypts, single, 'settings are read once per request, not per run or clip')
+    const byRun = Object.fromEntries(results.map((result) => [result.outputDir, result.counts]))
+    assert.deepEqual(byRun[f.run], { posted: 1, notPosted: 2 }, 'byte-identical bank copies still count')
+    assert.deepEqual(byRun[runs[1]], { posted: 1, notPosted: 9 })
+    assert.deepEqual(byRun[runs[2]], { posted: 1, notPosted: 9 }, 'manual marks count')
+    assert.deepEqual(byRun[runs[3]], { posted: 0, notPosted: 10 })
+    assert.equal(byRun['relative/run'], null, 'an invalid run fails alone')
+    assert.equal(byRun[path.join(f.dir, 'outside')], null)
+    assert.equal(results.length, runs.length + 2, 'duplicates are checked once')
+
+    for (const input of ['not-an-array', [1], Array.from({ length: 5001 }, () => f.run)]) await assert.rejects(f.main.libraryPostingSummary(input), /Choose runs/)
+    await assert.rejects(f.main.libraryPostingStatus('relative/run'), /absolute path/)
+    f.main.settings.replaceApiKey('zernioApiKey', '')
+    assert.deepEqual((await f.main.libraryPostingSummary([runs[2]]))[0].counts, { posted: 1, notPosted: 9 }, 'manual marks work without an account')
   } finally { f.cleanup() }
 })

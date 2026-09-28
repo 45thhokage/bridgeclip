@@ -19,7 +19,7 @@ import type {
 import type { ClipMediaInfo, PostClipRequest, PostClipResult, PostProgress, PostRecord, PostsRefreshResult, TikTokCreatorInfo, TikTokLegalLink } from '../shared/zernio-posts'
 import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 import type { MetadataEnhancement, AutomationSourceGroup, AutomationBatchResult, AutomationSourceContext, Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
-import type { LibraryClipPostingStatus, LibraryEnhancementOptions } from '../shared/library-posting'
+import type { LibraryClipPostingStatus, LibraryEnhancementOptions, LibraryRunPostingCounts } from '../shared/library-posting'
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
 import type { OutputStorageUsage } from '../shared/output-storage'
@@ -167,6 +167,8 @@ export interface BridgeClipAPI {
     delete: (outputDir: string) => Promise<void>
     deleteClips: (outputDir: string, indices: number[]) => Promise<JobOutput>
     postingStatus: (outputDir: string) => Promise<LibraryClipPostingStatus[]>
+    /** Posted counts for many runs at once, for the Library list. */
+    postingSummary: (outputDirs: string[]) => Promise<LibraryRunPostingCounts[]>
     setPosted: (outputDir: string, clipIndex: number, posted: boolean) => Promise<boolean>
     metadataSource: (outputDir: string, clipIndex: number) => Promise<AutomationSourceContext | null>
     enhanceMetadata: (outputDir: string, clipIndex: number, options: LibraryEnhancementOptions) => Promise<MetadataEnhancement>
@@ -299,6 +301,7 @@ const api: BridgeClipAPI = {
     delete: (outputDir) => ipcRenderer.invoke('history:delete', outputDir),
     deleteClips: (outputDir, indices) => ipcRenderer.invoke('history:deleteClips', outputDir, indices),
     postingStatus: (outputDir) => ipcRenderer.invoke('history:postingStatus', outputDir),
+    postingSummary: (outputDirs) => ipcRenderer.invoke('history:postingSummary', outputDirs),
     setPosted: (outputDir, clipIndex, posted) => ipcRenderer.invoke('history:setPosted', outputDir, clipIndex, posted),
     metadataSource: (outputDir, clipIndex) => ipcRenderer.invoke('history:metadataSource', outputDir, clipIndex),
     enhanceMetadata: (outputDir, clipIndex, options) => ipcRenderer.invoke('history:enhanceMetadata', outputDir, clipIndex, options),
