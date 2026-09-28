@@ -322,11 +322,18 @@ export function AutomationsPage({ onNavigate, onViewLibrary }: { onNavigate: (pa
   })
 
   const removeContent = (item: AutomationContent): void => {
-    if (!selected || item.status === 'posted' || item.postId) return
+    if (!selected || item.status === 'posting') return
+    // Removing only deletes the bank copy. It never re-queues or retries a post.
+    const submitted = item.status === 'posted'
+    const linked = !submitted && Boolean(item.postId)
     setConfirm({
-      title: 'Remove this clip from the queue?',
-      body: <>“{item.title}” and its queue copy will be removed from this content bank. The original file will remain available.</>,
-      confirmLabel: 'Remove from queue',
+      title: submitted ? 'Remove this clip from Submitted?' : linked ? 'Remove this held clip?' : 'Remove this clip from the queue?',
+      body: submitted
+        ? <>“{item.title}” and its bank copy will be removed from this automation’s history. Its post stays on your accounts and in Posts, and the original file remains available.</>
+        : linked
+          ? <>“{item.title}” and its bank copy will be removed from this content bank. Its Zernio post is not changed; check Posts before posting this clip again. The original file remains available.</>
+          : <>“{item.title}” and its queue copy will be removed from this content bank. The original file will remain available.</>,
+      confirmLabel: submitted ? 'Remove from history' : linked ? 'Remove clip' : 'Remove from queue',
       tone: 'primary',
       onConfirm: () => void mutate('remove', () => getApi().automations.removeContent(selected.id, item.id))
     })
@@ -917,7 +924,7 @@ function ContentRow({ item, nextUp, tiktokReviewNeeded, tiktokSelected, onReview
             { label: editing ? 'Close editor' : 'Edit', icon: <Pencil className="h-3.5 w-3.5" />, disabled: Boolean(item.metadataDraft), onSelect: onEdit },
             { label: isMac ? 'Show in Finder' : 'Show in folder', icon: <FolderOpen className="h-3.5 w-3.5" />, onSelect: onShowInFolder },
             ...(item.status === 'queued' && tiktokSelected && !tiktokReviewNeeded ? [{ label: 'Edit TikTok', disabled: reviewDisabled || Boolean(item.metadataDraft), onSelect: onReviewTikTok }] : []),
-            ...(item.status !== 'posted' && !item.postId ? [{ label: 'Remove from queue', icon: <X className="h-3.5 w-3.5" />, onSelect: onRemove }] : [])
+            { label: item.status === 'posted' ? 'Remove from history' : item.postId ? 'Remove clip' : 'Remove from queue', icon: <X className="h-3.5 w-3.5" />, onSelect: onRemove }
           ]} />
         </div>
       </div>

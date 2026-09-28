@@ -12,7 +12,7 @@ import { loadSettings } from './settings-store'
 import { assertMediaPath, authorizeMedia, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
 import { getZernioOverview, readCachedOverview } from './zernio/service'
-import { getTikTokCreatorInfo, inspectAutomationPost, probeClipForPosting, publishClip } from './zernio/posts'
+import { getTikTokCreatorInfo, inspectAutomationPost, probeClipForPosting, publishClip, relinkAutomationPost } from './zernio/posts'
 import type { AutomationReviewResult } from '../shared/automations'
 import { parsePostClipRequest, parseTikTokOptions } from './zernio/posts-payload'
 import { workspaceId } from './zernio/workspace-cache'
@@ -28,7 +28,10 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm'])
 const MAX_FILE_BYTES = 5 * 1024 ** 3
 const MAX_STORE_BYTES = 32 * 1024 * 1024
 const MAX_AUTOMATIONS = 100
+/** Clips not yet submitted (queued, posting or held) per automation. */
 const MAX_CONTENT = 500
+/** Everything kept per automation, including Submitted history; the oldest history is pruned first. */
+const MAX_TOTAL_CONTENT = 1000
 
 let cachedWorkspace: string | null = null
 let cached: Automation[] = []
@@ -218,7 +221,7 @@ function validAutomation(value: unknown): value is Automation {
     Array.isArray(item.times) && item.times.length <= 24 && item.times.every((time) => typeof time === 'string' && TIME.test(time)) &&
     isValidTimeZone(item.timezone) && ['public', 'unlisted', 'private'].includes(item.youtubeVisibility) && typeof item.youtubeMadeForKids === 'boolean' &&
     item.lastSlots && typeof item.lastSlots === 'object' && !Array.isArray(item.lastSlots) &&
-    Array.isArray(item.content) && item.content.length <= MAX_CONTENT && item.content.every(validContent) &&
+    Array.isArray(item.content) && item.content.length <= MAX_TOTAL_CONTENT && item.content.every(validContent) &&
     typeof item.createdAt === 'string' && Number.isFinite(Date.parse(item.createdAt)) &&
     (item.lastRunAt === null || typeof item.lastRunAt === 'string') &&
     (item.lastError === null || typeof item.lastError === 'string')
@@ -440,12 +443,20 @@ export async function updateAutomation(id: unknown, raw: unknown): Promise<Autom
   return listAutomations()
 }
 
+/** Post history outlives a removed bank copy: point it at the original clip instead. */
+function forgetBankItems(workspace: string, automationId: string, items: readonly AutomationContent[]): void {
+  for (const item of items) {
+    reviews.delete(item.id)
+    if (item.postId) relinkAutomationPost(item.postId, join(bankPath(workspace, automationId), item.fileName), item.sourceClipPath)
+  }
+}
+
 export function deleteAutomation(id: unknown): Automation[] {
   const { workspace, automation } = find(id)
   if (busy.has(automation.id)) throw new Error('Wait for the current post to finish.')
-  for (const item of automation.content) reviews.delete(item.id)
   cached = cached.filter((item) => item.id !== automation.id)
   save(workspace)
+  forgetBankItems(workspace, automation.id, automation.content)
   rmSync(bankPath(workspace, automation.id), { recursive: true, force: true })
   return listAutomations()
 }
@@ -473,7 +484,11 @@ export async function addLibraryClipsToAutomation(id: unknown, outputDir: unknow
 
 export async function addAutomationContent(id: unknown, paths: string[], titles?: readonly string[], sourceContext?: AutomationSourceContext): Promise<Automation[]> {
   const { workspace, automation } = find(id)
-  if (!Array.isArray(paths) || paths.length === 0 || paths.length > 30 || automation.content.length + paths.length > MAX_CONTENT) throw new Error('Choose up to 30 clips at a time.')
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > 30) throw new Error('Choose up to 30 clips at a time.')
+  // Submitted clips are history and never block new content; see pruneHistory.
+  if (automation.content.filter((item) => item.status !== 'posted').length + paths.length > MAX_CONTENT) {
+    throw new Error(`An automation can hold up to ${MAX_CONTENT} clips that have not been submitted. Remove some before adding more.`)
+  }
   if (busy.has(automation.id)) throw new Error('Wait for the current operation to finish.')
   busy.add(automation.id)
   const directory = bankPath(workspace, automation.id)
@@ -516,14 +531,27 @@ export async function addAutomationContent(id: unknown, paths: string[], titles?
     if (currentWorkspace() !== workspace || cachedWorkspace !== workspace || !cached.includes(automation)) {
       throw new Error('Automation changed while adding content.')
     }
-    automation.content.push(...pendingItems)
+    const previousContent = automation.content
+    const pruned = pruneHistory([...previousContent, ...pendingItems])
+    automation.content = [...previousContent, ...pendingItems].filter((item) => !pruned.includes(item))
     try { save(workspace); committed = true }
-    catch (error) { automation.content.splice(-pendingItems.length); throw error }
+    catch (error) { automation.content = previousContent; throw error }
+    forgetBankItems(workspace, automation.id, pruned)
+    for (const item of pruned) rmSync(join(directory, item.fileName), { force: true })
   } finally {
     if (!committed) for (const file of copiedFiles) await unlink(file).catch(() => {})
     busy.delete(automation.id)
   }
   return listAutomations()
+}
+
+/** The oldest Submitted clips that must go so the bank stays within MAX_TOTAL_CONTENT. */
+function pruneHistory(content: readonly AutomationContent[]): AutomationContent[] {
+  const excess = content.length - MAX_TOTAL_CONTENT
+  if (excess <= 0) return []
+  return content.filter((item) => item.status === 'posted')
+    .sort((a, b) => (a.postedAt ?? a.addedAt).localeCompare(b.postedAt ?? b.addedAt))
+    .slice(0, excess)
 }
 
 export function reorderAutomationContent(id: unknown, contentId: unknown, beforeId: unknown): Automation[] {
@@ -590,7 +618,14 @@ export async function reviewAutomationContent(id: unknown, contentId: unknown, r
     if (currentWorkspace() !== workspace || !cached.includes(automation)) throw new Error('The Zernio workspace changed. Please try again.')
     let outcome: AutomationReviewResult['outcome'] = 'held'
     let message = 'This clip has no linked Zernio post. Use Return to queue after confirming it was not published.'
-    if (post?.submitted) {
+    if (post?.missing) {
+      // Zernio no longer has the post, so it can't prove the clip was not
+      // published. Unlink it; returning it now needs a person's confirmation.
+      item.postId = null
+      item.error = 'Zernio no longer has this clip’s post. Confirm it was not published to any selected account before returning it to the queue.'
+      item.warningsAcknowledged = false
+      message = 'Zernio no longer has this post, so its status can’t be checked. Confirm it was not published, then use Return to queue, or remove the clip.'
+    } else if (post?.submitted) {
       item.status = 'posted'
       item.error = null
       item.warningsAcknowledged = false
@@ -625,9 +660,11 @@ export function removeAutomationContent(id: unknown, contentId: unknown): Automa
   const item = automation.content.find((content) => content.id === contentId)
   if (!item) throw new Error('Clip not found')
   if (item.status === 'posting' || busy.has(automation.id)) throw new Error('Wait for the current post to finish.')
-  reviews.delete(item.id)
+  // Removing never re-queues anything. Submitted and held clips leave the
+  // bank as history; their posts stay in Zernio and in Posts.
   automation.content = automation.content.filter((content) => content.id !== item.id)
   save(workspace)
+  forgetBankItems(workspace, automation.id, [item])
   rmSync(join(bankPath(workspace, automation.id), item.fileName), { force: true })
   return listAutomations()
 }

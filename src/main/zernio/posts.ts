@@ -704,13 +704,26 @@ function restoreAutomationPost(id: string, remote: Record<string, unknown>, clip
     status: 'draft', error: null, createdAt: clip.addedAt, uploadedAt: clip.addedAt, refreshedAt: null, scheduledFor: null, timezone: null })
 }
 
-/** Fresh evidence for returning an automation clip; never starts a retry. */
-export async function inspectAutomationPost(id: string, clip: { clipPath: string; clipTitle: string; addedAt: string }, returnToQueue: boolean): Promise<{ submitted: boolean; fullyFailed: boolean }> {
+/**
+ * Fresh evidence for returning an automation clip; never starts a retry.
+ * `missing` means Zernio no longer has the post (404), so there is no linked
+ * post to check: the caller must fall back to a person's confirmation.
+ */
+export async function inspectAutomationPost(id: string, clip: { clipPath: string; clipTitle: string; addedAt: string }, returnToQueue: boolean): Promise<{ submitted: boolean; fullyFailed: boolean; missing?: boolean }> {
   if (!isZernioId(id)) throw new Error('Invalid automation post.')
   const generation = workspaceGeneration
   return changePost(id, async () => {
     const previous = posts().get(id)
-    const remote = await getClient().getPost(id)
+    let remote: Awaited<ReturnType<ZernioClient['getPost']>>
+    try { remote = await getClient().getPost(id) } catch (error) {
+      assertWorkspace(generation)
+      if (!(error instanceof ZernioApiError) || error.status !== 404) throw error
+      const current = posts().get(id)
+      if (current && JSON.stringify(current) === JSON.stringify(previous)) {
+        posts().save({ ...current, status: 'missing', error: 'This post is no longer in your Zernio workspace.', refreshedAt: new Date().toISOString() })
+      }
+      return { submitted: false, fullyFailed: false, missing: true }
+    }
     assertWorkspace(generation)
     const current = posts().get(id)
     if (JSON.stringify(current) !== JSON.stringify(previous)) throw new Error('The post changed while checking. Refresh its status again.')
@@ -732,6 +745,21 @@ export async function inspectAutomationPost(id: string, clip: { clipPath: string
     posts().save(record)
     return result
   })
+}
+
+/**
+ * When an automation's bank copy is removed, point its post history at the
+ * original clip, so Library posting status and thumbnails keep working.
+ * Best effort: a post being changed right now keeps its current record.
+ */
+export function relinkAutomationPost(id: string, bankPath: string, originalPath: string | undefined): void {
+  if (!originalPath || !isZernioId(id) || changingPosts.has(id)) return
+  try {
+    const record = posts().get(id)
+    if (record && record.clipPath === bankPath) posts().save({ ...record, clipPath: originalPath })
+  } catch {
+    logger.warn('posts.relink_failed', { postId: id })
+  }
 }
 
 /** Removes a finished post from the local list; Zernio keeps its own record. */
