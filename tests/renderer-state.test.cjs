@@ -273,3 +273,35 @@ test('Jev custom thresholds survive unrelated queued settings saves and failed w
   assert.equal(useSettingsStore.getState().jevCutThreshold, '0.91')
   assert.equal(useSettingsStore.getState().saving, false)
 })
+
+test('Jev review and web research show as opt-in betas, with thresholds editable while Jev is off', async () => {
+  const React = require('react')
+  const { renderToStaticMarkup } = require('react-dom/server')
+  const code = buildSync({
+    stdin: {
+      contents: `export { JevSettings } from './src/renderer/components/JevSettings';
+        export { useSettingsStore } from './src/renderer/store/use-settings-store';`,
+      resolveDir: path.resolve(__dirname, '..'), loader: 'ts'
+    },
+    bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.css': 'empty' }, jsx: 'automatic', write: false
+  }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require, window: { bridgeclip: { settings: { load: async () => settings } } } })
+  const { JevSettings, useSettingsStore } = mod.exports
+  // Before settings load, and when an older main process omits the fields.
+  assert.equal(useSettingsStore.getState().jevEnabled, 'off')
+  assert.equal(useSettingsStore.getState().sourceContextWebResearch, 'off')
+  await useSettingsStore.getState().load()
+  assert.equal(useSettingsStore.getState().jevEnabled, 'off')
+  assert.equal(useSettingsStore.getState().sourceContextWebResearch, 'off')
+  // Server rendering reads the store's initial state; mark it loaded.
+  useSettingsStore.getInitialState().loaded = true
+  const html = renderToStaticMarkup(React.createElement(JevSettings))
+  assert.match(html, /Beta/)
+  assert.match(html, /extra OpenRouter credit/)
+  assert.match(html, /aria-checked="false"/)
+  assert.match(html, /Review &amp; edit still uses Jev with the thresholds below/)
+  assert.doesNotMatch(html, /<fieldset[^>]*disabled/)
+  assert.doesNotMatch(html, /inert|data-open/)
+  assert.match(html, /type="range"/)
+})

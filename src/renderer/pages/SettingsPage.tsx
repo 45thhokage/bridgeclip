@@ -160,8 +160,8 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
               <label className="flex items-start gap-3 px-3 py-2 text-sm text-ink-muted">
                 <input type="checkbox" className="mt-1" checked={sourceContextWebResearch === 'on'}
                   onChange={(e) => commit({ sourceContextWebResearch: e.target.checked ? 'on' : 'off' })} />
-                <span>Research the source before clipping
-                  <span className="mt-1 block text-xs text-ink-subtle">Gemini builds a channel and video overview before transcription. Research each YouTube or Twitch source with up to two web searches through OpenRouter. Adds time and provider charges. Turn off to use metadata only. Local files are never searched. View the brief and sources in the transcript inspector.</span>
+                <span>Research the source before clipping <Badge tone="warning" className="ml-1 align-middle">Beta</Badge>
+                  <span className="mt-1 block text-xs text-ink-subtle">Off by default. When on, the video’s title, description and channel go to OpenRouter web search (up to two searches) and Gemini builds a channel and video overview before transcription. Uses extra OpenRouter credit and adds time. Only YouTube and Twitch sources are researched; local files never are. View the brief and sources in the transcript inspector.</span>
                 </span>
               </label>
               <p className="eyebrow px-1 pt-2">Optional</p>
