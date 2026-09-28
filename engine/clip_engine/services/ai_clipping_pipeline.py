@@ -31,7 +31,7 @@ from clip_engine.services.source_context import SourceContextService, context_fo
 from clip_engine.services.editorial_evidence import discovery_feedback, overlaps
 from clip_engine.services.jev_service import JevService, MODEL as JEV_MODEL
 from clip_engine.services.coherence_review import CoherenceReviewer, CoherenceRejected, no_approved_clips_message
-from clip_engine.services.editorial_context import analyze_reactions, repair_context_boundaries
+from clip_engine.services.editorial_context import analyze_reactions, empty_report, repair_context_boundaries
 from clip_engine.services.editorial_vision import EditorialVision
 from clip_engine.services.editorial_review import protect_acknowledgments, review_duplicate_candidates, editorial_summary
 from clip_engine.services.intelligence_planner import (
@@ -201,7 +201,7 @@ class AIClippingPipeline:
         loop = asyncio.get_running_loop()
         start_time = time.time()
         job_id = request.job_id
-        jev_enabled = request.workflow == 'review' or getattr(self.settings, 'jev_enabled', True)
+        jev_enabled = request.workflow == 'review' or getattr(self.settings, 'jev_enabled', False)
         editorial_service = JevService.from_settings(self.settings, required=request.workflow == 'review')
         coherence_service = JevService(self.settings.openrouter_api_key if jev_enabled else '', max_requests=256, token_budget=1536000)
         work_dir = os.path.join(self.settings.temp_directory, job_id)
@@ -282,19 +282,28 @@ class AIClippingPipeline:
 
             capture_memory("after_download")
 
-            # Establish the source's background before hearing or interpreting its speech.
-            current_stage = "source_context"
-            self._update_progress(job_id, JobStatus.CONTEXTUALIZING, 12, "Researching the source and building context...")
-            stage_start = time.perf_counter()
-            source_context = await self.source_context_service.build(download_result.metadata)
-            stage_timings["source_context"] = time.perf_counter() - stage_start
-            if self.local_mode:
-                self._save_local_json(job_id, "source_context", source_context)
+            # Establish the source's background before hearing or interpreting its
+            # speech. It is part of Jev review and of opt-in web research; with
+            # both off, automatic clipping plans from the transcript alone.
+            source_context = None
+            if jev_enabled or getattr(self.settings, 'source_context_web_research', False):
+                current_stage = "source_context"
+                self._update_progress(job_id, JobStatus.CONTEXTUALIZING, 12, "Researching the source and building context...")
+                stage_start = time.perf_counter()
+                source_context = await self.source_context_service.build(download_result.metadata)
+                stage_timings["source_context"] = time.perf_counter() - stage_start
+                if self.local_mode:
+                    self._save_local_json(job_id, "source_context", source_context)
             context_brief = context_for_prompt(source_context)
+            source_context_cost = source_context['cost_usd'] if source_context else 0.0
 
-            # Step 2: Transcribe audio
+            # Step 2: Transcribe audio. Jev reviews setup and payoff anywhere in
+            # the source, so it needs all of it; otherwise only the chosen range.
             current_stage = "transcription"
-            self._update_progress(job_id, JobStatus.TRANSCRIBING, 15, "Transcribing the full source for context...")
+            self._update_progress(
+                job_id, JobStatus.TRANSCRIBING, 15,
+                "Transcribing the full source for context..." if jev_enabled else "Transcribing audio...",
+            )
             stage_start = time.perf_counter()
             previous_transcription_progress = getattr(self.transcription_service, "progress_callback", None)
             self.transcription_service.progress_callback = lambda message: self._update_progress(
@@ -307,9 +316,9 @@ class AIClippingPipeline:
                 transcription_result = await self.transcription_service.transcribe(
                     video_path=download_result.video_path,
                     work_dir=work_dir,
-                    keyterms=transcription_terms(request.keyterms, source_context),
-                    start_seconds=None,
-                    end_seconds=None,
+                    keyterms=transcription_terms(request.keyterms, source_context) if source_context else request.keyterms,
+                    start_seconds=None if jev_enabled else request.start_time_seconds,
+                    end_seconds=None if jev_enabled else effective_end_time,
                 )
             except NoAudioTrackError:
                 logger.info("Source has no audio track; trying visual-only planning")
@@ -329,7 +338,8 @@ class AIClippingPipeline:
                 stage_start = time.perf_counter()
                 visual_frames = await sample_visual_planning_frames(
                     download_result.video_path, video_duration, work_dir,
-                    None, None,
+                    None if jev_enabled else request.start_time_seconds,
+                    None if jev_enabled else effective_end_time,
                 )
                 stage_timings["visual_sampling"] = time.perf_counter() - stage_start
                 logger.info("Visual-only planning has %s sampled frames", len(visual_frames))
@@ -363,7 +373,10 @@ class AIClippingPipeline:
 
             # Step 3: Plan clips using AI
             current_stage = "planning"
-            self._update_progress(job_id, JobStatus.PLANNING, 30, "Finding complete ideas near your preferred range...")
+            self._update_progress(
+                job_id, JobStatus.PLANNING, 30,
+                "Finding complete ideas near your preferred range..." if jev_enabled else "Planning viral clips...",
+            )
             stage_start = time.perf_counter()
             edit_audit = {'version': 1, 'title': download_result.metadata.title,
                 'source_context': source_context,
@@ -393,6 +406,7 @@ class AIClippingPipeline:
                 start_time_seconds=request.start_time_seconds,
                 end_time_seconds=request.end_time_seconds,
                 aspect_ratio=request.aspect_ratio,
+                jev_enabled=jev_enabled,
             )
             clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
             edit_audit['planner'] = getattr(self.intelligence_planner, 'audit', {'requests': []})
@@ -416,7 +430,7 @@ class AIClippingPipeline:
                         stage_id=stage, stage_percent=percent))
                 edit_audit['outcome'] = 'ready_for_review'
                 save_edit_audit()
-                costs = source_context['cost_usd'] + coherence_service.estimated_cost_usd
+                costs = source_context_cost + coherence_service.estimated_cost_usd
                 for api in (transcription_result.api_costs, clip_plan.api_costs):
                     costs += getattr(api, 'estimated_cost_usd', 0) if api else 0
                 output = JobOutput(job_id=job_id, source_video_url=request.video_url,
@@ -442,8 +456,12 @@ class AIClippingPipeline:
                     self._update_progress(job_id, JobStatus.PLANNING, 35,
                         f"Reviewing candidate {i + 1} for coherence (discovery {discovery_pass})..." if jev_enabled else f"Selecting planned clip {i + 1}...",
                         stage_id="reviewing" if jev_enabled else "planning", stage_percent=None)
-                    segment.editorial = analyze_reactions(transcription_result.segments,
-                        segment.start_time_ms, segment.end_time_ms)
+                    # Reaction protection and boundary expansion belong to Jev
+                    # review; without it, planned clips render as planned.
+                    segment.editorial = (
+                        analyze_reactions(transcription_result.segments, segment.start_time_ms, segment.end_time_ms)
+                        if jev_enabled else empty_report()
+                    )
                     entry = {'candidate_index': i, 'title': segment.summary or '', 'discovery_pass': discovery_pass,
                         'original_interval': [segment.start_time_ms, segment.end_time_ms],
                         'clip_index': None, 'status': 'reviewing', 'report': segment.editorial}
@@ -452,9 +470,10 @@ class AIClippingPipeline:
                         entry['status'] = 'selection_limit'
                         save_edit_audit()
                         continue
-                    segment.start_time_ms, segment.end_time_ms = repair_context_boundaries(
-                        segment.start_time_ms, segment.end_time_ms, segment.editorial, 0, round(video_duration * 1000), round(video_duration * 1000))
-                    if not jev_enabled:
+                    if jev_enabled:
+                        segment.start_time_ms, segment.end_time_ms = repair_context_boundaries(
+                            segment.start_time_ms, segment.end_time_ms, segment.editorial, 0, round(video_duration * 1000), round(video_duration * 1000))
+                    else:
                         # Explicit opt-out bypasses review; provider failures never do.
                         reviewer.trace(segment.editorial).update(status='skipped', reason='disabled_by_user',
                             original_interval=entry['original_interval'])
@@ -630,7 +649,9 @@ class AIClippingPipeline:
                         editorial_context=segment.editorial,
                         editorial_service=editorial_service if jev_enabled else None,
                         coherence_reviewer=reviewer if jev_enabled else None,
-                        apply_padding=False,
+                        # Jev reviews exact source intervals; otherwise keep the
+                        # usual audio padding around each clip.
+                        apply_padding=not jev_enabled,
                     )
 
                     render_result = await self.rendering_service.render_clip(render_request)
@@ -852,12 +873,13 @@ class AIClippingPipeline:
 
             # Build API cost breakdown
             api_costs: dict[str, Any] = {}
-            total_cost = source_context['cost_usd']
-            api_costs['source_context'] = {
-                'provider': 'openrouter', 'model': self.settings.source_context_model,
-                'estimated_cost_usd': source_context['cost_usd'],
-                'attempts': len(source_context['requests']), 'cost_incomplete': source_context['cost_incomplete'],
-            }
+            total_cost = source_context_cost
+            if source_context:
+                api_costs['source_context'] = {
+                    'provider': 'openrouter', 'model': self.settings.source_context_model,
+                    'estimated_cost_usd': source_context['cost_usd'],
+                    'attempts': len(source_context['requests']), 'cost_incomplete': source_context['cost_incomplete'],
+                }
 
             if transcription_result.api_costs:
                 tc = transcription_result.api_costs
@@ -918,7 +940,11 @@ class AIClippingPipeline:
             metrics = {
                 'diagnostics': self._diagnostics.snapshot(),
                 'pipeline_stages': self._stage_progress.update('completed'),
-                "analysis_duration_seconds": video_duration,
+                # Jev plans from the full source; otherwise only the range is analyzed.
+                "analysis_duration_seconds": video_duration if jev_enabled else max(
+                    0, (effective_end_time if effective_end_time is not None else video_duration)
+                    - (request.start_time_seconds or 0),
+                ),
                 "requested_settings": {
                     "clipping_mode": self.settings.clipping_mode,
                     "planner_model": self.settings.planner_model,

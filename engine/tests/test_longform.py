@@ -46,9 +46,10 @@ def make_transcript(n_sentences, words_per=12, word_ms=300, gap_ms=80, pause_ms=
     return segments
 
 
-def planner_for(transcript, ranges, aspect="16:9"):
+def planner_for(transcript, ranges, aspect="16:9", jev=False):
     planner = IntelligencePlannerService()
     planner.settings = Settings(_env_file=None, openrouter_api_key="test")
+    planner._jev_enabled = jev
     planner._current_duration_ranges = ranges
     planner._current_min_duration = None
     planner._current_max_duration = None
@@ -96,7 +97,7 @@ class TestConfig:
 
 
 class TestPlanning:
-    def run_plan(self, monkeypatch, transcript, ranges, aspect, clips=()):
+    def run_plan(self, monkeypatch, transcript, ranges, aspect, clips=(), jev=False):
         payloads = []
 
         async def fake_completion(client, payload):
@@ -109,7 +110,7 @@ class TestPlanning:
         planner.settings = Settings(_env_file=None, openrouter_api_key="test")
         plan = asyncio.run(planner.plan_clips(
             TranscriptionResult(segments=transcript, full_text=""),
-            duration_ranges=ranges, aspect_ratio=aspect,
+            duration_ranges=ranges, aspect_ratio=aspect, jev_enabled=jev,
         ))
         return plan, payloads[0]
 
@@ -125,12 +126,21 @@ class TestPlanning:
         item = schema["properties"]["clips"]["items"]
         assert {"skip", "chapters", "description"} <= set(item["required"])
 
-    def test_short_form_prompt_and_schema_are_unchanged(self, monkeypatch):
+    @pytest.mark.parametrize("jev,role", [(False, "scroll-stopping"), (True, "complete, faithful excerpts")])
+    def test_short_form_prompt_and_schema_are_unchanged(self, monkeypatch, jev, role):
         transcript = make_transcript(300)
-        _, payload = self.run_plan(monkeypatch, transcript, ["short"], "16:9")
-        assert "complete, faithful excerpts" in payload["messages"][0]["content"]
+        _, payload = self.run_plan(monkeypatch, transcript, ["short"], "16:9", jev=jev)
+        assert role in payload["messages"][0]["content"]
         item = payload["response_format"]["json_schema"]["schema"]["properties"]["clips"]["items"]
         assert "skip" not in item["properties"]
+
+    @pytest.mark.parametrize("jev,rule", [
+        (False, "Clips outside 600-900 seconds are REJECTED."),
+        (True, "Duration is a preference."),
+    ])
+    def test_longform_runtime_rule_follows_jev(self, monkeypatch, jev, rule):
+        _, payload = self.run_plan(monkeypatch, make_transcript(300), ["extended"], "16:9", jev=jev)
+        assert rule in payload["messages"][0]["content"]
 
     def test_vertical_extended_clips_are_not_longform(self, monkeypatch):
         _, payload = self.run_plan(monkeypatch, make_transcript(300), ["extended"], "9:16")
@@ -162,9 +172,18 @@ class TestPlanning:
         assert seg.chapters[1][0] == e_ms                        # moved out of the skip
         assert seg.description == "About things."
 
-    def test_skips_may_cross_duration_preference_for_later_jev_review(self):
+    def test_skips_never_cut_below_the_minimum_runtime(self):
         tr = make_transcript(200)
         planner = planner_for(tr, ["extended"])                 # 600 s minimum
+        start = tr[0].start_time_ms / 1000
+        end = tr[125].end_time_ms / 1000                        # ~10.5 min
+        big = (tr[20].start_time_ms / 1000, tr[60].start_time_ms / 1000)   # ~3.3 min
+        seg = planner._parse_clip_plan_response(completion([longform_clip(start, end, skip=[big])])).segments[0]
+        assert seg.skip_ranges_ms == []
+
+    def test_skips_may_cross_duration_preference_for_later_jev_review(self):
+        tr = make_transcript(200)
+        planner = planner_for(tr, ["extended"], jev=True)       # 600 s minimum
         start = tr[0].start_time_ms / 1000
         end = tr[125].end_time_ms / 1000                        # ~10.5 min
         big = (tr[20].start_time_ms / 1000, tr[60].start_time_ms / 1000)   # ~3.3 min

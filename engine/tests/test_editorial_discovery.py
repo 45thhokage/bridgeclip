@@ -19,6 +19,7 @@ def moment():
 
 def test_candidate_construction_includes_setup_and_payoff_before_review():
     planner = make_planner()
+    planner._jev_enabled = True
     planner._current_transcript = make_transcript(40).segments
     planner._current_video_duration = 40
     result = planner._parse_clip_plan_response(completion(json.dumps({'clips': [{**clip(10, 19.5), 'moment': moment()}]})))
@@ -26,6 +27,22 @@ def test_candidate_construction_includes_setup_and_payoff_before_review():
     candidate = result.segments[0]
     assert (candidate.start_time_ms, candidate.end_time_ms) == (5000, 29500)
     assert candidate.moment['setup']['speaker'] == 'S2'
+
+
+def test_jev_anchor_mismatch_is_logged_and_audited_not_silent(caplog):
+    planner = make_planner()
+    planner._jev_enabled = True
+    planner.audit = {'requests': []}
+    planner._current_transcript = make_transcript(60).segments
+    planner._current_video_duration = 60
+    clips = [{**clip(10, 19.5), 'moment': {**moment(), 'setup_segment': 99}},
+             {**clip(45, 54.5), 'moment': moment()}]            # runs past its own topic
+    with caplog.at_level('WARNING'):
+        result = planner._parse_clip_plan_response(completion(json.dumps({'clips': clips})))
+    assert result.segments == []
+    reasons = [d['reason'] for d in planner.audit['discarded']]
+    assert reasons[0].startswith('moment anchors') and reasons[1] == 'excerpt extends outside its moment topic'
+    assert caplog.text.count('Discarding planner candidate') == 2
 
 
 def test_invalid_narrative_anchors_are_rejected():
@@ -39,6 +56,18 @@ def test_discovery_keeps_alternatives_but_collapses_identical_boundaries():
     planner = make_planner()
     clips = [ClipPlanSegment(0, 30000, .9), ClipPlanSegment(10000, 40000, .8), ClipPlanSegment(0, 30000, .7)]
     assert len(planner._finalize_clips(clips, 8, allow_alternatives=True)) == 2
+
+
+def test_boundary_alternatives_do_not_take_clip_slots():
+    planner = make_planner()
+    clips = [ClipPlanSegment(0, 30000, .9), ClipPlanSegment(10000, 40000, .8), ClipPlanSegment(5000, 35000, .75),
+             ClipPlanSegment(60000, 90000, .7), ClipPlanSegment(120000, 150000, .6)]
+    kept = planner._finalize_clips(clips, 2, allow_alternatives=True)
+    # Two distinct moments fill the two slots; one alternative per moment rides along.
+    assert [(c.start_time_ms, c.end_time_ms) for c in kept] == [(0, 30000), (10000, 40000), (60000, 90000)]
+    # Without Jev the overlap drops and the next distinct moment is used.
+    kept = planner._finalize_clips(clips, 2)
+    assert [(c.start_time_ms, c.end_time_ms) for c in kept] == [(0, 30000), (60000, 90000)]
 
 
 def test_second_pass_targets_at_most_six_unproposed_spans():
@@ -112,7 +141,8 @@ def test_failed_second_discovery_has_no_transport_retry(monkeypatch):
     call = AsyncMock(side_effect=IntelligencePlanningError('Fixture outage', retryable=True))
     monkeypatch.setattr(planner, '_call_openrouter', call)
     with pytest.raises(IntelligencePlanningError):
-        asyncio.run(planner.plan_clips(make_transcript(120), discovery_feedback={'search_intervals': [[0, 120000]], 'previous_candidates': []}))
+        asyncio.run(planner.plan_clips(make_transcript(120), jev_enabled=True,
+                                       discovery_feedback={'search_intervals': [[0, 120000]], 'previous_candidates': []}))
     assert call.await_count == 1
     assert planner.audit['requests'][0]['discovery_pass'] == 2
 
