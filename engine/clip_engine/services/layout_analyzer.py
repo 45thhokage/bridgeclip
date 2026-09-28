@@ -542,6 +542,85 @@ def heuristic_layout(
     return shot
 
 
+def _path_at(path: list[tuple[float, float, float]], t: float) -> tuple[float, float]:
+    """Focus at t on a keyframed path, held flat past either end."""
+    if t <= path[0][0]:
+        return path[0][1], path[0][2]
+    for (t0, x0, y0), (t1, x1, y1) in zip(path, path[1:]):
+        if t < t1:
+            f = (t - t0) / max(t1 - t0, 1e-3)
+            return x0 + (x1 - x0) * f, y0 + (y1 - y0) * f
+    return path[-1][1], path[-1][2]
+
+
+def _same_person(a: ShotLayout, b: ShotLayout) -> bool:
+    if not a.people or not b.people:
+        return True
+    p, q = a.people[0], b.people[0]
+    return abs(p.cx - q.cx) < .25 and abs(p.cy - q.cy) < .25 and .5 <= p.h / max(q.h, 1e-6) <= 2
+
+
+def is_face_dropout(shot: ShotLayout) -> bool:
+    """A heuristic 'nobody here' shot that neither vision nor geometry confirmed."""
+    return (shot.layout == LayoutType.SCREEN and shot.source == "heuristic" and not shot.people
+            and shot.content_box is None and shot.screen_box is None and shot.cam_box is None)
+
+
+def bridge_face_dropouts(
+    shots: list[ShotLayout], scene_cuts: set, boundaries: Optional[list[dict]] = None,
+) -> list[ShotLayout]:
+    """Keep a talking head through a no-face gap that has no scene cut.
+
+    Missing faces get their own segment so vision can tell a hidden face from
+    a removed webcam. When vision is off, fails or is over budget, that gap
+    must not letterbox a speaker who looked away: without a cut it is the same
+    shot, so keep the neighbouring talking head and hold (or ease) its focus.
+    """
+    result: list[ShotLayout] = []
+    i = 0
+    while i < len(shots):
+        gap = shots[i]
+        before = result[-1] if result else None
+        after = shots[i + 1] if i + 1 < len(shots) else None
+        if not is_face_dropout(gap):
+            result.append(gap)
+            i += 1
+            continue
+        if before is not None and (before.layout != LayoutType.TALKING_HEAD or gap.start_ms in scene_cuts):
+            before = None
+        if after is not None and (after.layout != LayoutType.TALKING_HEAD or gap.end_ms in scene_cuts):
+            after = None
+        if before is not None and after is not None and (
+                not _same_person(before, after) or before.crop_bounds != after.crop_bounds):
+            after = None
+        if before is None and after is None:
+            result.append(gap)
+            i += 1
+            continue
+        first, last = before or gap, after or gap
+        points = [(first.start_ms + t, x, y) for part in (before, after) if part is not None
+                  for t, x, y in (part.focus_path or [(0, *(
+                      (part.people[0].cx, part.people[0].cy) if part.people else (.5, .5)))])]
+        start = first.start_ms
+        path = [(t - start, x, y) for t, x, y in points]
+        if path[0][0] > 0:
+            path.insert(0, (0, *_path_at(path, 0)))
+        merged = ShotLayout(
+            start, last.end_ms, LayoutType.TALKING_HEAD, source=(before or after).source,
+            people=list((before or after).people[:1]), crop_bounds=(before or after).crop_bounds,
+            focus_path=simplify_path(path),
+        )
+        if boundaries is not None:
+            boundaries.append({"t_ms": gap.start_ms, "kind": "face_dropout_hold", "accepted": True,
+                               "end_ms": gap.end_ms})
+        if before is not None:
+            result[-1] = merged
+        else:
+            result.append(merged)
+        i += 2 if after is not None else 1
+    return result
+
+
 def estimate_cam_box(face: Box, src_w: int, src_h: int) -> Box:
     """Estimate the webcam overlay rectangle around a face.
 
@@ -917,10 +996,17 @@ def smooth_focus_path(
         cam_y += (y - cam_y) * 0.2
         path.append((t, cam_x, cam_y))
 
-    # Preserve the shape in BOTH axes. Keeping only moving/still transitions
-    # erased reversals and vertical motion, sometimes leaving a static crop.
-    # Insert the point with the largest interpolation error until the path is
-    # accurate to 0.2% of the source or reaches FFmpeg's expression budget.
+    return simplify_path(path)
+
+
+def simplify_path(path: list[tuple[float, float, float]]) -> list[tuple[float, float, float]]:
+    """Fewest keyframes that reproduce a focus path.
+
+    Preserve the shape in BOTH axes. Keeping only moving/still transitions
+    erased reversals and vertical motion, sometimes leaving a static crop.
+    Insert the point with the largest interpolation error until the path is
+    accurate to 0.2% of the source or reaches FFmpeg's expression budget.
+    """
     keep = sorted({0, len(path) - 1})
     while len(keep) < MAX_PATH_KEYFRAMES:
         worst_error, worst_index = 0.002, None
@@ -1192,6 +1278,8 @@ class LayoutAnalyzer:
             color_segments = list(zip(cuts, cuts[1:]))
             if trace is not None:
                 trace['boundaries'].extend({'t_ms': t, 'kind': 'precise_scene', 'accepted': True} for t in cuts[1:-1])
+        # Scene cuts end a shot; face-layout splits inside one scene do not.
+        scene_cuts = set(cuts)
         segments = []
         for start, end in color_segments:
             local_frames = [f for f in frames if start <= f.t_ms < end]
@@ -1256,7 +1344,7 @@ class LayoutAnalyzer:
                 self._refine_webcam_regions(sub_shots, keyframes, shot.cam_box)
             else:
                 sub_shots = [shot]
-            shots.extend(apply_style(sub, style, src_w, src_h) for sub in sub_shots)
+            shots.extend(sub_shots)
             if trace is not None:
                 for before, after in zip(sub_shots, sub_shots[1:]):
                     if before.layout != after.layout:
@@ -1264,7 +1352,8 @@ class LayoutAnalyzer:
                                                    "from_layout": before.layout, "to_layout": after.layout})
                 trace["decisions"].append(decision)
 
-        shots = self._merge_adjacent(shots)
+        shots = bridge_face_dropouts(shots, scene_cuts, trace["boundaries"] if trace is not None else None)
+        shots = self._merge_adjacent([apply_style(shot, style, src_w, src_h) for shot in shots])
         plan = ClipLayoutPlan(
             shots=shots, source_width=src_w, source_height=src_h, vision_cost_usd=vision_cost,
             face_samples=[(f.t_ms, f.faces) for f in frames],

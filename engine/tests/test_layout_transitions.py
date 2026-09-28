@@ -339,3 +339,55 @@ def test_rendered_transition_keeps_subject_visible(monkeypatch, tmp_path, side_p
             # The full-screen subject occupies the central crop, not the old
             # lower-left webcam panel or a blank corner of the source.
             assert red[50:170, 30:150].sum() > 3000, index
+
+
+def dropout_frames(gap, duration_ms=12000):
+    frames = observations(duration_ms, lambda t: [] if gap[0] <= t < gap[1] else [HEAD])
+    for frame in frames:
+        frame.scores = [.95] * len(frame.faces)
+    return frames
+
+
+@pytest.mark.parametrize("gap", [(4000, 5500), (4000, 7000), (0, 1500), (10500, 12000)])
+@pytest.mark.parametrize("vision", ["off", "failed", "over_budget"])
+def test_talking_head_looking_away_without_a_cut_keeps_the_crop(monkeypatch, gap, vision):
+    """Main kept a talking head through a no-face gap; heuristics must not letterbox it."""
+    frames = dropout_frames(gap)
+    if vision == "over_budget":
+        # Past the per-clip budget only cached answers are used; none match.
+        monkeypatch.setattr(LayoutAnalyzer, "_vision_classify",
+                            lambda self, *args, **kwargs: asyncio.sleep(0, (None, 0.0)))
+    plan, _ = analyze(monkeypatch, frames, 12000, vision=vision != "off",
+                      response=lambda t: None, capture=True)
+    assert [(s.start_ms, s.end_ms, s.layout) for s in plan.shots] == [(0, 12000, LayoutType.TALKING_HEAD)]
+    shot = plan.shots[0]
+    crops = [shot_views(shot, t, 1920, 1080, 1080, 1920)[0][0] for t in range(0, 12000, 250)]
+    assert max(c[0] for c in crops) - min(c[0] for c in crops) <= 2, "focus is held through the gap"
+    assert any(b["kind"] == "face_dropout_hold" for b in plan.trace["boundaries"])
+
+
+def test_confirmed_or_cut_bounded_gap_still_changes_layout(monkeypatch):
+    screen = {**HEAD_RESULT, "layout": "screen", "people": []}
+    plan, _ = analyze(monkeypatch, dropout_frames((4000, 7000)), 12000, vision=True,
+                      response=lambda t: screen if 4000 <= t < 7000 else HEAD_RESULT)
+    assert [s.layout for s in plan.shots] == ["talking_head", "screen", "talking_head"]
+
+    # A color cut marks a different scene, not someone looking away.
+    frames = dropout_frames((4000, 7000))
+    other = np.zeros((24, 16), np.float32)
+    other[9, 9] = 1
+    for frame in frames:
+        if 4000 <= frame.t_ms < 7000:
+            frame.hist = other
+    plan, _ = analyze(monkeypatch, frames, 12000)
+    assert [s.layout for s in plan.shots] == ["talking_head", "screen", "talking_head"]
+
+
+def test_dropout_between_different_people_holds_only_the_first():
+    from clip_engine.services.layout_analyzer import bridge_face_dropouts
+    left = ShotLayout(0, 4000, LayoutType.TALKING_HEAD, people=[Box(.1, .2, .14, .3)], focus_path=[(0, .17, .35)])
+    gap = ShotLayout(4000, 6000, LayoutType.SCREEN)
+    right = ShotLayout(6000, 9000, LayoutType.TALKING_HEAD, people=[Box(.75, .2, .14, .3)], focus_path=[(0, .82, .35)])
+    shots = bridge_face_dropouts([left, gap, right], {0, 9000})
+    assert [(s.start_ms, s.end_ms) for s in shots] == [(0, 6000), (6000, 9000)]
+    assert shots[0].focus_path == [(0, .17, .35)]
