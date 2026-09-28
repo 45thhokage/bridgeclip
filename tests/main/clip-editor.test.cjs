@@ -720,3 +720,17 @@ test('worker failures map fixed codes to specific messages and log only a redact
     assert.doesNotMatch(log, /someone|sk-or|example\.com/)
   } finally { f.cleanup() }
 })
+
+test('idle editor runs sweep temporary folders and unreferenced media, never the active pair', async () => {
+  const f = setup()
+  try {
+    const stale = ['.editor-export-abc/clip.mp4', '.editor-review-x/frame.jpg', `.editor-${'1'.repeat(8)}.tmp`,
+      `editor-source-${'a'.repeat(32)}.mp4`, `editor-preview-${'b'.repeat(32)}.mp4.partial.mp4`, 'editor-preview.mp4.partial.mp4']
+    for (const file of stale) { fs.mkdirSync(path.dirname(path.join(f.run, file)), { recursive: true }); fs.writeFileSync(path.join(f.run, file), 'x') }
+    fs.writeFileSync(path.join(f.run, 'clip_00.mp4'), 'export')
+    fs.writeFileSync(path.join(f.run, 'editor-notes.mp4'), 'unrelated')
+    await f.main.openEditor(f.run)
+    const left = fs.readdirSync(f.run).sort()
+    assert.deepEqual(left, ['clip_00.mp4', 'editor-notes.mp4', 'editor-preview.mp4', 'editor-project.json', 'editor-source.mp4', 'job_output.json'])
+  } finally { f.cleanup() }
+})

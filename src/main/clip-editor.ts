@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'child_process'
-import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'fs'
+import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, join } from 'path'
 import { randomUUID } from 'crypto'
@@ -49,10 +49,35 @@ function mediaNames(project: EditorProject): { source: string; preview: string }
   return { source: `editor-source${suffix}.mp4`, preview: `editor-preview${project.preview_id ? `-${project.preview_id}` : suffix}.mp4` }
 }
 
+const EDITOR_MEDIA = /^editor-(?:source|preview)(?:-[a-f0-9]{32})?\.mp4(?:\.partial\.mp4)?$/
+/**
+ * Remove leftovers of killed or cancelled operations: `.editor-*` temp files and
+ * folders, and editor media the project does not reference. Runs only while no
+ * editor operation owns the run, so nothing here can be in use by a worker.
+ */
+function sweepEditorFiles(run: string, project?: EditorProject): void {
+  if (operations.has(run)) return
+  let keep: Set<string> | null = null
+  try {
+    project ??= readProject(run)
+    keep = new Set(Object.values(mediaNames(project)))
+  } catch { /* Unreadable state: keep all media, still remove temporary entries. */ }
+  let entries: Dirent[]
+  try { entries = readdirSync(run, { withFileTypes: true }) } catch { return }
+  let removed = 0
+  for (const entry of entries) {
+    const temporary = entry.name.startsWith('.editor-')
+    if (!temporary && !(keep && EDITOR_MEDIA.test(entry.name) && !keep.has(entry.name) && (entry.isFile() || entry.isSymbolicLink()))) continue
+    try { rmSync(join(run, entry.name), { recursive: temporary && entry.isDirectory(), force: true }); removed++ } catch { /* A playing preview can stay open on Windows; retry next time. */ }
+  }
+  if (removed) logger.info('editor.sweep', { removed })
+}
+
 export async function openEditor(path: unknown): Promise<EditorSession> {
   const run = runPath(path)
   if (!(await getJobOutput(run, loadSettings().outputDirectory))?.editor_project) throw new Error('This run has no editor project')
   const project = readProject(run), names = mediaNames(project)
+  sweepEditorFiles(run, project)
   const operation = operations.get(run)
   const state = { progress: operation?.progress ? { ...operation.progress } : undefined, operation: operation?.action ?? null, batch: operation?.batch ? { ...operation.batch } : undefined }
   const sourcePath = join(run, names.source), previewPath = join(run, names.preview)
@@ -256,6 +281,7 @@ async function executeEditor(path: unknown, revision: unknown, candidateId: unkn
       for (const file of stale) { try { unlinkSync(file) } catch { /* Open previews may remain until a later cleanup on Windows. */ } }
     }
     operations.delete(run)
+    try { sweepEditorFiles(run) } catch { /* Cleanup is best effort. */ }
   }
   return openEditor(run)
 }
