@@ -16,6 +16,7 @@ export interface StartedJob {
  * survive navigating away (e.g. to Settings to add a key) and a failed run.
  */
 export interface ClipDraft {
+  workflow: 'automatic' | 'review' | null
   source: string
   clippingMode: 'quality' | 'economy' | 'advanced'
   plannerModel: string
@@ -46,11 +47,12 @@ interface DraftState extends ClipDraft {
   clearSource: () => void
   /** The job was queued: show the confirmation. */
   markStarted: (started: StartedJob) => void
-  /** Back to the first step for the next video, keeping every other choice. */
+  /** Start a new video with no workflow selected, keeping output preferences. */
   startAnother: () => void
 }
 
 export const useDraftStore = create<DraftState>((set) => ({
+  workflow: null,
   source: '',
   clippingMode: 'quality',
   plannerModel: '',
@@ -74,5 +76,5 @@ export const useDraftStore = create<DraftState>((set) => ({
   setStep: (step) => set({ step }),
   clearSource: () => set({ source: '', trimStart: '', trimEnd: '' }),
   markStarted: (started) => set({ started }),
-  startAnother: () => set({ source: '', trimOpen: false, trimStart: '', trimEnd: '', step: 'video', started: null })
+  startAnother: () => set({ workflow: null, source: '', trimOpen: false, trimStart: '', trimEnd: '', step: 'video', started: null })
 }))

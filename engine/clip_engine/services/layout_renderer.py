@@ -19,6 +19,7 @@ FFmpeg.
 from bisect import bisect_left
 from dataclasses import dataclass
 from fractions import Fraction
+from math import ceil
 from typing import Optional
 
 from clip_engine.services.layout_analyzer import Box, ClipLayoutPlan, LayoutType, ShotLayout
@@ -76,21 +77,32 @@ def step_expr(boundaries: list[float], values: list[float]) -> str:
 def _fill_crop_path(
     shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int,
 ) -> tuple[int, int, list[tuple[float, float]], list[tuple[float, float]]]:
-    """Crop size and its (t_sec, x) / (t_sec, y) keyframes in window time."""
+    """Crop size and its (t_sec, x) / (t_sec, y) keyframes in window time.
+
+    A talking head inside a padded inset (`crop_bounds`) is cropped from the
+    inset only, with its edges rounded inward so no padding enters the frame.
+    """
     target = out_w / out_h
-    if src_w / src_h > target:
-        crop_h = even(src_h)
-        crop_w = even(src_h * target)
+    left, top, right, bottom = 0, 0, src_w, src_h
+    if shot.crop_bounds is not None:
+        bounds = shot.crop_bounds.clamp()
+        left, top = min(src_w - 2, ceil(bounds.x * src_w / 2) * 2), min(src_h - 2, ceil(bounds.y * src_h / 2) * 2)
+        right = max(left + 2, int((bounds.x + bounds.w) * src_w) // 2 * 2)
+        bottom = max(top + 2, int((bounds.y + bounds.h) * src_h) // 2 * 2)
+    width, height = right - left, bottom - top
+    if width / height > target:
+        crop_h = even(height)
+        crop_w = even(height * target)
     else:
-        crop_w = even(src_w)
-        crop_h = even(src_w / target)
+        crop_w = even(width)
+        crop_h = even(width / target)
 
     path = shot.focus_path or [(0, 0.5, 0.5)]
     xs, ys = [], []
     for t_ms, cx, cy in path:
         t = (shot.start_ms + t_ms) / 1000
-        xs.append((t, _clamp(cx * src_w - crop_w / 2, 0, src_w - crop_w)))
-        ys.append((t, _clamp(cy * src_h - crop_h * PERSON_FACE_Y, 0, src_h - crop_h)))
+        xs.append((t, _clamp(cx * src_w - crop_w / 2, left, right - crop_w)))
+        ys.append((t, _clamp(cy * src_h - crop_h * PERSON_FACE_Y, top, bottom - crop_h)))
     return crop_w, crop_h, xs, ys
 
 
@@ -123,7 +135,7 @@ def _fit_rect(cx: float, cy: float, w: float, h: float, bounds: tuple[float, flo
     w, h = min(w, bw), min(h, bh)
     x = _clamp(cx - w / 2, bx, bx + bw - w)
     y = _clamp(cy - h / 2, by, by + bh - h)
-    return even(w), even(h), even(x), even(y)
+    return even(w), even(h), max(0, int(x) // 2 * 2), max(0, int(y) // 2 * 2)
 
 
 def person_crop(
@@ -165,7 +177,14 @@ def cam_crop(cam: Box, face: Optional[Box], src_w: int, src_h: int, panel_w: int
     blurred fill rather than blowing the face up to mush.
     """
     aspect = panel_w / panel_h
-    bounds = (cam.x * src_w, cam.y * src_h, cam.w * src_w, cam.h * src_h)
+    # Dimensions round down, but the left/top bounds must round INWARD.
+    # Rounding a fractional webcam origin down includes screen pixels outside
+    # the overlay, which become a conspicuous strip after enlargement.
+    cam = cam.clamp()
+    left, top = ceil(cam.x * src_w / 2) * 2, ceil(cam.y * src_h / 2) * 2
+    right = int((cam.x + cam.w) * src_w) // 2 * 2
+    bottom = int((cam.y + cam.h) * src_h) // 2 * 2
+    bounds = (left, top, max(2, right - left), max(2, bottom - top))
     bw, bh = bounds[2], bounds[3]
     if bw / bh > aspect:
         crop_h, crop_w = bh, bh * aspect
@@ -175,6 +194,15 @@ def cam_crop(cam: Box, face: Optional[Box], src_w: int, src_h: int, panel_w: int
         crop_w, crop_h = min(bw, panel_w / MAX_UPSCALE), min(bh, panel_h / MAX_UPSCALE)
     fx = (face.cx if face else cam.cx) * src_w
     fy = (face.cy if face else cam.cy) * src_h
+    if face and cam.contains(face.cx, face.cy):
+        centered_w = 2 * min(fx - left, right - fx)
+        centered_h = centered_w / aspect
+        # Ignore small off-center poses. For larger offsets, tighten within
+        # the real camera bounds. panel_fit still caps enlargement and adds
+        # a centered blurred fill if the resulting crop is too small.
+        if (centered_w < crop_w * .9 and centered_w >= face.w * src_w * 1.5
+                and centered_h >= face.h * src_h * 1.8):
+            crop_w, crop_h = centered_w, min(crop_h, centered_h)
     return _fit_rect(fx, fy + crop_h * (0.5 - PERSON_FACE_Y), crop_w, crop_h, bounds)
 
 
@@ -288,6 +316,17 @@ def screen_crop(
     return w, h, x, y
 
 
+def screen_view(shot: ShotLayout, src_w: int, src_h: int, panel_w: int, panel_h: int):
+    """Screen panel geometry shared by rendering and inspection.
+
+    The screen fills its whole panel (main's behavior for screen + webcam
+    shots): a panel-aspect crop that covers the focus area, so the panel
+    destination is always the full panel.
+    """
+    rect = screen_crop(shot.screen_box, shot.screen_focus, src_w, src_h, panel_w, panel_h, shot.cam_box)
+    return rect, (0, 0, panel_w, panel_h)
+
+
 # ------------------------------------------------------------------
 # Filter graph
 # ------------------------------------------------------------------
@@ -304,11 +343,72 @@ def letterbox_geometry(src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[
     return scaled_h, (out_h - scaled_h) // 2
 
 
+def content_view(
+    shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int,
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """The complete inset and its fitted destination, shared with diagnostics."""
+    box = shot.content_box.clamp()
+    x, y = max(0, int(box.x * src_w) // 2 * 2), max(0, int(box.y * src_h) // 2 * 2)
+    w, h = min(even(box.w * src_w), src_w - x), min(even(box.h * src_h), src_h - y)
+    scale = min(out_w / w, out_h / h)
+    fw, fh = min(out_w, even(w * scale)), min(out_h, even(h * scale))
+    return (x, y, w, h), ((out_w - fw) // 2, (out_h - fh) // 2, fw, fh)
+
+
+def foreground_geometry(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, int]:
+    if shot.content_box is not None:
+        _, (_, y, _, h) = content_view(shot, src_w, src_h, out_w, out_h)
+        return h, y
+    return letterbox_geometry(src_w, src_h, out_w, out_h)
+
+
 def shot_chain(
     i: int, shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int, landscape: bool = False,
+    fps: str = '30', start_frame: int = 0,
 ) -> str:
     """Filters from [t{i}] (a trimmed piece) to [v{i}] (framed, out_w x out_h)."""
     scale = "flags=lanczos"
+    if shot.manual_crops:
+        views = manual_views(shot, src_w, src_h, out_w, out_h)
+        n = len(views)
+        parts = [f"[t{i}]split={n}" + ''.join(f"[mc{i}_{j}]" for j in range(n))] if n > 1 else []
+        for j, ((x, y, w, h), (_, _, pw, ph)) in enumerate(views):
+            source = f"mc{i}_{j}" if n > 1 else f"t{i}"
+            target = f"mp{i}_{j}" if n > 1 else f"v{i}"
+            if shot.manual_transition_ms:
+                # Eased pan/zoom with LGPL filters only (shipped FFmpeg builds
+                # have no GPL `perspective`). A static crop to the union of both
+                # rectangles bounds every intermediate one, since each edge moves
+                # monotonically. Per frame, scale that region so the moving crop
+                # becomes qw x qh (odd sizes are fine mid-graph; rounding to even
+                # would distort small panels), then cut a fixed qw x qh window.
+                origin, dest = shot.manual_from_crops[j], shot.manual_crops[j]
+                bx = max(0, int(min(origin[0], dest[0]) * src_w) // 2 * 2)
+                by = max(0, int(min(origin[1], dest[1]) * src_h) // 2 * 2)
+                bw = max(2, min(src_w - bx, (ceil(max(origin[0] + origin[2], dest[0] + dest[2]) * src_w) - bx + 1) // 2 * 2))
+                bh = max(2, min(src_h - by, (ceil(max(origin[1] + origin[3], dest[1] + dest[3]) * src_h) - by + 1) // 2 * 2))
+                def local(c):
+                    return [(c[0] * src_w - bx) / bw, (c[1] * src_h - by) / bh, c[2] * src_w / bw, c[3] * src_h / bh]
+                a, b = local(origin), local(dest)
+                # Move at no more than the larger crop's source resolution (the
+                # final scale upsizes), and keep the scaled frame under 8192 px.
+                qw = max(2, min(pw, even(max(a[2], b[2]) * bw), even(8192 * min(a[2], b[2]))))
+                qh = max(2, min(ph, even(max(a[3], b[3]) * bh), even(8192 * min(a[3], b[3]))))
+                # Frames arrive on the window's fps grid (pts = frame index), so
+                # `t` is the exact source clock across trims and removed gaps.
+                # Frame counters are not: scale's `n` starts at 1 in FFmpeg 8.
+                p = f"clip((t*1000-({shot.manual_transition_start_ms}))/{shot.manual_transition_ms},0,1)"
+                ease = f"({p}*{p}*(3-2*{p}))"
+                x0, y0, cw, ch = (f"({a[k]:.10f}+({b[k] - a[k]:.10f})*{ease})" for k in range(4))
+                transform = (f"crop={bw}:{bh}:{bx}:{by},"
+                    f"scale=w='round({qw}/{cw})':h='round({qh}/{ch})':eval=frame:{scale},"
+                    f"crop=w={qw}:h={qh}:x='{x0}*round({qw}/{cw})':y='{y0}*round({qh}/{ch})':exact=1")
+            else:
+                transform = f"crop={w}:{h}:{x}:{y}"
+            parts.append(f"[{source}]{transform},scale={pw}:{ph}:{scale},setsar=1[{target}]")
+        if n > 1:
+            parts.append(''.join(f"[mp{i}_{j}]" for j in range(n)) + f"vstack=inputs={n}[v{i}]")
+        return ';'.join(parts)
     if landscape:
         # Within 1% of 16:9 (e.g. 1920x1088 encodes) a direct scale is invisible.
         if abs(src_w / src_h - out_w / out_h) < 0.01 * out_w / out_h:
@@ -322,6 +422,16 @@ def shot_chain(
             f"gblur=sigma=10,lutyuv=y=val-20,scale={out_w}:{out_h}[lbg{i}];"
             f"[lf{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease:{scale}[lfg{i}];"
             f"[lbg{i}][lfg{i}]overlay=(W-w)/2:(H-h)/2,setsar=1[v{i}]"
+        )
+    if shot.content_box is not None:
+        (x, y, w, h), (dx, dy, fw, fh) = content_view(shot, src_w, src_h, out_w, out_h)
+        bg_w, bg_h = even(out_w // 4), even(out_h // 4)
+        return (
+            f"[t{i}]crop={w}:{h}:{x}:{y},split=2[ib{i}][if{i}];"
+            f"[ib{i}]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,crop={bg_w}:{bg_h},"
+            f"gblur=sigma=10,lutyuv=y=val-20,scale={out_w}:{out_h}[ibg{i}];"
+            f"[if{i}]scale={fw}:{fh}:{scale}[ifg{i}];"
+            f"[ibg{i}][ifg{i}]overlay={dx}:{dy},setsar=1[v{i}]"
         )
     if shot.layout == LayoutType.TALKING_HEAD:
         w, h, x_expr, y_expr = fill_crop(shot, src_w, src_h, out_w, out_h)
@@ -358,9 +468,10 @@ def shot_chain(
                 f"[cf{i}]scale={fit_w}:{fit_h}:{scale}[cfg{i}];"
                 f"[cbg{i}][cfg{i}]overlay={(out_w - fit_w) // 2}:{(bottom_h - fit_h) // 2}[bot{i}]"
             )
+        screen_rect, _ = screen_view(shot, src_w, src_h, out_w, top_h)
         return (
             f"[t{i}]split=2[sa{i}][sb{i}];"
-            f"[sa{i}]{_crop(screen_crop(shot.screen_box, shot.screen_focus, src_w, src_h, out_w, top_h, shot.cam_box))},"
+            f"[sa{i}]{_crop(screen_rect)},"
             f"scale={out_w}:{top_h}:{scale}[top{i}];"
             f"{cam_panel};"
             f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[v{i}]"
@@ -447,6 +558,48 @@ def _audio_fades(duration_s: float, first: bool, last: bool) -> str:
     )
 
 
+def video_frame_pieces(plan: ClipLayoutPlan, keeps: Optional[list[tuple[int, int]]], fps: str) -> list[tuple[int, int, int]]:
+    """Exact (shot index, source start frame, frame count) used by the renderer."""
+    pieces = timeline_pieces(plan, keeps)
+    if not pieces:
+        raise ValueError("The edit contains no video")
+    rate = Fraction(fps)
+    if rate <= 0:
+        raise ValueError("Frame rate must be positive")
+
+    def frame_at(ms: int) -> int:
+        return int(Fraction(str(ms)) / 1000 * rate + Fraction(1, 2))
+
+    # Allocate frames to contiguous kept footage first. Layout changes must
+    # never alter that allocation: rounding each layout's *output* boundary
+    # shifts a camera cut when removed time has a different fractional phase.
+    groups = []
+    for piece in pieces:
+        if not groups or groups[-1][-1][2] != piece[1]:
+            groups.append([])
+        groups[-1].append(piece)
+    video_pieces = []
+    elapsed_ms = frame_end = 0
+    for group in groups:
+        start, end = group[0][1], group[-1][2]
+        start_frame = frame_at(start - elapsed_ms) + frame_end
+        elapsed_ms += end - start
+        next_frame = frame_at(elapsed_ms)
+        source_end = start_frame + next_frame - frame_end
+        cursor = start_frame
+        for j, (i, _, boundary) in enumerate(group):
+            # Match the source FPS filter's grid, even after a removed section.
+            # Only the keep's tail absorbs cumulative duration rounding.
+            until = source_end if j == len(group) - 1 else min(source_end, max(cursor, frame_at(boundary)))
+            if until > cursor:
+                video_pieces.append((i, cursor, until - cursor))
+            cursor = until
+        frame_end = next_frame
+    if not video_pieces:
+        raise ValueError("The edit is shorter than one video frame")
+    return video_pieces
+
+
 def build_layout_graph(
     plan: ClipLayoutPlan,
     out_w: int,
@@ -470,33 +623,8 @@ def build_layout_graph(
     """
     validate_video_speed(video_speed)
     src_w, src_h = plan.source_width, plan.source_height
-    pieces = timeline_pieces(plan, keeps)
     window_end = plan.shots[-1].end_ms
-    if not pieces:
-        raise ValueError("The edit contains no video")
-    rate = Fraction(fps)
-    if rate <= 0:
-        raise ValueError("Frame rate must be positive")
-
-    def frame_at(ms: int) -> int:
-        return int(Fraction(ms, 1000) * rate + Fraction(1, 2))
-
-    # Use differences of rounded totals, never a sum of rounded durations.
-    # Sub-frame layout slivers may contribute no frame but retain their audio.
-    video_pieces = []
-    elapsed_ms = frame_end = 0
-    for i, start, end in pieces:
-        # Quantize the removed time once. Independently rounding source and
-        # destination starts can shift a frame twice at the same edit.
-        start_frame = frame_at(start - elapsed_ms) + frame_end
-        elapsed_ms += end - start
-        next_frame = frame_at(elapsed_ms)
-        count = next_frame - frame_end
-        if count:
-            video_pieces.append((i, start_frame, count))
-        frame_end = next_frame
-    if not video_pieces:
-        raise ValueError("The edit is shorter than one video frame")
+    video_pieces = video_frame_pieces(plan, keeps, fps)
     n = len(video_pieces)
     # Fill delayed/sparse video using its timestamps, without speeding it up.
     # Tail padding is bounded by the requested window and trimmed per piece.
@@ -510,7 +638,7 @@ def build_layout_graph(
         parts.append(f"[clocked]split={n}" + "".join(f"[s{k}]" for k in range(n)))
     for k, (i, start_frame, count) in enumerate(video_pieces):
         parts.append(f"[s{k}]trim=start_frame={start_frame}:end_frame={start_frame + count}[t{k}]")
-        chain = shot_chain(k, plan.shots[i], src_w, src_h, out_w, out_h, landscape)
+        chain = shot_chain(k, plan.shots[i], src_w, src_h, out_w, out_h, landscape, fps, start_frame)
         parts.append(chain[: chain.rindex(f"[v{k}]")] + f"[c{k}]")
         parts.append(f"[c{k}]setpts=PTS-STARTPTS[v{k}]")
 
@@ -572,7 +700,7 @@ def caption_anchor(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: 
     if shot.layout == LayoutType.TWO_SHOT or (shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None):
         return 5, stacked_panel_heights(shot, src_h, out_h)[0]  # centered on the seam
     if shot.layout in (LayoutType.SCREEN, LayoutType.SCREEN_CAM):
-        scaled_h, overlay_y = letterbox_geometry(src_w, src_h, out_w, out_h)
+        scaled_h, overlay_y = foreground_geometry(shot, src_w, src_h, out_w, out_h)
         bar = out_h - (overlay_y + scaled_h)
         if bar >= 200:
             return 2, out_h - int(bar * 0.55)
@@ -581,7 +709,7 @@ def caption_anchor(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: 
 
 def title_y(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int, title_h: int) -> int:
     if shot.layout == LayoutType.SCREEN:
-        _, overlay_y = letterbox_geometry(src_w, src_h, out_w, out_h)
+        _, overlay_y = foreground_geometry(shot, src_w, src_h, out_w, out_h)
         if overlay_y > title_h + 20:
             return max(10, overlay_y // 2 - title_h // 2)
     return int(out_h * TOP_TITLE_Y / 1920)
@@ -589,7 +717,7 @@ def title_y(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int, ti
 
 def banner_y(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int) -> int:
     if shot.layout == LayoutType.SCREEN:
-        scaled_h, overlay_y = letterbox_geometry(src_w, src_h, out_w, out_h)
+        scaled_h, overlay_y = foreground_geometry(shot, src_w, src_h, out_w, out_h)
         if out_h - (overlay_y + scaled_h) >= 120:
             return overlay_y + scaled_h + 25
     return int(out_h * FILL_BANNER_Y / 1920)
@@ -626,6 +754,22 @@ class FaceZone:
     rects: tuple[Rect, ...]
 
 
+def manual_views(shot, src_w, src_h, out_w, out_h, t_ms=None):
+    """Exact normalized crops shared with the editor. Round inward for yuv420p."""
+    result = []
+    panel_h = even(out_h / len(shot.manual_crops))
+    crops = shot.manual_crops
+    if shot.manual_transition_ms and t_ms is not None:
+        p = max(0, min(1, (t_ms - shot.manual_transition_start_ms) / shot.manual_transition_ms))
+        ease = p * p * (3 - 2 * p)
+        crops = [[a + (b - a) * ease for a, b in zip(start, end)] for start, end in zip(shot.manual_from_crops, crops)]
+    for i, (x, y, w, h) in enumerate(crops):
+        px, py = max(0, int(x * src_w) // 2 * 2), max(0, int(y * src_h) // 2 * 2)
+        pw, ph = min(even(w * src_w), src_w - px), min(even(h * src_h), src_h - py)
+        result.append(((px, py, pw, ph), (0, i * panel_h, out_w, out_h - panel_h if i == 1 else panel_h)))
+    return result
+
+
 def shot_views(
     shot: ShotLayout, t_ms: int, src_w: int, src_h: int, out_w: int, out_h: int,
 ) -> list[tuple[tuple[float, float, float, float], tuple[int, int, int, int]]]:
@@ -634,6 +778,10 @@ def shot_views(
     One (source crop, output rect) pair per panel, both as (x, y, w, h). Mirrors
     the 9:16 branches of shot_chain.
     """
+    if shot.manual_crops:
+        return manual_views(shot, src_w, src_h, out_w, out_h, t_ms)
+    if shot.content_box is not None:
+        return [content_view(shot, src_w, src_h, out_w, out_h)]
     if shot.layout == LayoutType.TALKING_HEAD:
         crop_w, crop_h, xs, ys = _fill_crop_path(shot, src_w, src_h, out_w, out_h)
         t = t_ms / 1000
@@ -652,7 +800,7 @@ def shot_views(
             ((bottom[2], bottom[3], bottom[0], bottom[1]), (0, top_h, out_w, bottom_h)),
         ]
     if shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None:
-        screen = screen_crop(shot.screen_box, shot.screen_focus, src_w, src_h, out_w, top_h, shot.cam_box)
+        screen, screen_dest = screen_view(shot, src_w, src_h, out_w, top_h)
         cam = cam_crop(shot.cam_box, shot.cam_face, src_w, src_h, out_w, bottom_h)
         fit = panel_fit(cam, out_w, bottom_h)
         if fit is None:
@@ -660,7 +808,7 @@ def shot_views(
         else:
             cam_dest = ((out_w - fit[0]) // 2, top_h + (bottom_h - fit[1]) // 2, fit[0], fit[1])
         return [
-            ((screen[2], screen[3], screen[0], screen[1]), (0, 0, out_w, top_h)),
+            ((screen[2], screen[3], screen[0], screen[1]), screen_dest),
             ((cam[2], cam[3], cam[0], cam[1]), cam_dest),
         ]
 

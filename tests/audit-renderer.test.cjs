@@ -28,7 +28,7 @@ const bundled = buildSync({
   platform: 'node',
   format: 'cjs',
   packages: 'external',
-  loader: { '.svg': 'dataurl' },
+  loader: { '.svg': 'dataurl', '.css': 'empty' },
   define: { __APP_VERSION__: JSON.stringify(require('../package.json').version) },
   jsx: 'automatic',
   write: false
@@ -90,7 +90,7 @@ function attributes(html, name) {
 const FORBIDDEN_TAGS = new Set(['script', 'iframe', 'object', 'embed', 'a', 'form', 'base', 'meta', 'style'])
 const URL_ATTRS = new Set(['src', 'srcset', 'poster', 'href', 'action', 'formaction', 'data', 'xlink:href'])
 /** Media may come from the main process's local-file protocol, the YouTube thumbnail host, or bundled brand SVGs. */
-const ALLOWED_URL = /^(local-file:\/\/[^/?#:\\]*|https:\/\/i\.ytimg\.com\/|data:image\/svg\+xml)/
+const ALLOWED_URL = /^(local-file:\/\/media\/[^/?#:\\]*$|https:\/\/i\.ytimg\.com\/|data:image\/svg\+xml)/
 
 /** Hostile strings must end up as text: no injected elements, handlers or URLs anywhere in the markup. */
 function assertEscaped(html) {
@@ -102,7 +102,7 @@ function assertEscaped(html) {
     for (const [attr, value] of attrs) {
       assert.doesNotMatch(attr, /^on/, `no inline event handler (${attr})`)
       if (URL_ATTRS.has(attr)) {
-        assert.match(value, ALLOWED_URL, `<${name} ${attr}> must be local-file:// or the YouTube thumbnail host: ${value}`)
+        assert.match(value, ALLOWED_URL, `<${name} ${attr}> must be local-file://media/ or the YouTube thumbnail host: ${value}`)
         if (value.startsWith('https://')) assert.equal(new URL(value).hostname, 'i.ytimg.com')
       }
     }
@@ -115,19 +115,19 @@ test('the escape checks themselves reject injected anchors, handlers, scripts an
   assert.throws(() => assertEscaped('<div><script>alert(1)</script></div>'), /script tags/)
   assert.throws(() => assertEscaped('<img src="https://evil.example/x.png"/>'), /must be local-file/)
   assert.throws(() => assertEscaped('<video src="javascript:alert(1)"></video>'), /must be local-file/)
-  assert.throws(() => assertEscaped('<video src="local-file://%2Fclips%2Fa.mp4" poster="file:///etc/passwd"></video>'), /must be local-file/)
+  assert.throws(() => assertEscaped('<video src="local-file://media/%2Fclips%2Fa.mp4" poster="file:///etc/passwd"></video>'), /must be local-file/)
   assert.throws(() => assertEscaped('<link rel="stylesheet" href="https://evil.example/x.css"/>'), /preload/)
-  assertEscaped('<p title="&lt;img src=x onerror=alert(1)&gt;">&lt;script&gt;x&lt;/script&gt; onerror=y</p><img src="local-file://%2Fa.jpg"/>')
+  assertEscaped('<p title="&lt;img src=x onerror=alert(1)&gt;">&lt;script&gt;x&lt;/script&gt; onerror=y</p><img src="local-file://media/%2Fa.jpg"/>')
 })
 
 test('local-file URLs percent-encode the whole path, so a run file cannot smuggle a scheme, query or fragment', () => {
-  assert.equal(localFileUrl('/clips/run/clip 1.mp4'), 'local-file://%2Fclips%2Frun%2Fclip%201.mp4')
-  assert.equal(localFileUrl('javascript:alert(1)'), 'local-file://javascript%3Aalert(1)')
-  assert.equal(localFileUrl('/a/b?x=1#frag'), 'local-file://%2Fa%2Fb%3Fx%3D1%23frag')
+  assert.equal(localFileUrl('/clips/run/clip 1.mp4'), 'local-file://media/%2Fclips%2Frun%2Fclip%201.mp4')
+  assert.equal(localFileUrl('javascript:alert(1)'), 'local-file://media/javascript%3Aalert(1)')
+  assert.equal(localFileUrl('/a/b?x=1#frag'), 'local-file://media/%2Fa%2Fb%3Fx%3D1%23frag')
   for (const hostile of ['javascript:alert(1)', 'file:///etc/passwd', 'https://evil.example/x', 'C:\\Windows\\..\\evil']) {
     const url = localFileUrl(hostile)
-    assert.ok(url.startsWith('local-file://'), url)
-    assert.doesNotMatch(url.slice('local-file://'.length), /[/?#:\\]/, 'every reserved character is encoded')
+    assert.ok(url.startsWith('local-file://media/'), url)
+    assert.doesNotMatch(url.slice('local-file://media/'.length), /[/?#:\\]/, 'every reserved character is encoded')
   }
 })
 
@@ -183,13 +183,13 @@ test('a pasted YouTube link only ever loads its thumbnail from i.ytimg.com, what
   }
 })
 
-test('a non-YouTube link renders no remote media at all, and a local source only a local-file:// video', () => {
+test('a non-YouTube link renders no remote media at all, and a local source only a local-file://media/ video', () => {
   const remote = render(React.createElement(SourcePicker, { value: 'https://cdn.example/video.mp4?cb=<img src=x onerror=alert(1)>', onChange() {} }))
   assert.deepEqual(attributes(remote, 'src'), [])
   assertEscaped(remote)
 
   const local = render(React.createElement(SourcePicker, { value: 'javascript:alert(1)', onChange() {} }))
-  assert.deepEqual(attributes(local, 'src'), ['local-file://javascript%3Aalert(1)'])
+  assert.deepEqual(attributes(local, 'src'), ['local-file://media/javascript%3Aalert(1)'])
   assertEscaped(local)
 })
 

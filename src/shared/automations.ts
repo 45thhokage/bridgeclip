@@ -44,8 +44,46 @@ export interface GeneratedPlatformMetadata {
   topicTag?: string | null
 }
 
-export interface AutomationContent {
+export interface AutomationSourceContext {
+  /** Opaque library identity for non-YouTube sources. */
+  videoId?: string
+  title: string
+  description: string
+  channel: string
+  /** Canonical YouTube URL only; local paths and signed source URLs are never sent. */
+  url: string | null
+}
+
+export interface MetadataResearch {
+  scope?: 'source'
+  reused?: boolean
+  researchedAt?: string
+  status: 'complete' | 'unavailable' | 'skipped'
+  summary: string
+  sources: { title: string; url: string }[]
+}
+
+export const MAX_ENHANCEMENT_GUIDANCE = 2000
+/** Longest stored research citation URL, measured after URL normalization. */
+export const MAX_RESEARCH_URL = 2048
+
+export interface MetadataEnhancement {
+  /** User context and editorial direction used to prepare this draft. */
+  guidance?: string
   id: string
+  createdAt: string
+  platforms: AutomationAccount['platform'][]
+  posts: GeneratedPlatformMetadata[]
+  source: AutomationSourceContext | null
+  research: MetadataResearch
+}
+
+export interface AutomationContent {
+  /** Suppresses existing warning indicators without changing posting eligibility. */
+  warningsAcknowledged?: boolean
+  id: string
+  /** Original authorized file, retained when a library clip is copied to the bank. */
+  sourceClipPath?: string
   /** Changes only after a person reviews an uncertain post and returns the clip to the queue. */
   postingAttemptId?: string
   fileName: string
@@ -54,6 +92,11 @@ export interface AutomationContent {
   /** Speech recognized from this exact bank clip; never inferred from its filename. */
   transcript: string | null
   generatedMetadata: GeneratedPlatformMetadata[] | null
+  metadataError?: string | null
+  sourceContext?: AutomationSourceContext | null
+  /** A pending draft holds this clip from posting until applied or discarded. */
+  metadataDraft?: MetadataEnhancement | null
+  metadataEnhancement?: MetadataEnhancement | null
   /** The exact TikTok caption and choices approved for this clip; absent in older banks. */
   tiktokApproval?: AutomationTikTokApproval | null
   /** Keeps the last reviewed copy when approval is revoked to reopen the editor. */
@@ -65,7 +108,28 @@ export interface AutomationContent {
   error: string | null
 }
 
+export interface AutomationSourceGroup {
+  sourceType: 'linked' | 'file'
+  key: string
+  title: string
+  contentIds: string[]
+}
+
+export interface AutomationBatchResult {
+  automations: Automation[]
+  completed: number
+  skipped: number
+  errors: { contentId: string; message: string }[]
+}
+
+export interface AutomationReviewResult {
+  automations: Automation[]
+  outcome: 'queued' | 'submitted' | 'held'
+  message: string
+}
+
 export interface Automation {
+  sourceResearch?: { key: string; createdAt: string; source: AutomationSourceContext; research: MetadataResearch }[]
   id: string
   name: string
   enabled: boolean
@@ -85,6 +149,15 @@ export interface Automation {
   createdAt: string
   lastRunAt: string | null
   lastError: string | null
+  lastErrorAcknowledged?: boolean
+}
+
+export function hasContentWarnings(item: AutomationContent): boolean {
+  return !item.warningsAcknowledged && Boolean(item.error || item.metadataError || item.status === 'needs_review')
+}
+
+export function hasAutomationWarnings(automation: Automation): boolean {
+  return Boolean(automation.lastError && !automation.lastErrorAcknowledged) || automation.content.some(hasContentWarnings)
 }
 
 export interface AutomationUpdate {
@@ -106,11 +179,32 @@ export function needsTikTokReview(automation: Pick<Automation, 'accounts'>, item
 }
 
 export function nextAutomationContent(automation: Pick<Automation, 'accounts' | 'content'>): AutomationContent | undefined {
-  const ready = automation.content.filter((item) => item.status === 'queued' && !needsTikTokReview(automation, item))
+  // A pending enhanced draft holds only its own clip until it is applied or discarded.
+  const ready = automation.content.filter((item) => item.status === 'queued' && !item.metadataDraft && !needsTikTokReview(automation, item))
   // A clip whose last attempt failed waits behind clips that have not, so one
   // clip that cannot be prepared (for example, unverifiable AI metadata) does
   // not stop every later slot. It is retried once nothing else is ready.
   return ready.find((item) => !item.error) ?? ready[0]
+}
+
+export function canReorderContent(item: AutomationContent): boolean {
+  return item.status === 'queued' && !item.postId
+}
+
+export function hasEnhancedMetadata(item: AutomationContent, platforms: readonly AutomationAccount['platform'][]): boolean {
+  return Boolean(item.metadataEnhancement && platforms.every((platform) => item.generatedMetadata?.some((post) => post.platform === platform)))
+}
+
+/** Reorder only queued slots. Submitted and uncertain items retain their positions. */
+export function reorderQueuedContent(content: AutomationContent[], id: string, beforeId: string | null): AutomationContent[] {
+  const queue = content.filter(canReorderContent)
+  const from = queue.findIndex((item) => item.id === id)
+  if (from < 0 || (beforeId !== null && !queue.some((item) => item.id === beforeId))) throw new Error('Only unposted queued clips can be reordered. Refresh the queue and try again.')
+  if (id === beforeId) return content
+  const [item] = queue.splice(from, 1)
+  queue.splice(beforeId === null ? queue.length : queue.findIndex((entry) => entry.id === beforeId), 0, item)
+  let index = 0
+  return content.map((entry) => canReorderContent(entry) ? queue[index++] : entry)
 }
 
 /** Return due local slots, including a short grace period after wake/reopen. */

@@ -97,6 +97,38 @@ test('AI captions are refused when they carry a clickable link, with or without 
   } finally { cleanup() }
 })
 
+// B10: bare domains and @handles are auto-linked too, and titles and tags reach the post as well.
+test('AI metadata refuses bare domains and handles that were not spoken, in every posted field', () => {
+  const { dir, cleanup } = tempDir('bridgeclip-audit-handles-')
+  try {
+    const { electron } = fakeElectron(dir)
+    const { parseGeneratedMetadata } = loadMain("export { parseGeneratedMetadata } from './src/main/automation-metadata'", { electron })
+    const transcript = 'Today we talk about testing agents. Our docs live at bridgemind.ai and you can follow @bridgemind for updates.'
+    const post = (platform, fields) => ({ platform, caption: 'Testing agents matters.', title: null, tags: [], categoryId: null, topicTag: null, evidence: 'testing agents', ...fields })
+    const parse = (platform, fields, context) => parseGeneratedMetadata({ posts: [post(platform, fields)] }, [platform], transcript, context)
+    for (const caption of [
+      'Claim your prize at scamcoin.io', 'Details: evil.com/x', 'Wow...scamcoin.io', 'Mail me@evil.com', 'Follow @scammer for more',
+      'Visit ｅｖｉｌ．ｃｏｍ', 'Visit evil\u200B.com', 'Try install.sh today', 'Read #evil.com', 'Go to Sub.Evil.Example.'
+    ]) assert.throws(() => parse('linkedin', { caption }), /link or @mention that is not in the transcript/, caption)
+    const youtube = { title: 'Testing agents', tags: ['testing'], categoryId: '28' }
+    assert.throws(() => parse('youtube', { ...youtube, title: 'Testing agents at scamcoin.io' }), /youtube included a link/)
+    assert.throws(() => parse('youtube', { ...youtube, tags: ['testing', 'scamcoin.io'] }), /youtube included a link/)
+    assert.throws(() => parse('youtube', { ...youtube, tags: ['@scammer'] }), /youtube included a link/)
+    assert.throws(() => parse('facebook', { title: 'Follow @scammer' }, { facebookFormat: 'reel' }), /facebook included a link/)
+    for (const caption of [
+      'Testing agents matters, e.g. with Node.js, Next.js and a 3.5x speedup in v2.0 for the U.S. team.',
+      'Docs: bridgemind.ai, and follow @BridgeMind.', 'Wait... testing agents matters.', 'テストは大切です。次はエージェントです。',
+      'Costs $2.99. Ph.D. level testing.'
+    ]) assert.equal(parse('linkedin', { caption })[0].caption, caption, caption)
+    assert.equal(parse('youtube', { ...youtube, title: 'Testing agents with bridgemind.ai' })[0].title, 'Testing agents with bridgemind.ai')
+    const started = performance.now()
+    for (const caption of ['a.'.repeat(30000), '-'.repeat(60000) + 'a', '.'.repeat(60000), '@'.repeat(60000)]) {
+      try { parse('facebook', { caption }) } catch { /* Only the time matters. */ }
+    }
+    assert.ok(performance.now() - started < 2000, 'untrusted repetition must not stall the main process')
+  } finally { cleanup() }
+})
+
 test('metadata validation bounds repetitive provider evidence and caption parsing', () => {
   const { dir, cleanup } = tempDir('bridgeclip-audit-evidence-')
   try {

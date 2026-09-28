@@ -16,11 +16,12 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -37,6 +38,11 @@ from clip_engine.services.clip_editor import (
     window_words,
 )
 from clip_engine.services.layout_analyzer import ClipLayoutPlan, LayoutAnalyzer, LayoutType, ShotLayout
+from clip_engine.services.framing_trace import make_trace, save_trace
+from clip_engine.services.editorial_context import window_protection, record_prevented_cuts
+from clip_engine.services.editorial_review import review_retained_clip
+from clip_engine.services.jev_service import JevService
+from clip_engine.services.coherence_review import CoherenceReviewer, CoherenceRejected
 from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, PROBE_TIMEOUT_SECONDS, media_process, run_media, validate_video_dimensions
 from clip_engine.services.layout_renderer import (
     AUDIO_FORMAT,
@@ -92,6 +98,10 @@ class RenderRequest:
     transcript_segments: Optional[list[TranscriptSegment]] = None
     include_captions: bool = True
     caption_style: Optional[CaptionStyle] = None
+    # Hide only our caption layer in these source-time intervals.
+    caption_suppression_ranges_ms: list[tuple[int, int]] = field(default_factory=list)
+    # Explicit editor placement overrides automatic per-layout caption anchors.
+    caption_y: Optional[float] = None
 
     title_text: Optional[str] = None
     # Planner-chosen punch words highlighted in the captions.
@@ -113,6 +123,15 @@ class RenderRequest:
     longform: bool = False
     skip_ranges_ms: list[tuple[int, int]] = field(default_factory=list)
     chapters: list[tuple[int, str]] = field(default_factory=list)
+    debug_capture: bool = False
+    progress_callback: Optional[Callable[[str, Optional[float]], None]] = None
+    manual_plan: Optional[ClipLayoutPlan] = None
+    # Exact source-time selections from the manual editor; no automatic pacing,
+    # sliver removal or protected-interval restoration may change these cuts.
+    manual_ranges_ms: Optional[list[tuple[int, int]]] = None
+    editorial_context: Optional[dict] = None
+    editorial_service: Optional[JevService] = field(default=None, repr=False)
+    coherence_reviewer: Optional[CoherenceReviewer] = field(default=None, repr=False)
 
 
 @dataclass
@@ -135,6 +154,7 @@ class RenderResult:
     subtitle_path: Optional[str] = None
     output_width: int = 0
     output_height: int = 0
+    framing_trace_path: Optional[str] = None
 
 
 class RenderingService:
@@ -220,6 +240,67 @@ class RenderingService:
         return ["-c:v", "libx264", "-preset", self.settings.ffmpeg_preset,
                 "-crf", str(self.settings.ffmpeg_crf), *gop]
 
+    async def capture_framing_source(self, video_path: str, output_path: str, *, progress=None, duration_ms=None) -> None:
+        """One uncropped preview per captured run, on the original source clock."""
+        width, height = await self._get_video_dimensions(video_path)
+        scale = min(1, 1280 / width, 720 / height)
+        out_w, out_h = max(2, int(width * scale / 2) * 2), max(2, int(height * scale / 2) * 2)
+        fps = await self._probe_fps(video_path)
+        # A framing preview, not an export: about 3 Mbps at 720p30 (4.5 at
+        # 60 fps) keeps an hour of source near 1.4 GB rather than 5-8 GB.
+        mbps = round(max(1, 3 * out_w * out_h / (1280 * 720)) * (1.5 if float(Fraction(fps)) > 31 else 1), 1)
+        codec = self._video_codec_args(out_w, out_h, fps)
+        if "-b:v" in codec:
+            codec[codec.index("-b:v") + 1] = f"{mbps:g}M"
+        else:
+            codec += ["-maxrate", f"{mbps:g}M", "-bufsize", f"{2 * mbps:g}M"]
+        temporary = output_path + ".partial.mp4"
+        try:
+            cmd = [
+                "ffmpeg", "-nostdin", "-v", "error", "-n", *MEDIA_INPUT_OPTIONS, "-i", video_path,
+                "-map", "0:v:0", "-map", "0:a:0?", "-vf",
+                f"scale={out_w}:{out_h},setsar=1",
+                "-fps_mode", "passthrough", "-enc_time_base", "1:1000000",
+                *codec, "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-af", AUDIO_SYNC, "-b:a", "96k", "-movflags", "+faststart", temporary,
+            ]
+            if progress is None:
+                await self._run_cmd(cmd)
+            else:
+                await self._run_cmd(cmd, progress=progress, duration_ms=duration_ms)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, output_path)
+        finally:
+            if os.path.isfile(temporary):
+                os.remove(temporary)
+
+    @staticmethod
+    def _capture_preview_progress(cmd, duration_ms, progress, check=True):
+        """Read FFmpeg's machine progress without exposing paths or stderr."""
+        if not isinstance(duration_ms, (int, float)) or not math.isfinite(duration_ms) or duration_ms <= 0:
+            raise ValueError('Invalid preview duration')
+        reported = 0
+        progress(0)
+        cmd = [cmd[0], '-progress', 'pipe:1', '-stats_period', '0.5', *cmd[1:]]
+        with media_process(cmd) as (process, stderr):
+            while raw := process.stdout.readline(1025):
+                if len(raw) > 1024:
+                    raise RenderingError('Invalid preview progress')
+                if raw.startswith(b'out_time_us='):
+                    try:
+                        percent = max(0, min(99, int(int(raw.split(b'=', 1)[1]) / (duration_ms * 1000) * 100)))
+                    except ValueError:
+                        continue  # FFmpeg can report N/A before the first frame.
+                    if percent > reported:
+                        reported = percent
+                        progress(percent)
+        result = subprocess.CompletedProcess(cmd, process.returncode, b'', bytes(stderr))
+        if result.returncode:
+            if check: raise RenderingError('Video encoding failed')
+        else:
+            progress(100)
+        return result
+
     async def render_clip(self, request: RenderRequest) -> RenderResult:
         """
         Render a clip in the requested aspect ratio.
@@ -251,7 +332,7 @@ class RenderingService:
             fps = await self._probe_fps(request.video_path)
         else:
             target_width, target_height = get_output_dimensions(request.aspect_ratio)
-            fps = "30"
+            fps = await self._probe_fps(request.video_path) if request.manual_plan is not None else "30"
 
         logger.info(
             f"Rendering clip: {request.start_time_ms}ms-{request.end_time_ms}ms, "
@@ -264,14 +345,20 @@ class RenderingService:
         else:
             window_start_ms, window_ms = request.start_time_ms, duration_ms
 
+        if request.progress_callback:
+            request.progress_callback('Analyzing framing and camera changes', None)
         plan: Optional[ClipLayoutPlan] = None
-        if not is_landscape:
+        if request.manual_plan is not None:
+            plan = request.manual_plan
+        elif not is_landscape:
             plan = await self._plan_layout(request, source_w, source_h, window_start_ms, window_ms)
         analyzed = plan is not None
         # Pacing needs to know what's on screen even when the framing doesn't
         # use it (Classic style, 16:9 output): a silent screen demo isn't dead air.
         pacing_plan = plan
         if pacing_plan is None and (is_landscape or request.layout_style == LayoutStyle.FIT) and self._paces(request):
+            pacing_plan = await self._content_plan(request, source_w, source_h, window_start_ms, window_ms)
+        if request.debug_capture and pacing_plan is None:
             pacing_plan = await self._content_plan(request, source_w, source_h, window_start_ms, window_ms)
         # Faces seen while analyzing, kept by every fallback so captions still
         # stay off them.
@@ -282,12 +369,30 @@ class RenderingService:
                 source_width=source_w, source_height=source_h, face_samples=face_samples,
             )
 
-        skips = self._window_skips(request, window_start_ms, window_ms)
-        keeps = self._keep_intervals(request, pacing_plan, window_start_ms, window_ms)
-        time_map = TimeMap(subtract_intervals(keeps, skips), window_ms)
-        # Natural timing still honours the planner's skips: they're edit
-        # decisions, not pacing.
-        natural_map = TimeMap(subtract_intervals([(0, window_ms)], skips), window_ms)
+        if request.manual_plan is not None:
+            ranges = request.manual_ranges_ms
+            if not ranges or any(start < window_start_ms or end > window_start_ms + window_ms or end <= start or
+                                 (i > 0 and start < ranges[i - 1][1]) for i, (start, end) in enumerate(ranges)):
+                raise RenderingError('Manual rendering requires valid selected intervals')
+            time_map = TimeMap([(a - window_start_ms, b - window_start_ms) for a, b in ranges], window_ms)
+            natural_map = time_map
+        else:
+            skips = self._window_skips(request, window_start_ms, window_ms)
+            keeps = self._keep_intervals(request, pacing_plan, window_start_ms, window_ms)
+            protected = window_protection(request.editorial_context or {}, window_start_ms, window_ms)
+            # Existing audio-event protection must survive explicit skips too.
+            protected += reaction_intervals(request.transcript_segments or [], window_start_ms, window_ms)
+            if request.editorial_context is not None:
+                baseline = self._keep_intervals(replace(request, editorial_context=None), pacing_plan, window_start_ms, window_ms)
+                record_prevented_cuts(request.editorial_context, baseline, skips, protected, window_start_ms, window_ms, pacing_plan)
+            time_map = TimeMap(subtract_intervals(keeps, skips, protected, window_ms), window_ms)
+            # Natural timing still honours the planner's skips: they're edit
+            # decisions, not pacing.
+            natural_map = TimeMap(subtract_intervals([(0, window_ms)], skips, protected, window_ms), window_ms)
+            if request.coherence_reviewer:
+                time_map = await request.coherence_reviewer.audit_edit(request.title_text, time_map,
+                    window_start_ms, window_ms, request.editorial_context, pacing_plan)
+                natural_map = TimeMap([(0, window_ms)], window_ms)
         smart = analyzed and not plan.is_letterbox_only
         vision_cost = plan.vision_cost_usd if analyzed else 0.0
 
@@ -304,19 +409,27 @@ class RenderingService:
             source_width=source_w, source_height=source_h, face_samples=face_samples,
         )
         ladder: list[tuple[ClipLayoutPlan, TimeMap, Optional[str]]] = [(plan, time_map, None)]
-        if smart:
+        if smart and request.manual_plan is None:
             ladder.append((letterbox, time_map, "letterbox"))
-        if time_map.keeps != natural_map.keeps:
+        if time_map.keeps != natural_map.keeps and request.manual_plan is None:
             ladder.append((letterbox, natural_map, "letterbox_natural"))
 
         render_fallback: Optional[str] = None
+        attempted_plan = plan
+        attempts = []
         for step, (step_plan, step_map, fallback) in enumerate(ladder):
+            if request.coherence_reviewer and step_map.keeps != time_map.keeps:
+                source_keeps = [(window_start_ms + a, window_start_ms + b) for a, b in step_map.keeps]
+                if not await request.coherence_reviewer.judge(request.title_text, source_keeps, request.editorial_context, 'render_fallback'):
+                    request.editorial_context['coherence']['status'] = 'rejected'
+                    raise CoherenceRejected('Clip omitted: rendering fallback failed coherence review.')
             try:
                 await self._render_edit(
                     request, step_plan, step_map, window_start_ms, window_ms,
                     target_width, target_height, is_landscape, fps, loudness_filter,
                 )
             except Exception as e:
+                attempts.append({"fallback": fallback, "status": "failed", "failure": "render_failed"})
                 # Any failure (FFmpeg, or a bug building the graph, captions or
                 # overlays) moves down the ladder; only the last step raises.
                 if step == len(ladder) - 1:
@@ -327,6 +440,7 @@ class RenderingService:
                 )
                 continue
             plan, time_map, render_fallback = step_plan, step_map, fallback
+            attempts.append({"fallback": fallback, "status": "rendered", "failure": None})
             break
         if render_fallback:
             smart, analyzed = False, False
@@ -335,6 +449,21 @@ class RenderingService:
         removed_ms = time_map.removed_ms
         chapters = self._output_chapters(request, window_start_ms, time_map)
         subtitle_path = await self._write_subtitles(request, window_start_ms, time_map)
+        if request.editorial_context is not None:
+            if request.editorial_service is not None:
+                retained = remap_segments(request.transcript_segments or [], window_start_ms, time_map)
+                await review_retained_clip(request.editorial_service, request.title_text, retained, request.editorial_context)
+            request.editorial_context['retained_source'] = [[window_start_ms + a, window_start_ms + b] for a, b in time_map.keeps]
+        trace_path = None
+        if request.debug_capture or (request.editorial_context and request.editorial_service and request.editorial_service.enabled):
+            trace_path = request.output_path + ".framing.json"
+            try:
+                trace = make_trace(request, pacing_plan, attempted_plan, plan, time_map, window_start_ms,
+                                   window_ms, target_width, target_height, fps, attempts, self.settings)
+                await asyncio.to_thread(save_trace, trace_path, trace)
+            except Exception:
+                logger.warning("Framing trace could not be saved")
+                trace_path = None
         logger.info(
             f"Clip rendered: {request.output_path} ({file_size / 1024 / 1024:.1f} MB, "
             f"{scaled_duration_ms(time_map.output_ms, request.video_speed) / 1000:.1f}s at {request.video_speed:g}x"
@@ -356,6 +485,7 @@ class RenderingService:
             subtitle_path=subtitle_path,
             output_width=target_width,
             output_height=target_height,
+            framing_trace_path=trace_path,
         )
 
     @staticmethod
@@ -428,7 +558,7 @@ class RenderingService:
         caption_path = await self._generate_captions(
             request, target_width, target_height, window_start_ms, time_map, out_plan, is_landscape, plan,
         )
-        graph += f";[base]{self._caption_filter(caption_path)}[captioned]"
+        graph += self._caption_graph(caption_path, request.caption_suppression_ranges_ms, window_start_ms, time_map)
         overlays = self._overlays(request, out_plan, target_width, target_height, is_landscape)
         # Burn captions and animate framing/overlays on the edited source clock,
         # then speed up the entire composited picture to match the tempo audio.
@@ -448,6 +578,7 @@ class RenderingService:
                 fps=fps,
                 output_size=(target_width, target_height),
                 output_duration_ms=scaled_duration_ms(time_map.output_ms, request.video_speed),
+                **({'progress': lambda percent: request.progress_callback('Rendering video', percent)} if request.progress_callback else {}),
             )
         finally:
             for path in extra_inputs:
@@ -473,6 +604,9 @@ class RenderingService:
         try:
             return await self.layout_analyzer.analyze(
                 request.video_path, window_start_ms, window_ms, source_w, source_h, request.layout_style,
+                **({"capture": True} if request.debug_capture else {}),
+                **({'progress': lambda detail, percent: request.progress_callback(
+                    detail if percent is None else f'{detail} {percent}%', None)} if request.progress_callback else {}),
             )
         except Exception as e:
             logger.warning(f"Layout analysis failed, falling back to letterbox: {e}", exc_info=True)
@@ -486,10 +620,15 @@ class RenderingService:
         window_start_ms: int,
         window_ms: int,
     ) -> Optional[ClipLayoutPlan]:
-        """Heuristic shot analysis for pacing only (no paid vision call). None if unavailable."""
+        """Heuristic shot analysis for pacing only (no paid vision call). None if unavailable.
+
+        Pacing needs to know what is on screen, not exact camera cuts, so the
+        every-frame camera scan is skipped (16:9 output, Classic style).
+        """
         try:
             return await self.layout_analyzer.analyze(
                 request.video_path, window_start_ms, window_ms, source_w, source_h, LayoutStyle.AUTO, vision=False,
+                precise=False, **({"capture": True} if request.debug_capture else {}),
             )
         except Exception as e:
             logger.warning(f"Content analysis for pacing failed; using the default pause limit: {e}", exc_info=True)
@@ -512,6 +651,7 @@ class RenderingService:
             return [(0, window_ms)]
         words = window_words(request.transcript_segments, window_start_ms, window_ms)
         protected = reaction_intervals(request.transcript_segments, window_start_ms, window_ms)
+        protected += window_protection(request.editorial_context or {}, window_start_ms, window_ms)
         return compute_keep_intervals(words, window_ms, plan, protected, longform=request.longform)
 
     def _overlays(
@@ -552,6 +692,41 @@ class RenderingService:
                     banner_y(s, src_w, src_h, target_width, target_height) for s in out_plan.shots
                 ])))
         return overlays
+
+    def _caption_graph(
+        self, caption_path: Optional[str], suppressed: list[tuple[int, int]],
+        window_start_ms: int, time_map: TimeMap,
+    ) -> str:
+        """Cover our captions with the clean frame during source-time exclusions.
+
+        Keeping ASS on its original clock preserves karaoke, animation and linger
+        across suppression boundaries. Speed is applied to this composite later.
+        """
+        intervals = []
+        if caption_path:
+            for a, b in suppressed:
+                a = time_map.to_output_clamped(a - window_start_ms)
+                b = time_map.to_output_clamped(b - window_start_ms)
+                if b > a:
+                    if intervals and a <= intervals[-1][1]:
+                        intervals[-1] = (intervals[-1][0], max(b, intervals[-1][1]))
+                    else:
+                        intervals.append((a, b))
+        caption_filter = self._caption_filter(caption_path)
+        if not intervals:
+            return f";[base]{caption_filter}[captioned]"
+        # FFmpeg's expression parser rejects long addition chains (100 terms
+        # on supported builds). Bound each enable expression independently while
+        # drawing ASS once, so animation and linger keep their original clock.
+        groups = [intervals[i:i + 32] for i in range(0, len(intervals), 32)]
+        clean = ''.join(f'[caption_clean_{i}]' for i in range(len(groups)))
+        graph = (f";[base]split={len(groups) + 1}[caption_input]{clean}"
+                 f";[caption_input]{caption_filter}[caption_drawn_0]")
+        for i, group in enumerate(groups):
+            enabled = '+'.join(f'gte(t,{a / 1000:.3f})*lt(t,{b / 1000:.3f})' for a, b in group)
+            output = 'captioned' if i == len(groups) - 1 else f'caption_drawn_{i + 1}'
+            graph += f";[caption_drawn_{i}][caption_clean_{i}]overlay=enable='{enabled}':format=auto[{output}]"
+        return graph
 
     def _caption_filter(self, caption_path: Optional[str]) -> str:
         """`ass=` filter for the caption file, or a no-op."""
@@ -635,7 +810,11 @@ class RenderingService:
             anchors[-1] = (10**9, anchors[-1][1], anchors[-1][2])
 
         placer = None
-        if anchors and plan is not None:
+        if request.caption_y is not None:
+            if type(request.caption_y) not in (int, float) or not .1 <= request.caption_y <= .9:
+                raise ValueError('Invalid caption position')
+            anchors = [(10**9, 5, round(target_height * request.caption_y))]
+        elif anchors and plan is not None:
             zones = face_zones(plan, time_map, target_width, target_height)
             if zones:
                 placer = CaptionPlacer(anchors, zones, target_width, target_height)
@@ -907,6 +1086,7 @@ class RenderingService:
         fps: str = "30",
         output_size: tuple[int, int] = (1080, 1920),
         output_duration_ms: Optional[int] = None,
+        progress=None,
     ) -> None:
         """Run FFmpeg over the render window [start, start + duration) with a filter graph.
 
@@ -954,7 +1134,10 @@ class RenderingService:
         cmd.append(output_path)
 
         try:
-            await self._run_cmd(cmd)
+            if progress:
+                await self._run_cmd(cmd, progress=progress, duration_ms=output_duration_ms or duration_ms)
+            else:
+                await self._run_cmd(cmd)
             await self._validate_output_timing(
                 output_path, output_duration_ms if output_duration_ms is not None else duration_ms,
                 fps, bool(audio_label),
@@ -1054,9 +1237,22 @@ class RenderingService:
         adjusted_duration_ms = duration_ms + start_adjustment + audio_padding_ms
         return adjusted_start_ms, adjusted_duration_ms
 
-    async def _run_cmd(self, cmd: list[str]) -> None:
+    async def _run_cmd(self, cmd: list[str], *, progress=None, duration_ms=None) -> None:
         """Run a command asynchronously."""
         logger.debug(f"Running: {' '.join(cmd[:10])}...")
+
+        reported = -1
+
+        def report_progress(percent):
+            # File-option compatibility retries belong to the same render.
+            # Do not emit a second initial zero when an older FFmpeg retries.
+            nonlocal reported
+            if percent > reported:
+                reported = percent
+                progress(percent)
+
+        def execute(command):
+            return self._capture_preview_progress(command, duration_ms, report_progress, check=False) if progress else run_media(command)
 
         def invoke():
             # Keep the script inside the worker: cancelling the await does not
@@ -1064,10 +1260,10 @@ class RenderingService:
             try:
                 graph_index = cmd.index("-filter_complex")
             except ValueError:
-                return run_media(cmd)
+                return execute(cmd)
             graph = cmd[graph_index + 1]
             if len(graph.encode("utf-8")) <= MAX_INLINE_FILTER_GRAPH_BYTES:
-                return run_media(cmd)
+                return execute(cmd)
 
             script_path = None
             try:
@@ -1081,7 +1277,7 @@ class RenderingService:
                     script.write(graph)
                 script_cmd = cmd.copy()
                 script_cmd[graph_index:graph_index + 2] = ["-/filter_complex", script_path]
-                result = run_media(script_cmd)
+                result = execute(script_cmd)
                 # FFmpeg 6 (Ubuntu 24.04) predates file-backed option values;
                 # FFmpeg 9 removed the older script option. Retry only when the
                 # first option itself is unknown, before any render can start.
@@ -1090,7 +1286,7 @@ class RenderingService:
                     if (b"Unrecognized option '/filter_complex'." in stderr and
                             b"Error splitting the argument list: Option not found" in stderr):
                         script_cmd[graph_index] = "-filter_complex_script"
-                        result = run_media(script_cmd)
+                        result = execute(script_cmd)
                 return result
             finally:
                 if script_path is not None:

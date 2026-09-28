@@ -77,6 +77,18 @@ class TestRequestPayload:
         assert "temperature" not in payload
         assert payload["response_format"]["type"] == "json_schema"
 
+    @pytest.mark.parametrize("jev_enabled", [False, True])
+    def test_default_planner_is_opus_with_cross_vendor_fallbacks(self, monkeypatch, jev_enabled):
+        for name in ("PLANNER_MODEL", "PLANNER_FALLBACK_MODELS", "CLIPPING_MODE"):
+            monkeypatch.delenv(name, raising=False)
+        planner = make_planner(jev_enabled=jev_enabled)
+        fallbacks = planner.settings.get_planner_fallback_models()
+        payload = planner._build_request_payload(planner.settings.planner_model, fallbacks, [])
+        # Jev review mode uses the same planner; the fallback chain is never empty.
+        assert payload["model"] == "anthropic/claude-opus-5.5"
+        assert payload["models"] == ["google/gemini-3.8-flash", "openai/gpt-6-sol"]
+        assert payload["reasoning"] == {"effort": "medium", "exclude": True}
+
     def test_reasoning_payload_uses_schema_fallbacks_and_no_temperature(self):
         planner = make_planner(
             planner_model="primary/model",

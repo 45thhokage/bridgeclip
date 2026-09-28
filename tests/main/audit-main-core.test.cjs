@@ -17,11 +17,11 @@ function loadShared(file) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/shared', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require, URL })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => id.startsWith('./') ? loadShared(`${id.slice(2)}.ts`) : require(id), URL })
   return module.exports
 }
 
-const security = loadSource('security.ts', { electron: {}, '../shared/brand': loadShared('brand.ts') })
+const security = loadSource('security.ts', { electron: {}, '../shared/brand': loadShared('brand.ts'), '../shared/jev-settings': loadShared('jev-settings.ts') })
 
 /** ipc-handlers with a library at `library` and a shell that records what it is asked to open. */
 function ipcWithLibrary(library) {
@@ -50,7 +50,13 @@ function ipcWithLibrary(library) {
     './tools': {},
     './zernio/service': {},
     './zernio/posts': {},
-    './automations': {}
+    './automations': {},
+    './clip-editor': {},
+    './output-storage': {},
+    './edit-inspector': {},
+    './youtube-preview': {},
+    './library-posting': {},
+    './library-management': {}
   })
   ipc.registerIpcHandlers(() => window)
   const event = { sender: contents, senderFrame: frame }

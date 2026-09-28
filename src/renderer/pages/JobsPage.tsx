@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Ban, FolderOpen, ListVideo, Plus, RefreshCw, RotateCcw, Search, X } from 'lucide-react'
+import { Ban, FileText, FolderOpen, ListVideo, Pencil, Plus, RefreshCw, RotateCcw, Search, X } from 'lucide-react'
 import type { HistoryEntry } from '../../preload/index'
-import { parseJobOutput } from '../../shared/job-output'
 import { MAX_PARALLEL_JOBS } from '../../shared/jobs'
-import { BackLink, ClipList } from '../components/ClipList'
+import { EditInspector, InspectEditsButton } from '../components/EditInspector'
+import { BackLink } from '../components/ClipList'
 import { JobFailure, JobProgress, STAGE_LABELS } from '../components/JobProgress'
 import type { Page as AppPage } from '../components/Sidebar'
 import { StatusDot } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
+import { ActionMenu } from '../components/ui/ActionMenu'
 import { Callout } from '../components/ui/Callout'
 import { EmptyState } from '../components/ui/EmptyState'
 import { TextInput } from '../components/ui/Field'
@@ -18,7 +19,7 @@ import { ProgressRing } from '../components/ui/ProgressBar'
 import { Skeleton } from '../components/ui/Skeleton'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatDate, formatDuration, formatRelativeDate, formatTimecode, formatUsd, sourceLabel } from '../lib/utils'
-import { isJobActive, useActiveJobs, useJobStore, type Job, type JobOutput } from '../store/use-job-store'
+import { isJobActive, useActiveJobs, useJobStore, type Job } from '../store/use-job-store'
 
 type Filter = 'all' | HistoryEntry['status']
 
@@ -42,10 +43,13 @@ const STATUS: Record<HistoryEntry['status'], { label: string; tone: 'success' | 
 
 /**
  * Clipping jobs: what is running or queued right now (live, from the main
- * process) and every earlier run in the output folder. Opening a job shows its
- * progress, its clips, or what went wrong.
+ * process) and every earlier run in the output folder. Completed jobs open in
+ * Library; other jobs show their progress or what went wrong.
  */
-export function JobsPage({ onNavigate }: { onNavigate: (page: AppPage) => void }): React.JSX.Element {
+export function JobsPage({ onNavigate, onViewLibrary }: {
+  onNavigate: (page: AppPage) => void
+  onViewLibrary: (outputDir: string) => void
+}): React.JSX.Element {
   const focusedJobId = useJobStore((s) => s.focusedJobId)
   const focused = useJobStore((s) => (s.focusedJobId ? s.jobs[s.focusedJobId] ?? null : null))
   const focusJob = useJobStore((s) => s.focusJob)
@@ -55,15 +59,24 @@ export function JobsPage({ onNavigate }: { onNavigate: (page: AppPage) => void }
   const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
-  const [openRun, setOpenRun] = useState<{ entry: HistoryEntry; output: JobOutput } | null>(null)
+  const [jobsLoaded, setJobsLoaded] = useState(false)
   const requestId = useRef(0)
 
   const load = useCallback(async (manual = false) => {
     const request = ++requestId.current
     if (manual) setRefreshing(true)
     try {
-      const result = await getApi().history.list()
-      if (request === requestId.current) { setEntries(result); setError(null) }
+      const [live, history] = await Promise.allSettled([getApi().job.list(), getApi().history.list()])
+      if (request === requestId.current) {
+        if (live.status === 'fulfilled') {
+          useJobStore.getState().hydrate(live.value)
+          setJobsLoaded(true)
+        }
+        if (history.status === 'fulfilled') setEntries(history.value)
+        else setEntries((previous) => previous ?? [])
+        setError(live.status === 'rejected' ? 'Could not refresh active jobs. Try Refresh jobs.'
+          : history.status === 'rejected' ? errorMessage(history.reason, 'Could not load previous jobs.') : null)
+      }
     } catch (err) {
       if (request === requestId.current) {
         setEntries((previous) => previous ?? [])
@@ -86,8 +99,17 @@ export function JobsPage({ onNavigate }: { onNavigate: (page: AppPage) => void }
 
   // A focused job that was dismissed elsewhere falls back to the list.
   useEffect(() => {
-    if (focusedJobId && !focused) focusJob(null)
-  }, [focusedJobId, focused, focusJob])
+    if (jobsLoaded && focusedJobId && !focused) focusJob(null)
+  }, [jobsLoaded, focusedJobId, focused, focusJob])
+
+  // A watched job finishing, or a completed job opened from Create, has the
+  // same destination as opening that run in Library.
+  const completedRun = focused?.status === 'completed' ? focused.outputDir : null
+  useEffect(() => {
+    if (!completedRun) return
+    focusJob(null)
+    onViewLibrary(completedRun)
+  }, [completedRun, focusJob, onViewLibrary])
 
   const cancel = async (job: Job): Promise<void> => {
     try {
@@ -102,21 +124,13 @@ export function JobsPage({ onNavigate }: { onNavigate: (page: AppPage) => void }
     try {
       const result = await getApi().job.start(job.request)
       if (result.error) setError(result.error)
-      else if (result.jobId) focusJob(result.jobId)
+      else if (result.jobId) {
+        if (result.job) useJobStore.getState().upsert(result.job)
+        else await getApi().job.list().then(useJobStore.getState().hydrate)
+        focusJob(result.jobId)
+      }
     } catch (err) {
       setError(errorMessage(err, 'Could not start this job again.'))
-    }
-  }
-
-  const openEntry = async (entry: HistoryEntry): Promise<void> => {
-    setError(null)
-    try {
-      const output = parseJobOutput(await getApi().history.getJob(entry.outputDir))
-      if (!output) { setError('This run’s saved clips are unavailable.'); return }
-      setOpenRun({ entry, output })
-      document.getElementById('page-scroll')?.scrollTo({ top: 0 })
-    } catch (err) {
-      setError(errorMessage(err, 'Could not open this run.'))
     }
   }
 
@@ -128,7 +142,7 @@ export function JobsPage({ onNavigate }: { onNavigate: (page: AppPage) => void }
     }
   }
 
-  const back = <BackLink label="All jobs" onClick={() => { focusJob(null); setOpenRun(null) }} />
+  const back = <BackLink label="All jobs" onClick={() => focusJob(null)} />
   const errorCallout = error && (
     <Page width="focus" className="pb-0">
       <Callout tone="danger" onDismiss={() => setError(null)}>{error}</Callout>
@@ -139,17 +153,11 @@ export function JobsPage({ onNavigate }: { onNavigate: (page: AppPage) => void }
     if (isJobActive(focused)) {
       return <>{errorCallout}<JobProgress job={focused} leading={back} onCancel={() => { void cancel(focused) }} /></>
     }
-    if (focused.status === 'completed' && focused.output) {
-      return <ClipList output={focused.output} outputDir={focused.outputDir} onNavigate={onNavigate} leading={back} />
-    }
+    if (focused.status === 'completed') return <></>
     if (focused.status === 'failed') {
-      return <>{errorCallout}<JobFailure job={focused} leading={back} onRetry={() => { void runAgain(focused) }} /></>
+      return <>{errorCallout}<div className="px-6 pt-3"><InspectEditsButton outputDir={focused.outputDir} /></div><JobFailure job={focused} leading={back} onRetry={() => { void runAgain(focused) }} /></>
     }
     return <>{errorCallout}<JobCancelled job={focused} leading={back} onRetry={() => { void runAgain(focused) }} /></>
-  }
-
-  if (openRun) {
-    return <ClipList output={openRun.output} outputDir={openRun.entry.outputDir} onNavigate={onNavigate} leading={back} />
   }
 
   return (
@@ -168,9 +176,10 @@ export function JobsPage({ onNavigate }: { onNavigate: (page: AppPage) => void }
       onOpenJob={(job) => { focusJob(job.id); document.getElementById('page-scroll')?.scrollTo({ top: 0 }) }}
       onCancel={(job) => { void cancel(job) }}
       onOpenEntry={(entry) => {
-        // This session's jobs open their live view; older runs load from disk.
-        if (useJobStore.getState().jobs[entry.jobId]) focusJob(entry.jobId)
-        else void openEntry(entry)
+        if (entry.status === 'completed') {
+          focusJob(null)
+          onViewLibrary(entry.outputDir)
+        } else if (useJobStore.getState().jobs[entry.jobId]) focusJob(entry.jobId)
       }}
       onOpenFolder={(dir) => { void openFolder(dir) }}
     />
@@ -364,13 +373,13 @@ function ActiveJobRow({ job, position, onOpen, onCancel }: { job: Job; position:
           </span>
         ) : (
           <ProgressRing value={job.percent} size={32} stroke={3}>
-            <span className="font-mono text-[9px] tabular text-accent-hover">{Math.round(job.percent)}%</span>
+            <span className="font-mono text-[9px] tabular text-accent">{Math.round(job.percent)}%</span>
           </ProgressRing>
         )}
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium leading-5 text-ink">{sourceLabel(job.request.videoUrl)}</span>
           <span className="block truncate text-xs text-ink-muted">
-            <span className={queued ? 'text-ink-subtle' : 'text-accent-hover'}>{stage}</span>
+            <span className={queued ? 'text-ink-subtle' : 'text-accent'}>{stage}</span>
             {detail && detail !== stage && ` · ${detail}`}
           </span>
         </span>
@@ -408,7 +417,7 @@ const STATUS_DOT: Record<HistoryEntry['status'], 'success' | 'accent' | 'danger'
 
 const STATUS_TEXT: Record<HistoryEntry['status'], string> = {
   completed: 'text-success',
-  running: 'text-accent-hover',
+  running: 'text-accent',
   failed: 'text-danger',
   cancelled: 'text-ink-subtle',
   interrupted: 'text-warning',
@@ -417,20 +426,40 @@ const STATUS_TEXT: Record<HistoryEntry['status'], string> = {
 
 /** One line per run: status, title, then clips, run time, cost and date in aligned columns. */
 function PreviousJobRow({ entry, hasDetails, onOpen, onOpenFolder }: { entry: HistoryEntry; hasDetails: boolean; onOpen: () => void; onOpenFolder: () => void }): React.JSX.Element {
+  const [inspecting, setInspecting] = useState(false)
+  const [progress, setProgress] = useState<{ outputDir: string; remaining: number } | null>(null)
+  const closeInspector = useCallback(() => setInspecting(false), [])
   const status = STATUS[entry.status]
   const completed = entry.status === 'completed'
+  useEffect(() => {
+    if (!completed || !entry.editorProject) { setProgress(null); return }
+    let active = true
+    // Read saved candidate states, as Library does. Export counts cannot tell
+    // whether an earlier export has since been edited or marked ready again.
+    // Counts only, cached by main until the project file changes.
+    getApi().editor.progress(entry.outputDir).then(({ remaining }) => {
+      if (active) setProgress({ outputDir: entry.outputDir, remaining })
+    }).catch(() => { if (active) setProgress(null) })
+    return () => { active = false }
+  }, [entry, completed])
+  const remaining = completed && entry.editorProject && progress?.outputDir === entry.outputDir ? progress.remaining : 0
+  const editing = remaining > 0
   // Failed and cancelled jobs from this session keep their options, so they can run again.
   const openable = completed || hasDetails
   const dated = !entry.date.startsWith('1970-')
   const cells = (
     <>
-      <StatusDot tone={STATUS_DOT[entry.status]} />
+      <StatusDot tone={editing ? 'accent' : STATUS_DOT[entry.status]} />
       <span className="min-w-0 flex-1 truncate text-xs" title={entry.errorMessage ?? entry.videoTitle}>
-        <span className="sr-only">{status.label}: </span>
+        {!editing && <span className="sr-only">{status.label}: </span>}
         <span className="text-sm text-ink">{entry.videoTitle}</span>
         {!completed && <span className={cn('ml-2 font-medium', STATUS_TEXT[entry.status])} aria-hidden>{status.label}</span>}
         {entry.errorMessage && <span className="text-ink-subtle" data-selectable> · {entry.errorMessage}</span>}
       </span>
+      {editing && <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-accent px-2 py-0.5 text-2xs font-medium text-accent-ink"
+        aria-label={`Editing: ${remaining} clip${remaining === 1 ? '' : 's'} left to finish`} title={`${remaining} clip${remaining === 1 ? '' : 's'} left to finish`}>
+        <Pencil className="h-3 w-3" aria-hidden="true" />Editing<span className="hidden opacity-80 sm:inline">· {remaining} left</span>
+      </span>}
       <span className="hidden w-16 shrink-0 text-right text-xs text-ink-muted sm:block">
         {completed ? `${entry.clipCount} clip${entry.clipCount === 1 ? '' : 's'}` : ''}
       </span>
@@ -450,20 +479,16 @@ function PreviousJobRow({ entry, hasDetails, onOpen, onOpenFolder }: { entry: Hi
   return (
     <li className={cn('group/row flex items-center pr-2 transition-colors duration-150', openable && 'hover:bg-white/[0.025]')}>
       {openable ? (
-        <button onClick={onOpen} className={cellClass} title={completed ? 'View clips' : 'Details'}>{cells}</button>
+        <button onClick={onOpen} className={cellClass} title={completed ? 'Open in Library' : 'Open job'}>{cells}</button>
       ) : (
         <div className={cellClass}>{cells}</div>
       )}
-      <Button
-        size="sm"
-        variant="ghost"
-        iconOnly
-        aria-label={`Open the folder for ${entry.videoTitle}`}
-        title="Open folder"
-        icon={<FolderOpen className="h-3.5 w-3.5" />}
-        onClick={onOpenFolder}
-        className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover/row:opacity-100"
-      />
+      <ActionMenu label={`Actions for ${entry.videoTitle}`} actions={[
+        { label: completed ? 'Open in Library' : 'Open job', icon: <ListVideo className="h-3.5 w-3.5" />, disabled: !openable, onSelect: onOpen },
+        { label: 'Open folder', icon: <FolderOpen className="h-3.5 w-3.5" />, onSelect: onOpenFolder },
+        { label: 'Details', icon: <FileText className="h-3.5 w-3.5" />, onSelect: () => setInspecting(true) }
+      ]} />
+      {inspecting && <EditInspector outputDir={entry.outputDir} onClose={closeInspector} />}
     </li>
   )
 }

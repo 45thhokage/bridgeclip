@@ -1,4 +1,5 @@
-import { app, BrowserWindow, nativeTheme, shell, protocol } from 'electron'
+import { awaitEditorSaveBeforeClose, stopEditorsForQuit } from './clip-editor'
+import { app, BrowserWindow, dialog, nativeTheme, shell, protocol } from 'electron'
 import { extname, join } from 'path'
 import { mkdirSync } from 'fs'
 import { Readable } from 'stream'
@@ -13,6 +14,7 @@ import { cleanStaleWorkspaces, stopAllJobsForQuit } from './pipeline-runner'
 import { cancelQueuedJobsForQuit } from './job-manager'
 import { cancelZernioConnect } from './zernio/service'
 import { isAutomationMedia, startAutomationScheduler } from './automations'
+import { sweepDeletingRuns } from './library-management'
 
 // Catch crashes anywhere in the main process so we get a log line instead
 // of a silent exit. Without these, an unhandled rejection in an IPC handler
@@ -71,6 +73,28 @@ if (!gotTheLock) {
 // Electron binary, so without this the dock and taskbar show the Electron atom.
 const devIcon = join(__dirname, '../../build/icon.png')
 
+function refreshDevDockIcon(): void {
+  if (is.dev && !hiddenForTests) app.dock?.setIcon(devIcon)
+}
+
+// What a close blocked by unsaved editor changes should resume after saving.
+let closeIntent: 'quit' | 'close' | null = null
+app.on('before-quit', () => { closeIntent = 'quit' })
+
+function unsavedEditsChoice(window: BrowserWindow): 'save' | 'discard' | 'cancel' {
+  if (hiddenForTests) {
+    // A native dialog would hang scripted runs; tests pick the answer.
+    const choice = process.env.BRIDGECLIP_E2E_UNLOAD_CHOICE
+    return choice === 'save' || choice === 'cancel' ? choice : 'discard'
+  }
+  const response = dialog.showMessageBoxSync(window, {
+    type: 'warning', buttons: ['Save', 'Discard', 'Cancel'], defaultId: 0, cancelId: 2, noLink: true,
+    message: 'Save your clip edits?',
+    detail: 'Your latest changes in the clip editor are not saved yet. If you discard them, the editor reopens at your last save.'
+  })
+  return (['save', 'discard', 'cancel'] as const)[response] ?? 'cancel'
+}
+
 function createWindow(): void {
   // The UI is dark-only; keep the vibrancy material and native menus dark too.
   nativeTheme.themeSource = 'dark'
@@ -108,11 +132,35 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => {
-    if (!hiddenForTests) mainWindow?.show()
+    if (!hiddenForTests) {
+      mainWindow?.show()
+      refreshDevDockIcon()
+    }
   })
 
   mainWindow.on('closed', () => {
     mainWindow = null
+  })
+
+  // The editor blocks unload while edits are unsaved. Without this handler
+  // Electron silently cancels the close (and a quit), so ask what to do.
+  const window = mainWindow
+  window.on('close', () => { if (closeIntent !== 'quit') closeIntent = 'close' })
+  window.webContents.on('will-prevent-unload', (event) => {
+    const intent = closeIntent ?? 'reload'
+    closeIntent = null
+    const choice = unsavedEditsChoice(window)
+    logger.info('editor.unsavedClose', { intent, choice })
+    if (choice === 'discard') { event.preventDefault(); return }
+    if (choice === 'save') {
+      awaitEditorSaveBeforeClose(() => {
+        if (window.isDestroyed()) return
+        if (intent === 'quit') app.quit()
+        else if (intent === 'close') window.close()
+        else window.webContents.reload()
+      })
+      window.webContents.send('editor:saveBeforeClose')
+    }
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -135,14 +183,14 @@ function createWindow(): void {
 }
 
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'local-file', privileges: { stream: true, supportFetchAPI: true } }
+  // Chromium needs standard URL semantics to resume and seek media range requests.
+  { scheme: 'local-file', privileges: { standard: true, stream: true, supportFetchAPI: true } }
 ])
 
 app.whenReady().then(() => {
   cleanStaleWorkspaces()
   electronApp.setAppUserModelId('com.bridgemind.bridgeclip')
   if (hiddenForTests) app.dock?.hide()
-  else if (is.dev) app.dock?.setIcon(devIcon)
 
   // Boot-time diagnostic dump. This is the first thing in the log file and
   // gives any future failure a full environment snapshot to reference.
@@ -164,7 +212,11 @@ app.whenReady().then(() => {
     let media: Awaited<ReturnType<typeof openAuthorizedMedia>> | undefined
     try {
       if (request.method !== 'GET' && request.method !== 'HEAD') return new Response(null, { status: 405 })
-      const filePath = decodeURIComponent(request.url.slice('local-file://'.length))
+      const url = new URL(request.url)
+      if (url.host !== 'media' || url.username || url.password || url.search || url.hash) {
+        return new Response('Media unavailable', { status: 403 })
+      }
+      const filePath = decodeURIComponent(url.pathname.slice(1))
       if (isAutomationMedia(filePath)) authorizeMedia(filePath)
       media = await openAuthorizedMedia(filePath, loadSettings().outputDirectory)
       const mimeType: Record<string, string> = {
@@ -221,11 +273,15 @@ app.whenReady().then(() => {
 
   registerIpcHandlers(() => mainWindow)
   const stopAutomations = startAutomationScheduler()
+  void sweepDeletingRuns()
   app.on('before-quit', stopAutomations)
   createWindow()
   initAutoUpdater(() => mainWindow)
 
   app.on('activate', () => {
+    // Local runs share Electron's bundle identity. Restore our artwork when
+    // returning to the app as well as after the initial window appears.
+    refreshDevDockIcon()
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
     }
@@ -238,7 +294,9 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+// Stop work only once the quit is certain: an unsaved-edits prompt can still cancel it.
+app.on('will-quit', () => {
+  stopEditorsForQuit()
   cancelQueuedJobsForQuit()
   stopAllJobsForQuit()
 })

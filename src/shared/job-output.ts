@@ -1,4 +1,9 @@
+import { parseRunDiagnostics } from './run-diagnostics'
+import { parseStages } from './job-progress'
+import { parseEditorialSummary, type EditorialSummary } from './editorial'
+
 export interface ClipArtifact {
+  editorial?: EditorialSummary | null
   clip_index: number
   s3_url: string
   duration_ms: number
@@ -13,8 +18,11 @@ export interface ClipArtifact {
 }
 
 export interface JobOutput {
+  editor_project?: boolean
   job_id: string
   source_video_url: string
+  source_video_description?: string | null
+  source_video_channel?: string | null
   source_video_title: string
   source_video_duration_seconds: number
   total_clips: number
@@ -95,6 +103,10 @@ function safeMetrics(value: unknown): Record<string, unknown> | null {
     'source_video_size_bytes', 'rendered_output_bytes', 'peak_rss_mb', 'analysis_duration_seconds']) {
     if (nonNegative(value[field])) result[field] = value[field]
   }
+  const diagnostics = parseRunDiagnostics(value.diagnostics)
+  if (diagnostics) result.diagnostics = diagnostics
+  const stages = parseStages(value.pipeline_stages)
+  if (stages) result.pipeline_stages = stages
   const stageDurations = value.stage_durations_seconds
   if (record(stageDurations)) {
     const safe: Record<string, number> = {}
@@ -126,7 +138,7 @@ function safeMetrics(value: unknown): Record<string, unknown> | null {
   if (record(costs) && finite(costs.total_estimated_cost_usd) && costs.total_estimated_cost_usd >= 0) {
     const safeCosts: Record<string, unknown> = { total_estimated_cost_usd: costs.total_estimated_cost_usd }
     if (typeof costs.cost_incomplete === 'boolean') safeCosts.cost_incomplete = costs.cost_incomplete
-    for (const name of ['transcription', 'planning', 'layout_vision']) {
+    for (const name of ['transcription', 'planning', 'layout_vision', 'source_context', 'editorial', 'editorial_vision', 'editorial_repair']) {
       const section = costs[name]
       if (!record(section)) continue
       const safe: Record<string, unknown> = {}
@@ -159,6 +171,7 @@ export function parseJobOutput(value: unknown): JobOutput | null {
       item.end_time_ms < item.start_time_ms) return null
     indices.add(item.clip_index as number)
     clips.push({
+      editorial: parseEditorialSummary(item.editorial),
       clip_index: item.clip_index as number,
       s3_url: item.s3_url,
       duration_ms: item.duration_ms,
@@ -172,8 +185,11 @@ export function parseJobOutput(value: unknown): JobOutput | null {
     })
   }
   return {
+    editor_project: value.editor_project === true,
     job_id: boundedText(value.job_id, 128) ?? '',
     source_video_url: boundedText(value.source_video_url, 8192) ?? '',
+    source_video_description: boundedText(value.source_video_description, 20000),
+    source_video_channel: boundedText(value.source_video_channel, 1024),
     source_video_title: boundedText(value.source_video_title, 1024) ?? 'Untitled video',
     source_video_duration_seconds: finite(value.source_video_duration_seconds) ? value.source_video_duration_seconds : 0,
     total_clips: clips.length,

@@ -11,14 +11,14 @@ function loadSource(file, mocks = {}, globals = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/main', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? require(id), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? (id.startsWith('../shared/') ? loadShared(id.slice('../shared/'.length) + '.ts') : require(id)), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
   return module.exports
 }
 function loadShared(file) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/shared', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require, URL })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => id.startsWith('./') ? loadShared(id.slice(2) + '.ts') : require(id), URL })
   return module.exports
 }
 const TEST_WORK_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-worker-test-'))
@@ -171,15 +171,19 @@ test('the native picker authorizes media and shell opening rejects aliased appli
     const frame = {}
     const contents = { mainFrame: frame }
     const window = { webContents: contents, isDestroyed: () => false }
+    const openedLinks = []
     const ipc = loadSource('ipc-handlers.ts', {
       electron: {
         app: { isPackaged: false },
-        shell: { openPath: async () => { throw new Error('Unexpected shell launch') } },
+        shell: { openPath: async () => { throw new Error('Unexpected shell launch') }, openExternal: async (url) => openedLinks.push(url) },
         ipcMain: { handle: (channel, listener) => handlers.set(channel, listener) },
         dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [video] }) }
       },
       './settings-store': { loadSettings: () => ({ outputDirectory: library }) },
       './file-manager': {},
+      './output-storage': { measureOutputStorage: async (directory) => ({ outputDirectory: directory, bytes: 0 }) },
+      './clip-editor': {},
+      './edit-inspector': { inspectEdits: async () => ({}) },
       './run-history': runHistory,
       './pipeline-runner': {},
       './job-manager': { initJobManager() {} },
@@ -188,12 +192,31 @@ test('the native picker authorizes media and shell opening rejects aliased appli
       './network-policy': {},
       './validation': {},
       './openrouter-models': {},
+      './youtube-preview': { getYouTubePreview: async () => ({ title: 'A video' }) },
       './tools': {},
       './zernio/service': {},
       './zernio/posts': {},
-      './automations': {}
+      './automations': {},
+      './library-posting': {},
+      './library-management': {}
     })
     ipc.registerIpcHandlers(() => window)
+    assert.equal(handlers.has('framing:inspect'), false)
+    assert.equal(handlers.has('framing:available'), false)
+    const storage = handlers.get('settings:storageUsage')
+    assert.throws(() => handlers.get('source:youtubePreview')({ sender: contents, senderFrame: {} }, 'https://youtu.be/aqz-KE-bpKQ'), /Unauthorized application request/)
+    assert.throws(() => storage({ sender: contents, senderFrame: {} }), /Unauthorized application request/)
+    assert.equal((await storage({ sender: contents, senderFrame: frame }, root)).outputDirectory, library)
+    const sourceUrl = 'https://www.youtube.com/watch?v=hqP9fivmBqI'
+    assert.equal(await handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, sourceUrl), true)
+    const docs = ['https://docs.typesafe.ai/introduction', 'https://docs.typesafe.ai/confidence']
+    for (const url of docs) assert.equal(await handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, url), true)
+    assert.deepEqual(openedLinks, [sourceUrl, ...docs])
+    for (const url of ['https://docs.typesafe.ai/other', 'https://docs.typesafe.ai/confidence?redirect=https://example.com', 'https://docs.typesafe.ai.evil.test/confidence', 'http://docs.typesafe.ai/confidence', 'https://user@docs.typesafe.ai/confidence']) {
+      assert.equal(security.isTrustedExternalUrl(url), false)
+      await assert.rejects(handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, url), /not supported|absolute path/)
+    }
+    await assert.rejects(handlers.get('shell:openPath')({ sender: contents, senderFrame: frame }, 'https://www.youtube.com/redirect?q=https://example.com'), /not supported/)
     assert.equal(handlers.has('files:registerMedia'), false)
     assert.throws(() => security.assertMediaPath(video, library))
     const picker = handlers.get('dialog:selectVideo')
@@ -215,6 +238,19 @@ test('external URLs reject executable schemes and embedded credentials', () => {
   assert.equal(security.isWebUrl('https://example.com/video'), true)
   assert.equal(security.isTrustedExternalUrl('https://example.com/video'), false)
   assert.equal(security.isTrustedExternalUrl('https://github.com/bridge-mind/bridgeclip'), true)
+})
+
+test('source video links normalize supported YouTube forms and allow only canonical browser URLs', () => {
+  const canonical = 'https://www.youtube.com/watch?v=hqP9fivmBqI'
+  for (const url of [canonical, 'https://youtu.be/hqP9fivmBqI?si=tracking', 'https://m.youtube.com/watch?v=hqP9fivmBqI&t=20', 'https://www.youtube.com/shorts/hqP9fivmBqI', 'https://www.youtube.com/live/hqP9fivmBqI']) {
+    assert.equal(videoSource.youtubeSourceUrl(url), canonical)
+    assert.equal(security.isTrustedExternalUrl(videoSource.youtubeSourceUrl(url)), true)
+  }
+  for (const url of ['', '/tmp/video.mp4', 'https://www.twitch.tv/videos/123', 'https://youtube.com.evil.test/watch?v=hqP9fivmBqI', 'javascript:alert(1)', 'https://user:pass@www.youtube.com/watch?v=hqP9fivmBqI', 'https://www.youtube.com/redirect?q=https://example.com', 'https://www.youtube.com/watch?v=invalid']) {
+    assert.equal(videoSource.youtubeSourceUrl(url), null)
+    assert.equal(security.isTrustedExternalUrl(url), false)
+  }
+  assert.equal(security.isTrustedExternalUrl(canonical + '&redirect=https://example.com'), false)
 })
 
 test('job validation rejects malformed options and invalid trim intervals', () => {
@@ -263,6 +299,25 @@ test('saved provider keys remain in main and migrate away from legacy encoding',
     settingsStore.replaceApiKey('zernioApiKey', 'dummy-social-value')
     assert.equal(settingsStore.publicSettings(settingsStore.loadSettings()).zernioConfigured, true)
     assert.equal(JSON.stringify(settingsStore.publicSettings(settingsStore.loadSettings())).includes('dummy-social-value'), false)
+    const editorialPublic = settingsStore.publicSettings(settingsStore.loadSettings())
+    assert.equal(editorialPublic.jevEnabled, 'off', 'Jev review is an opt-in beta')
+    assert.equal(editorialPublic.jevVisualContext, 'off')
+    assert.equal(editorialPublic.sourceContextWebResearch, 'off', 'web research is an opt-in beta')
+    assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'false')
+    assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).JEV_ENABLED, 'false')
+    settingsStore.savePublicSettings({ ...editorialPublic, sourceContextWebResearch: 'on' })
+    assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'true')
+    settingsStore.savePublicSettings({ ...editorialPublic, sourceContextWebResearch: 'off' })
+    assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'false')
+    assert.throws(() => settingsStore.savePublicSettings({ ...editorialPublic, sourceContextWebResearch: 'bad' }))
+    assert.equal(Object.hasOwn(editorialPublic, 'typesafeConfigured'), false)
+    settingsStore.savePublicSettings({ ...editorialPublic, jevVisualContext: 'on', jevEnabled: 'off' })
+    const workerSettings = settingsStore.getSettingsForBridge(settingsStore.loadSettings())
+    assert.equal(workerSettings.OPENROUTER_API_KEY, 'dummy-provider-value')
+    assert.equal(workerSettings.JEV_ENABLED, 'false')
+    assert.equal(workerSettings.JEV_VISUAL_CONTEXT, 'true')
+    assert.equal(Object.hasOwn(workerSettings, 'TYPESAFE_API_KEY'), false)
+    assert.throws(() => settingsStore.replaceApiKey('typesafeApiKey', 'unused'), /Invalid API key/)
     settingsStore.replaceApiKey('openrouterApiKey', '')
     assert.equal(settingsStore.publicSettings(settingsStore.loadSettings()).openrouterConfigured, false)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
@@ -313,6 +368,55 @@ test('settings migration writes a private file', () => {
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
+test('engine checks distinguish missing modules, models, contracts and timeouts with actionable repairs', async () => {
+  let result = { status: 'ok' }
+  let rejection = null
+  const app = { isPackaged: false }
+  const execFile = () => {}
+  execFile[require('node:util').promisify.custom] = async () => {
+    if (rejection) throw rejection
+    return { stdout: JSON.stringify(result), stderr: 'private traceback must never reach the renderer' }
+  }
+  const runner = loadSource('pipeline-runner.ts', {
+    electron: { app }, child_process: { execFile },
+    './settings-store': {}, './logger': {}, '../shared/job-output': {},
+    '../shared/job-contract': jobContract, './run-history': {}, './tools': {}
+  })
+  const check = () => runner.validatePython('/project with spaces/.venv/bin/python', '/project with spaces/engine')
+  assert.equal((await check()).ok, true)
+  result = { status: 'dependency', module: 'cv2' }
+  const missing = await check()
+  assert.match(missing.error, /cv2/)
+  assert.match(missing.hint, /Re-check/)
+  assert.ok(missing.repairCommand.includes("'/project with spaces/.venv/bin/python' -m pip install --require-hashes"))
+  assert.ok(missing.repairCommand.endsWith(`-r '${path.join('/project with spaces/engine', 'requirements.lock')}'`))
+  result = { status: 'dependency', module: 'private/secret' }
+  assert.doesNotMatch((await check()).error, /private/)
+  result = { status: 'dependency', module: 'clip_engine' }
+  assert.match((await check()).hint, /same BridgeClip version/)
+  result = { status: 'model' }
+  const model = await check()
+  assert.match(model.hint, /face_detection_yunet_2023mar.onnx/)
+  assert.equal(model.repairCommand, null)
+  result = { status: 'contract' }
+  assert.match((await check()).error, /incompatible/)
+  result = { status: 'initialization' }
+  assert.match((await check()).error, /initialize/)
+  rejection = { killed: true, stderr: 'private traceback' }
+  const timeout = await check()
+  assert.match(timeout.error, /timed out/)
+  assert.equal(timeout.repairCommand, null)
+  rejection = { code: 'ENOENT' }
+  assert.match((await check()).hint, /Python path/)
+  app.isPackaged = true
+  rejection = null
+  result = { status: 'dependency', module: 'cv2' }
+  const packaged = await check()
+  assert.match(packaged.hint, /Reinstall BridgeClip/)
+  assert.equal(packaged.repairCommand, null)
+  assert.doesNotMatch(JSON.stringify(packaged), /private traceback/)
+})
+
 test('Windows resolves the saved legacy Python default without replacing an installed or explicit interpreter', () => {
   const winProcess = Object.create(process)
   Object.defineProperty(winProcess, 'platform', { value: 'win32' })
@@ -323,7 +427,7 @@ test('Windows resolves the saved legacy Python default without replacing an inst
   const present = new Set()
   let python3Runnable = false
   let saved = null
-  const app = { isPackaged: false, getPath: (name) => name === 'home' ? 'C:\\Users\\Test' : userData }
+  const app = { isPackaged: false, isReady: () => false, getPath: (name) => name === 'home' ? 'C:\\Users\\Test' : userData }
   const store = loadSource('settings-store.ts', {
     electron: { app, safeStorage: {} }, path: path.win32,
     fs: {
@@ -525,12 +629,13 @@ test('pipeline preserves split JSON messages and protects the job identity', asy
   })
   const window = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (channel, data) => sent.push({ channel, data }) } }
   runner.startClipJob('trusted-job', {
-    videoUrl: '/tmp/video.mp4', videoSpeed: 1.5, clippingMode: 'advanced', plannerModel: 'custom/planner', transcriptionModel: 'custom/speech',
+    videoUrl: '/tmp/video.mp4', debugCapture: true, videoSpeed: 1.5, clippingMode: 'advanced', plannerModel: 'custom/planner', transcriptionModel: 'custom/speech',
     plannerCapabilities: { maxOutputTokens: 8192, supportsImages: false, inputPrice: .000001, outputPrice: .000005 }
   }, window, undefined, '/tmp/queued-output')
   const forwarded = JSON.parse(workerInput)
   assert.equal(forwarded.video_speed, 1.5)
-  assert.equal(forwarded.contract_version, 2)
+  assert.equal(forwarded.debug_capture, undefined)
+  assert.equal(forwarded.contract_version, 3)
   assert.equal(forwarded.output_dir, '/tmp/queued-output')
   assert.equal(forwarded.clipping_mode, 'advanced')
   assert.equal(forwarded.planner_model, 'custom/planner')
@@ -715,4 +820,151 @@ test('crash logs keep safe diagnostics without leaking credentials from errors',
   assert.equal(lines[1].frame, '')
   assert.doesNotMatch(JSON.stringify(lines), /sk-or-v1-secretcredential|\/Users\/dev/)
   fs.rmSync(logDir, { recursive: true, force: true })
+})
+
+
+test('Jev migration drops the separate TypeSafe key without decrypting it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-jev-migration-'))
+  const userData = path.join(root, 'userdata')
+  fs.mkdirSync(userData)
+  const file = path.join(userData, 'settings.json')
+  fs.writeFileSync(file, JSON.stringify({ version: 8, outputDirectory: root,
+    openrouterApiKey: { scheme: 'safeStorage', value: Buffer.from('active-openrouter').toString('base64') },
+    typesafeApiKey: { scheme: 'safeStorage', value: Buffer.from('obsolete-typesafe').toString('base64') },
+    typesafeVisualContext: 'on'
+  }))
+  const store = loadSource('settings-store.ts', { electron: {
+    app: { getPath: (name) => ({ home: root, appData: root, userData }[name]), isReady: () => true },
+    safeStorage: { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'gnome_libsecret', encryptString: (value) => Buffer.from(value),
+      decryptString: (value) => { assert.notEqual(value.toString(), 'obsolete-typesafe'); return value.toString() } }
+  } })
+  try {
+    const loaded = store.loadSettings()
+    assert.equal(loaded.openrouterApiKey, 'active-openrouter')
+    assert.equal(loaded.jevEnabled, 'off')
+    assert.equal(loaded.jevVisualContext, 'on')
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(saved.version, 12)
+    assert.equal(Object.hasOwn(saved, 'typesafeApiKey'), false)
+    assert.equal(Object.hasOwn(saved, 'typesafeVisualContext'), false)
+    assert.equal(Object.hasOwn(loaded, 'typesafeApiKey'), false)
+    assert.equal(Object.hasOwn(store.getSettingsForBridge(loaded), 'TYPESAFE_API_KEY'), false)
+    assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevEnabled: 'invalid' }), /Invalid Jev/)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+
+test('Jev thresholds migrate, validate atomically, persist, and reach the worker', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-jev-settings-'))
+  const file = path.join(root, 'settings.json')
+  fs.writeFileSync(file, JSON.stringify({ version: 10, outputDirectory: root }))
+  const store = loadSource('settings-store.ts', { electron: {
+    app: { getPath: () => root, isReady: () => true },
+    safeStorage: { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'gnome_libsecret' }
+  } })
+  try {
+    const keys = ['jevThreshold', 'jevSelfContainedThreshold', 'jevFaithfulToSourceThreshold', 'jevTitleSupportedThreshold', 'jevSponsorThreshold', 'jevEvidenceThreshold', 'jevCutThreshold']
+    const env = ['JEV_THRESHOLD', 'JEV_SELF_CONTAINED_THRESHOLD', 'JEV_FAITHFUL_TO_SOURCE_THRESHOLD', 'JEV_TITLE_SUPPORTED_THRESHOLD', 'JEV_SPONSOR_THRESHOLD', 'JEV_EVIDENCE_THRESHOLD', 'JEV_CUT_THRESHOLD']
+    const defaults = [.75, .70, .65, .70, .80, .50, .95]
+    const initial = store.publicSettings(store.loadSettings())
+    keys.forEach((key, i) => assert.equal(Number(initial[key]), defaults[i]))
+    assert.equal(JSON.parse(fs.readFileSync(file)).version, 12)
+    const values = ['0', '1', '0.61', '0.72', '0.83', '0.54', '0.96']
+    const saved = store.savePublicSettings({ ...initial, ...Object.fromEntries(keys.map((key, i) => [key, values[i]])) })
+    const worker = store.getSettingsForBridge(store.loadSettings())
+    keys.forEach((key, i) => { assert.equal(saved[key], values[i]); assert.equal(worker[env[i]], values[i]) })
+    for (const value of ['0.0000001', '1e-7', '5e-324', '1e-4']) {
+      const tiny = store.savePublicSettings({ ...saved, jevThreshold: value })
+      assert.equal(Number(tiny.jevThreshold), Number(value))
+      assert.equal(store.loadSettings().jevThreshold, tiny.jevThreshold)
+      store.savePublicSettings({ ...tiny, customVocabulary: 'round trip' })
+      assert.equal(store.loadSettings().jevThreshold, tiny.jevThreshold)
+    }
+    store.savePublicSettings(saved)
+    const before = fs.readFileSync(file, 'utf8')
+    for (const key of keys) for (const value of ['', 'NaN', 'Infinity', '-0.01', '1.01', '75%', '1e2', '1e999', '-1e-7', 0.75]) {
+      assert.throws(() => store.savePublicSettings({ ...saved, [key]: value }), /Invalid/)
+      assert.equal(fs.readFileSync(file, 'utf8'), before)
+    }
+    const olderClient = { ...saved }; keys.forEach(key => delete olderClient[key])
+    store.savePublicSettings(olderClient)
+    keys.forEach((key, i) => assert.equal(store.loadSettings()[key], values[i]))
+    store.savePublicSettings({ ...saved, ...Object.fromEntries(keys.map((key, i) => [key, String(defaults[i])])) })
+    keys.forEach((key, i) => assert.equal(Number(store.loadSettings()[key]), defaults[i]))
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+
+function betaSettingsStore(root) {
+  const userData = path.join(root, 'userdata')
+  fs.mkdirSync(userData, { recursive: true })
+  const store = loadSource('settings-store.ts', { electron: {
+    app: { getPath: (name) => ({ home: root, appData: root, userData }[name]), isReady: () => true },
+    safeStorage: { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'gnome_libsecret',
+      encryptString: (value) => Buffer.from(value), decryptString: (value) => value.toString() }
+  } })
+  return { store, file: path.join(userData, 'settings.json') }
+}
+
+test('Jev review and web research stay opt-in across upgrades, downgrades and missing fields', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-beta-optin-'))
+  const { store, file } = betaSettingsStore(root)
+  const key = { scheme: 'safeStorage', value: Buffer.from('kept-openrouter').toString('base64') }
+  try {
+    assert.equal(store.loadSettings().jevEnabled, 'off', 'a fresh install starts with Jev off')
+    assert.equal(store.loadSettings().sourceContextWebResearch, 'off', 'a fresh install starts with research off')
+    // Earlier builds saved "on" as a default, not an explicit opt-in; main (v7) omits the fields.
+    for (const version of [undefined, 7, 8, 9, 10, 11]) {
+      fs.writeFileSync(file, JSON.stringify({ ...(version ? { version } : {}), outputDirectory: root, openrouterApiKey: key,
+        ...(version && version >= 9 ? { jevEnabled: 'on', sourceContextWebResearch: 'on' } : {}) }))
+      const loaded = store.loadSettings()
+      assert.equal(loaded.openrouterApiKey, 'kept-openrouter')
+      assert.equal(loaded.jevEnabled, 'off', `v${version} loads Jev off`)
+      assert.equal(loaded.sourceContextWebResearch, 'off', `v${version} loads research off`)
+      assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 12)
+    }
+    // An explicit opt-in on the current version survives a reload.
+    store.savePublicSettings({ ...store.publicSettings(store.loadSettings()), jevEnabled: 'on', sourceContextWebResearch: 'on' })
+    assert.equal(store.loadSettings().jevEnabled, 'on')
+    assert.equal(store.getSettingsForBridge(store.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'true')
+    // Opt out, downgrade to a build that drops the fields, then upgrade again: still off.
+    store.savePublicSettings({ ...store.publicSettings(store.loadSettings()), jevEnabled: 'off', sourceContextWebResearch: 'off' })
+    const downgraded = JSON.parse(fs.readFileSync(file, 'utf8'))
+    for (const field of ['jevEnabled', 'sourceContextWebResearch', 'jevVisualContext']) delete downgraded[field]
+    fs.writeFileSync(file, JSON.stringify({ ...downgraded, version: 7 }))
+    assert.equal(store.loadSettings().jevEnabled, 'off')
+    assert.equal(store.loadSettings().sourceContextWebResearch, 'off')
+    // A current file missing the fields also loads them off.
+    fs.writeFileSync(file, JSON.stringify({ version: 12, outputDirectory: root, openrouterApiKey: key }))
+    assert.equal(store.loadSettings().jevEnabled, 'off')
+    assert.equal(store.loadSettings().sourceContextWebResearch, 'off')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('one unreadable Jev field falls back to its default without hiding saved keys', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-jev-fallback-'))
+  const { store, file } = betaSettingsStore(root)
+  const key = { scheme: 'safeStorage', value: Buffer.from('kept-openrouter').toString('base64') }
+  try {
+    fs.writeFileSync(file, JSON.stringify({ version: 12, outputDirectory: root, openrouterApiKey: key, zernioApiKey: '',
+      jevEnabled: 'maybe', jevVisualContext: 7, sourceContextWebResearch: 'on',
+      jevThreshold: '1.5', jevSelfContainedThreshold: 'NaN', jevFaithfulToSourceThreshold: 0.6, jevTitleSupportedThreshold: 'x'.repeat(9000),
+      jevSponsorThreshold: '0.9', jevEvidenceThreshold: '-1', jevCutThreshold: '0.97' }))
+    const loaded = store.loadSettings()
+    assert.equal(loaded.openrouterApiKey, 'kept-openrouter')
+    assert.equal(store.publicSettings(loaded).openrouterConfigured, true)
+    assert.equal(loaded.jevEnabled, 'off')
+    assert.equal(loaded.jevVisualContext, 'off')
+    assert.equal(loaded.sourceContextWebResearch, 'on', 'valid neighbouring fields are kept')
+    assert.equal(loaded.jevThreshold, '0.75')
+    assert.equal(loaded.jevSelfContainedThreshold, '0.7')
+    assert.equal(loaded.jevFaithfulToSourceThreshold, '0.65')
+    assert.equal(loaded.jevTitleSupportedThreshold, '0.7')
+    assert.equal(loaded.jevSponsorThreshold, '0.9')
+    assert.equal(loaded.jevEvidenceThreshold, '0.5')
+    assert.equal(loaded.jevCutThreshold, '0.97')
+    // Saving still validates strictly.
+    assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevThreshold: '2' }), /Invalid Jev threshold/)
+    assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevEnabled: 'maybe' }), /Invalid Jev/)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
