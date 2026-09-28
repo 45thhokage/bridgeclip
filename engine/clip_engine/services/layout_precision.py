@@ -33,6 +33,8 @@ def select_expression(indices):
 
 def confirmed_cuts(markers, frames, duration_ms, evidence):
     """Strong cuts or abrupt, sustained composition changes; keep weak hints for review."""
+    frames = sorted(frames, key=lambda f: f.t_ms)
+    times = [f.t_ms for f in frames]
     accepted = []
     for i, marker in enumerate(markers):
         t, score = marker['at_ms'], marker['score']
@@ -41,8 +43,9 @@ def confirmed_cuts(markers, frames, duration_ms, evidence):
         # Flash on/off pairs and very brief inserts should not cause crop flicker.
         if any(abs(t - other['at_ms']) < 150 for other in markers[max(0, i-1):i+2] if other is not marker and other['score'] >= max(.12, score * .6)):
             continue
-        before = [f for f in frames if t - 250 <= f.t_ms < t]
-        after = [f for f in frames if t <= f.t_ms <= t + 350]
+        first = bisect_left(times, t)
+        before = frames[bisect_left(times, t - 250):first]
+        after = frames[first:bisect_right(times, t + 350)]
         stable = len(after) >= 3 and after[-1].t_ms - after[0].t_ms >= 180
         changed = False
         if before and stable:
@@ -63,10 +66,12 @@ def confirmed_cuts(markers, frames, duration_ms, evidence):
 
 def align_boundaries(cuts, markers, duration_ms):
     """Refine existing evidence to a nearby observed change without inventing a cut."""
+    usable = sorted((m for m in markers if 0 < m['at_ms'] < duration_ms), key=lambda m: m['at_ms'])
+    times = [m['at_ms'] for m in usable]
     aligned = {0, duration_ms}
     for t in cuts:
         if not 0 < t < duration_ms:
             continue
-        nearby = [m for m in markers if 0 < m['at_ms'] < duration_ms and abs(m['at_ms'] - t) <= 250]
+        nearby = usable[bisect_left(times, t - 250):bisect_right(times, t + 250)]
         aligned.add(min(nearby, key=lambda m: (abs(m['at_ms'] - t), -m['score']))['at_ms'] if nearby else t)
     return sorted(aligned)

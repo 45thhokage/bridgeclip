@@ -165,3 +165,18 @@ def test_sparse_detail_selection_bounds_input_and_preserves_selected_frames(tmp_
     assert len(commands) == 1
     assert [f.t_ms for f in frames] == pytest.approx([scan['frames'][i] for i in [2, 3, 4]])
     assert result_scan['frames'] == scan['frames']
+
+
+def test_cut_confirmation_stays_fast_for_long_windows():
+    import random
+    import time
+    from clip_engine.services.layout_precision import align_boundaries
+    duration = 60 * 60 * 1000
+    frames = [frame(t) for t in range(0, duration, 250)]
+    random.seed(1)
+    markers = sorted(({'at_ms': random.uniform(0, duration), 'score': random.uniform(.025, .1)} for _ in range(5000)),
+                     key=lambda m: m['at_ms'])
+    started = time.perf_counter()
+    confirmed_cuts(markers, frames, duration, frame_layout_evidence)
+    align_boundaries(list(range(0, duration, 5000)), markers, duration)
+    assert time.perf_counter() - started < 1
