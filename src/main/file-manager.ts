@@ -27,6 +27,8 @@ export interface JobHistoryEntry {
 }
 
 export const LIBRARY_FAVORITE_FILE = '.bridgeclip-favorite'
+/** A run renamed for deletion; never listed, and removed at startup if a deletion was interrupted. */
+export const DELETING_RUN_PREFIX = '.deleting-'
 export const manualPostedFile = (clipIndex: number): string => `.bridgeclip-posted-${clipIndex}`
 export function isManuallyPosted(outputDir: string, clipIndex: number): boolean {
   try {
@@ -81,7 +83,7 @@ export async function getJobHistory(baseDir: string, activeJobIds: ReadonlySet<s
   const entries: JobHistoryEntry[] = []
 
   try {
-    const dirs = (await readdir(baseDir, { withFileTypes: true })).filter((d) => d.isDirectory())
+    const dirs = (await readdir(baseDir, { withFileTypes: true })).filter((d) => d.isDirectory() && !d.name.startsWith(DELETING_RUN_PREFIX))
 
     for (const dir of dirs) {
       const outputPath = join(baseDir, dir.name, 'job_output.json')

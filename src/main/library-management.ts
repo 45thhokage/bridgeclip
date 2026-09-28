@@ -1,14 +1,17 @@
 import { editorBusy } from './clip-editor'
-import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
+import { closeSync, constants, type Dirent, fstatSync, lstatSync, mkdtempSync, openSync, readSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs'
+import { readdir, rm } from 'fs/promises'
 import { basename, dirname, isAbsolute, join, resolve } from 'path'
-import { getJobOutput, isManuallyPosted, isRunFavorite, LIBRARY_FAVORITE_FILE, manualPostedFile, removeRunThumbnails } from './file-manager'
+import { DELETING_RUN_PREFIX, getJobOutput, isManuallyPosted, isRunFavorite, LIBRARY_FAVORITE_FILE, manualPostedFile, removeRunThumbnails } from './file-manager'
+import { logger } from './logger'
 import { parseJobOutput, type JobOutput } from '../shared/job-output'
 import { parseEditorProject } from '../shared/clip-editor'
 import { dismissJob, liveJobIds } from './job-manager'
 import { loadSettings } from './settings-store'
 
 /** Only a completed, immediate child of the configured Library can be changed. */
-async function checkedRun(raw: unknown): Promise<{ check: () => string; output: JobOutput }> {
+async function checkedRun(raw: unknown): Promise<{ check: () => string; output: JobOutput; library: string; identity: { dev: number; ino: number } }> {
   const librarySetting = loadSettings().outputDirectory
   if (typeof raw !== 'string' || !isAbsolute(raw) || raw.includes('\0')) throw new Error('Choose a run in your Library.')
   const library = realpathSync(librarySetting)
@@ -29,7 +32,7 @@ async function checkedRun(raw: unknown): Promise<{ check: () => string; output: 
   const output = await getJobOutput(path, library)
   if (!output) throw new Error('This completed run is no longer available in your Library.')
   check()
-  return { check, output }
+  return { check, output, library, identity: { dev: original.dev, ino: original.ino } }
 }
 
 export async function setLibraryFavorite(outputDir: unknown, favorite: unknown): Promise<boolean> {
@@ -45,15 +48,52 @@ export async function setLibraryFavorite(outputDir: unknown, favorite: unknown):
   return favorite
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const isDeletingRun = (name: string): boolean => name.startsWith(DELETING_RUN_PREFIX) && UUID.test(name.slice(DELETING_RUN_PREFIX.length))
+
 export async function deleteLibraryRun(outputDir: unknown): Promise<void> {
-  const { check, output } = await checkedRun(outputDir)
+  const { check, output, library, identity } = await checkedRun(outputDir)
+  removeRunThumbnails(check(), output)
+  // Rename right after the final check (no await in between), then delete.
+  // The Library never lists a half-deleted run, a locked file on Windows
+  // fails the rename before anything is removed, and a crash leaves a hidden
+  // folder that the next startup finishes removing.
   const path = check()
-  removeRunThumbnails(path, output)
-  check()
+  const trash = join(library, `${DELETING_RUN_PREFIX}${randomUUID()}`)
+  renameSync(path, trash)
+  const moved = lstatSync(trash)
+  if (!moved.isDirectory() || moved.isSymbolicLink() || moved.dev !== identity.dev || moved.ino !== identity.ino) {
+    try { renameSync(trash, path) } catch { /* Leave it hidden; startup never removes anything but .deleting-<uuid> folders. */ }
+    throw new Error('The Library run changed. Refresh and try again.')
+  }
+  dismissJob(basename(path))
   // Never follow the manifest's media paths. Remove only this validated run
   // directory; recursive rm unlinks internal symlinks rather than their targets.
-  rmSync(path, { recursive: true })
-  dismissJob(basename(path))
+  try { rmSync(trash, { recursive: true }) } catch {
+    logger.warn('library.delete.cleanup_deferred', { message: 'Some run files could not be removed; they will be removed at the next start.' })
+  }
+}
+
+/**
+ * Finish run deletions interrupted by a crash or a locked file. Only real
+ * directories named .deleting-<uuid> directly inside the Library are removed.
+ */
+export async function sweepDeletingRuns(): Promise<void> {
+  let library: string
+  try { library = realpathSync(loadSettings().outputDirectory) } catch { return }
+  let entries: Dirent[]
+  try { entries = await readdir(library, { withFileTypes: true }) } catch { return }
+  for (const entry of entries) {
+    if (!isDeletingRun(entry.name) || !entry.isDirectory()) continue
+    const path = join(library, entry.name)
+    try {
+      const stat = lstatSync(path)
+      if (!stat.isDirectory() || stat.isSymbolicLink() || dirname(realpathSync(path)) !== library) continue
+      await rm(path, { recursive: true })
+    } catch {
+      logger.warn('library.delete.sweep_failed', { message: 'A run left from an interrupted deletion could not be removed yet.' })
+    }
+  }
 }
 
 export async function setLibraryPosted(outputDir: unknown, clipIndex: unknown, posted: unknown): Promise<boolean> {
@@ -120,7 +160,8 @@ export async function deleteLibraryClips(outputDir: unknown, indices: unknown): 
     // source media, editor previews, metadata or another run's files.
     if (basename(file) !== `${name}.mp4` || realpathSync(dirname(file)) !== canonical) throw new Error('The selected clip is outside its Library run.')
     include(file)
-    include(join(run, `${name}.framing.json`))
+    // Sidecars written next to each clip: framing, captions and upload notes.
+    for (const suffix of ['.framing.json', '.srt', '.youtube.txt']) include(join(run, `${name}${suffix}`))
     include(join(run, manualPostedFile(clip.clip_index)))
   }
   const changes: [string, Record<string, unknown>][] = []

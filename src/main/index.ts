@@ -14,6 +14,7 @@ import { cleanStaleWorkspaces, stopAllJobsForQuit } from './pipeline-runner'
 import { cancelQueuedJobsForQuit } from './job-manager'
 import { cancelZernioConnect } from './zernio/service'
 import { isAutomationMedia, startAutomationScheduler } from './automations'
+import { sweepDeletingRuns } from './library-management'
 
 // Catch crashes anywhere in the main process so we get a log line instead
 // of a silent exit. Without these, an unhandled rejection in an IPC handler
@@ -233,6 +234,7 @@ app.whenReady().then(() => {
 
   registerIpcHandlers(() => mainWindow)
   const stopAutomations = startAutomationScheduler()
+  void sweepDeletingRuns()
   app.on('before-quit', stopAutomations)
   createWindow()
   initAutoUpdater(() => mainWindow)

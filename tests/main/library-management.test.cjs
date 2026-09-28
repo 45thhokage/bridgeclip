@@ -93,6 +93,54 @@ test('deletion removes every run file and its cached previews, preserving other 
     assert.equal(fs.readFileSync(outside, 'utf8'), 'original')
     assert.equal(fs.readFileSync(path.join(sibling, 'keep.txt'), 'utf8'), 'keep')
     assert.deepEqual(f.dismissed, ['completed-run'])
+    assert.deepEqual(fs.readdirSync(f.library), ['other-run'], 'no deletion folder is left behind')
+  } finally { f.cleanup() }
+})
+
+test('run deletion renames first: an interrupted removal is hidden from the Library and finished at startup', async () => {
+  let failRemoval = true
+  const f = fixture({ fs: { ...fs, rmSync: (target, options) => {
+    if (failRemoval && path.basename(target).startsWith('.deleting-')) throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+    return fs.rmSync(target, options)
+  } } })
+  try {
+    const sibling = path.join(f.library, 'other-run')
+    fs.mkdirSync(sibling); fs.writeFileSync(path.join(sibling, 'job_output.json'), JSON.stringify(f.output))
+    await f.main.deleteLibraryRun(f.run)
+    assert.equal(fs.existsSync(f.run), false)
+    const hidden = fs.readdirSync(f.library).filter((name) => name.startsWith('.deleting-'))
+    assert.equal(hidden.length, 1, 'the renamed run waits for cleanup')
+    assert.deepEqual((await f.main.files.getJobHistory(f.library)).map((entry) => entry.jobId), ['other-run'], 'the listing ignores it')
+    assert.deepEqual(f.dismissed, ['completed-run'])
+
+    // The sweep removes only real .deleting-<uuid> folders directly in the Library.
+    const outside = path.join(f.dir, 'outside'); fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, 'keep.txt'), 'keep')
+    const decoys = ['.deleting-not-a-uuid', '.deleting-00000000-0000-0000-0000-00000000000g']
+    for (const name of decoys) fs.mkdirSync(path.join(f.library, name))
+    fs.writeFileSync(path.join(f.library, '.deleting-11111111-1111-1111-1111-111111111111'), 'a file')
+    if (directoryLinkType) fs.symlinkSync(outside, path.join(f.library, '.deleting-22222222-2222-2222-2222-222222222222'), directoryLinkType)
+    fs.mkdirSync(path.join(sibling, '.deleting-33333333-3333-3333-3333-333333333333'))
+    failRemoval = false
+    await f.main.sweepDeletingRuns()
+    assert.equal(fs.existsSync(path.join(f.library, hidden[0])), false)
+    for (const name of decoys) assert.ok(fs.existsSync(path.join(f.library, name)), name)
+    assert.ok(fs.existsSync(path.join(f.library, '.deleting-11111111-1111-1111-1111-111111111111')))
+    assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'keep', 'a linked folder is never followed')
+    assert.ok(fs.existsSync(path.join(sibling, '.deleting-33333333-3333-3333-3333-333333333333')), 'only the Library root is swept')
+    assert.equal(fs.readFileSync(path.join(sibling, 'job_output.json'), 'utf8'), JSON.stringify(f.output))
+  } finally { f.cleanup() }
+})
+
+test('a run that cannot be renamed (for example, a file open on Windows) is left untouched', async () => {
+  const f = fixture({ fs: { ...fs, renameSync: (from, to) => {
+    if (path.basename(to).startsWith('.deleting-')) throw Object.assign(new Error('resource busy'), { code: 'EBUSY' })
+    return fs.renameSync(from, to)
+  } } })
+  try {
+    await assert.rejects(f.main.deleteLibraryRun(f.run), /busy/)
+    assert.equal(fs.readFileSync(f.clip, 'utf8'), 'clip bytes')
+    assert.deepEqual(fs.readdirSync(f.library), ['completed-run'])
+    assert.deepEqual(f.dismissed, [])
   } finally { f.cleanup() }
 })
 
@@ -155,7 +203,7 @@ function clipFixture(mocks = {}) {
   f.output.clips = [0, 2, 9].map(clip_index => ({ ...first, clip_index, s3_url: path.join(f.run, `clip_${String(clip_index).padStart(2, '0')}.mp4`) }))
   for (const clip of f.output.clips) {
     fs.writeFileSync(clip.s3_url, `clip ${clip.clip_index}`)
-    fs.writeFileSync(clip.s3_url.replace('.mp4', '.framing.json'), '{}')
+    for (const suffix of ['.framing.json', '.srt', '.youtube.txt']) fs.writeFileSync(clip.s3_url.replace('.mp4', suffix), 'sidecar')
   }
   f.output.editor_project = true
   f.output.custom_metadata = { keep: 'complete raw metadata' }
@@ -183,9 +231,9 @@ test('selected clip deletion preserves sources, unselected files, metadata, post
     assert.deepEqual(output.clips.map(c => c.clip_index), [0])
     assert.equal(output.total_clips, 1)
     assert.equal(fs.existsSync(path.join(f.run, 'clip_02.mp4')), false)
-    assert.equal(fs.existsSync(path.join(f.run, 'clip_09.framing.json')), false)
+    for (const name of ['clip_09.framing.json', 'clip_02.srt', 'clip_09.srt', 'clip_02.youtube.txt', 'clip_09.youtube.txt']) assert.equal(fs.existsSync(path.join(f.run, name)), false, name)
     assert.equal(fs.readFileSync(path.join(f.run, 'clip_00.mp4'), 'utf8'), 'clip 0')
-    assert.ok(fs.existsSync(path.join(f.run, 'clip_00.framing.json')))
+    for (const name of ['clip_00.framing.json', 'clip_00.srt', 'clip_00.youtube.txt']) assert.ok(fs.existsSync(path.join(f.run, name)), name)
     assert.equal(fs.readFileSync(copy, 'utf8'), 'clip 2')
     for (const name of ['editor-source.mp4', 'editor-preview.mp4', 'framing-source.mp4', 'transcript.json']) assert.equal(fs.readFileSync(path.join(f.run, name), 'utf8'), 'preserved')
     const raw = JSON.parse(fs.readFileSync(path.join(f.run, 'job_output.json')))
