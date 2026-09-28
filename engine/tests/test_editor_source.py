@@ -9,11 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from clip_engine.config import get_settings
 from clip_engine.services import manual_editor as editor
 
 
 @pytest.fixture
-def project(tmp_path):
+def project(tmp_path, monkeypatch):
+    # editor_runner.py sets LOCAL_MODE, so previews use the bundled LGPL
+    # encoders (VideoToolbox/OpenH264), not the server's x264 settings.
+    monkeypatch.setattr(get_settings(), 'local_mode', True)
     run = tmp_path / 'run'
     run.mkdir()
     def video(name, size='320x180', duration='2', audio=True):

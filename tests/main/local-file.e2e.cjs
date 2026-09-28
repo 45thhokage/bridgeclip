@@ -5,10 +5,13 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { buildApp, launchApp, ROOT } = require('../zernio/support/electron-app.cjs')
-const FFMPEG = fs.existsSync(path.join(ROOT, 'engine-bin', 'ffmpeg')) ? path.join(ROOT, 'engine-bin', 'ffmpeg') : 'ffmpeg'
+const { buildApp, launchApp } = require('../zernio/support/electron-app.cjs')
+const { editorTools } = require('./editor-e2e-tools.cjs')
 
 test('Electron authorizes local media and supports ranges, playback and seeking', async (t) => {
+  // The shipped LGPL FFmpeg has no x264, so pick an H.264 encoder by availability.
+  const tools = editorTools(t)
+  if (!tools) return
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-media-e2e-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const userDataDir = path.join(root, 'user-data')
@@ -23,9 +26,10 @@ test('Electron authorizes local media and supports ranges, playback and seeking'
   // Exceed Chromium's initial media buffer so playing/seeking needs another
   // range request. Tiny fixtures miss the nonstandard-protocol read failure.
   const video = path.join(library, 'Playback #1 100% café.mp4')
-  execFileSync(FFMPEG, [
+  const quality = tools.encoder.includes('libx264') ? ['-crf', '8'] : ['-b:v', '10M']
+  execFileSync(tools.ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30',
-    '-t', '12', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '8',
+    '-t', '12', ...tools.encoder, ...quality,
     '-pix_fmt', 'yuv420p', '-movflags', '+faststart', video
   ])
   assert.ok(fs.statSync(video).size > 4 * 1024 * 1024)
