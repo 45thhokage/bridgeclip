@@ -14,7 +14,7 @@ import httpx
 from clip_engine.services.clip_editor import TimeMap, preserve_intervals
 from clip_engine.services.jev_service import choice, noul
 from clip_engine.services.editorial_evidence import transcript_row
-from clip_engine.services.openrouter import chat_completion, json_schema_format, message_text
+from clip_engine.services.openrouter import OpenRouterError, chat_completion, json_schema_format, message_text
 from clip_engine.services.sponsor_policy import SPONSOR_ALLOWED, SPONSOR_EXCLUDED, SPONSOR_DISCOVERY_RULE
 
 # Clip eligibility and destructive omissions have different risk thresholds.
@@ -27,6 +27,8 @@ SPONSOR_PASS = .80
 EVIDENCE_PASS = .50
 CUT_PASS = .95
 MAX_REPAIRS = 2
+# Boundary repairs per run (each is one OpenRouter request), independent of provider speed.
+MAX_REPAIR_REQUESTS = 8
 MAX_CUTS = 24
 REPAIR_TOKEN_LIMITS = (4096, 8192)
 # Judge a standalone excerpt, not whether it reproduces the entire talk or proves
@@ -66,17 +68,43 @@ class CoherenceRejected(Exception):
     """A proposed clip could not establish a coherent, supported edit."""
 
 
+# Jev statuses meaning the provider did not answer, versus review limits.
+UNAVAILABLE_STATUSES = {'disabled', 'unavailable', 'out_of_credits'}
+LIMIT_STATUSES = {'budget_exhausted', 'evidence_limit'}
+TURN_OFF_JEV = 'or turn off Jev review in Settings → TypeSafe Jev and re-run.'
+
+
 def no_approved_clips_message(reports):
-    """Do not mistake incomplete review infrastructure for unsuitable content."""
-    incomplete = 0
+    """Do not mistake incomplete review infrastructure for unsuitable content.
+
+    Opting into review never falls back to unreviewed clips; the message says
+    why nothing was approved and how to proceed.
+    """
+    incomplete = unavailable = reviewed = credits = 0
     for report in reports:
         trace = report.get('coherence', {})
         repairs = trace.get('repairs', [])
         attempts = trace.get('attempts', [])
         last = (attempts[-1].get('judgment') or {}) if attempts else {}
         policy = (attempts[-1].get('policy_judgment') or {}) if attempts else {}
-        if (repairs and repairs[-1]['status'] in {'truncated', 'invalid_proposal', 'ungrounded_diagnosis', 'unavailable', 'budget_exhausted', 'evidence_limit'}) or any(j.get('status') in {'disabled', 'unavailable', 'budget_exhausted', 'evidence_limit'} for j in (last, policy)):
+        statuses = {j.get('status') for j in (last, policy)}
+        sent = [j for a in attempts for j in (a.get('judgment'), a.get('policy_judgment')) if j]
+        if sent:
+            reviewed += 1
+            # Jev never answered for this candidate: nothing about it was judged.
+            if not any(j.get('status') == 'success' for j in sent) and statuses & UNAVAILABLE_STATUSES:
+                unavailable += 1
+        if 'out_of_credits' in statuses or (repairs and repairs[-1]['status'] == 'out_of_credits'):
+            credits += 1
+        if (repairs and repairs[-1]['status'] in {'truncated', 'invalid_proposal', 'ungrounded_diagnosis', 'unavailable', 'out_of_credits', *LIMIT_STATUSES}) or statuses & (UNAVAILABLE_STATUSES | LIMIT_STATUSES):
             incomplete += 1
+    if credits:
+        return (f'No clips were approved. OpenRouter reported insufficient credits for Jev review, so {credits} of {len(reports)} '
+                'candidates could not be reviewed. No clip was forced. Add OpenRouter credits and re-run, ' + TURN_OFF_JEV)
+    if reviewed and unavailable == reviewed:
+        return (f'No clips were approved because Jev review was unavailable for every candidate ({unavailable} of {len(reports)}). '
+                'This does not establish that the video has no suitable clips. No clip was forced. '
+                'Retry later, ' + TURN_OFF_JEV)
     if incomplete:
         return (f'No clips were approved. Review could not finish for {incomplete} of {len(reports)} candidates '
                 'because a model response was incomplete, unavailable, or exceeded a review limit. '
@@ -171,6 +199,15 @@ class CoherenceReviewer:
                 'visual_observations': [o for v in self.trace(report)['visual_reviews']
                     for o in v['result'].get('observations', []) if any(x <= o['timestamp_ms'] < y for x, y in keeps)][-12:]}
 
+    @staticmethod
+    def _unapproved_reason(*judgments):
+        statuses = {j['status'] for j in judgments if j}
+        if 'evidence_limit' in statuses:
+            return 'request_size_limit'  # The Jev request exceeded its byte budget.
+        if statuses - {'success'}:
+            return 'review_unavailable'
+        return 'insufficient_or_failed_judgment'
+
     async def judge(self, title, keeps, report, stage):
         state = self.state(title, keeps, report)
         # Missing speech or too much evidence cannot silently become a pass.
@@ -190,12 +227,18 @@ class CoherenceReviewer:
                 self.trace(report)['attempts'].append({'stage': 'candidate_text', 'keeps': [list(p) for p in keeps], 'decision': 'reject', 'evidence': state, 'judgment': judgment, 'policy_judgment': policy, 'reason': 'insufficient_evidence'})
                 state = enriched
                 judgment, policy = await asyncio.gather(self.service.evaluate(state, CORE_QUESTIONS), self.service.evaluate(state, POLICY_QUESTIONS))
-        visual_missing = requires_visual and not state['visual_observations']
+        # The planner's visual flag is a hint. Without opted-in visual context it is
+        # advisory: Jev's own evidence check decides whether the dialogue suffices.
+        visual_unreviewed = requires_visual and not state['visual_observations']
+        visual_missing = visual_unreviewed and self.visual_observer is not None
         accepted = bool(not visual_missing and judgment and policy and policy['status'] == 'success'
                         and approved({'status': judgment['status'], 'answers': {**judgment.get('answers', {}), **policy['answers']}}, [k for k in CLIP_QUESTIONS if k != 'evidence'], self.policy['threshold'], self.policy))
-        self.trace(report)['attempts'].append({'stage': stage, 'keeps': [list(p) for p in keeps],
+        attempt = {'stage': stage, 'keeps': [list(p) for p in keeps],
             'decision': 'accept' if accepted else 'reject', 'evidence': state if bounded else {'title': title or '', 'retained_dialogue': '[Evidence exceeds review limit]'},
-            'judgment': judgment, 'policy_judgment': policy, 'reason': 'approved' if accepted else 'missing_transcript' if not has_speech else 'evidence_limit' if not bounded else 'needs_visual_evidence' if visual_missing else 'insufficient_or_failed_judgment'})
+            'judgment': judgment, 'policy_judgment': policy, 'reason': 'approved' if accepted else 'missing_transcript' if not has_speech else 'evidence_limit' if not bounded else 'needs_visual_evidence' if visual_missing else self._unapproved_reason(judgment, policy)}
+        if visual_unreviewed and not visual_missing:
+            attempt['advisory'] = 'visual_context_not_reviewed'
+        self.trace(report)['attempts'].append(attempt)
         return accepted
 
     async def prepare(self, segment, report):
@@ -258,7 +301,7 @@ class CoherenceReviewer:
                   'repair_round': attempt + 1, 'finish_reason': None, 'reasoning_tokens': None,
                   'cost_usd': None, 'latency_ms': 0, 'proposal': None, 'evidence': {}}
         self.trace(report)['repairs'].append(record)
-        if self.repair_requests >= 24:
+        if self.repair_requests >= MAX_REPAIR_REQUESTS:
             record['status'] = 'budget_exhausted'
             return None
         margin = (60 if attempt == 0 else 180) * 1000
@@ -277,7 +320,8 @@ class CoherenceReviewer:
         state = {'source_context': self.source_context, 'candidate': [segment.start_time_ms, segment.end_time_ms], 'title': segment.summary,
                  'source_segments': rows, 'moment': report.get('moment'), 'judgments': judgments, 'failed_checks': failed_checks,
                  'previous_proposals': [r['proposal'] for r in self.trace(report)['repairs'] if r.get('proposal')]}
-        if not rows or len(rows) > 200 or len(json.dumps(state).encode()) > 30000:
+        user_content = json.dumps(state, ensure_ascii=False)
+        if not rows or len(rows) > 200 or len(user_content.encode()) > 30000:
             record['status'] = 'evidence_limit'
             return None
         record['evidence'] = copy.deepcopy(state)
@@ -307,7 +351,7 @@ class CoherenceReviewer:
                 'You cannot invent speech, facts or footage. Return omit=true if no supported complete excerpt exists. '
                 'Otherwise return the inclusive first/last segment IDs and a factual short title. Jev independently reviews your proposal.'
                 + SPONSOR_DISCOVERY_RULE},
-                {'role': 'user', 'content': json.dumps(state)}],
+                {'role': 'user', 'content': user_content}],
             'response_format': json_schema_format('coherent_clip_repair', REPAIR_SCHEMA)}
         record['request_messages'] = copy.deepcopy(payload['messages'])
         record['request_parameters'] = json.dumps({k: v for k, v in payload.items() if k != 'messages'})
@@ -364,6 +408,10 @@ class CoherenceReviewer:
             return a, b, title.strip()
         except asyncio.CancelledError:
             raise
+        except OpenRouterError as error:
+            if 'out of credits' in str(error).lower():
+                record['status'] = 'out_of_credits'
+            return None
         except Exception:
             return None
         finally:
@@ -387,7 +435,8 @@ class CoherenceReviewer:
             if index < MAX_CUTS:
                 self.trace(report)['attempts'].append({'stage': 'cut', 'keeps': [[start, end]], 'decision': 'allow_cut' if safe else 'restore',
                     'evidence': state if bounded else {'retained_dialogue': '[Omission exceeds review limit]'}, 'judgment': judgment,
-                    'reason': 'approved' if safe else 'split_word' if split_word else 'evidence_limit' if not bounded else 'unapproved_cut'})
+                    'reason': 'approved' if safe else 'split_word' if split_word else 'evidence_limit' if not bounded
+                        else 'unapproved_cut' if judgment['status'] == 'success' else self._unapproved_reason(judgment)})
             if not safe:
                 restore.append((a, b))
                 report.setdefault('prevented_cuts', []).append({'interval': [start, end], 'kind': 'coherence'})

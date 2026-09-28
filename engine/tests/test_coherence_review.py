@@ -282,13 +282,15 @@ def test_persistent_truncation_is_bounded_and_not_reported_as_poor_content(monke
 
 
 def test_truncation_retry_respects_job_budget(monkeypatch):
+    from clip_engine.services.coherence_review import MAX_REPAIR_REQUESTS
+    assert MAX_REPAIR_REQUESTS == 8
     r, _ = reviewer(lambda state, q: False)
-    r.repair_requests = 23
+    r.repair_requests = MAX_REPAIR_REQUESTS - 1
     completion = AsyncMock(return_value=(repair_response('', 'length'), {}))
     monkeypatch.setattr('clip_engine.services.coherence_review.chat_completion', completion)
     audit = report()
     assert not asyncio.run(r.prepare(ClipPlanSegment(3000, 8000, .9, summary='Result'), audit))
-    assert completion.await_count == 1 and r.repair_requests == 24
+    assert completion.await_count == 1 and r.repair_requests == MAX_REPAIR_REQUESTS
     assert audit['coherence']['repairs'][-1]['status'] == 'budget_exhausted'
 
 
@@ -528,3 +530,127 @@ def test_engine_reads_custom_threshold_environment(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.jev_threshold == .83
     assert settings.jev_cut_threshold == .97
+
+
+def test_repairs_are_capped_per_run_not_per_candidate(monkeypatch):
+    from clip_engine.services.coherence_review import MAX_REPAIR_REQUESTS
+    r, _ = reviewer(lambda state, q: False)
+    completion = AsyncMock(return_value=(repair_response(json.dumps({'omit': False, 'start_segment': 0, 'end_segment': 3, 'title': 'Result'})), {}))
+    monkeypatch.setattr('clip_engine.services.coherence_review.chat_completion', completion)
+    for i in range(6):
+        asyncio.run(r.prepare(ClipPlanSegment(3000, 8000, .9, summary=f'Result {i}'), report()))
+    assert completion.await_count == MAX_REPAIR_REQUESTS == r.repair_requests
+
+
+def test_repair_out_of_credits_is_recorded(monkeypatch):
+    from clip_engine.services.coherence_review import no_approved_clips_message
+    from clip_engine.services.openrouter import OpenRouterError
+    r, _ = reviewer(lambda state, q: False)
+    monkeypatch.setattr('clip_engine.services.coherence_review.chat_completion',
+                        AsyncMock(side_effect=OpenRouterError('OpenRouter account is out of credits. Add credits at openrouter.ai/credits.')))
+    audit = report()
+    assert not asyncio.run(r.prepare(ClipPlanSegment(3000, 8000, .9, summary='Result'), audit))
+    assert audit['coherence']['repairs'][-1]['status'] == 'out_of_credits'
+    assert 'insufficient credits' in no_approved_clips_message([audit])
+
+
+@pytest.mark.parametrize('observer', [None, 'empty'])
+def test_visual_flag_is_advisory_without_visual_context(observer):
+    r, _ = reviewer()
+    if observer:
+        r.visual_observer = AsyncMock(return_value={'status': 'unavailable', 'observations': []})
+    audit = report()
+    segment = ClipPlanSegment(0, 11000, .9, summary='Supported result')
+    segment.moment = {'topic': 'Result', 'requires_visual_context': True}
+    accepted = asyncio.run(r.prepare(segment, audit))
+    attempt = audit['coherence']['attempts'][-1]
+    if observer is None:
+        # Visual context is off (the default): the transcript review decides.
+        assert accepted and attempt['reason'] == 'approved'
+        assert attempt['advisory'] == 'visual_context_not_reviewed'
+    else:
+        # The user opted into visual evidence and none could be gathered.
+        assert not accepted and attempt['reason'] == 'needs_visual_evidence'
+        assert audit['coherence']['reason'] == 'needs_visual_evidence'
+
+
+@pytest.mark.parametrize('status,reason', [('evidence_limit', 'request_size_limit'), ('unavailable', 'review_unavailable'),
+                                           ('out_of_credits', 'review_unavailable'), ('budget_exhausted', 'review_unavailable')])
+def test_failed_requests_are_not_labelled_as_content_rejections(status, reason):
+    from clip_engine.services.coherence_review import CUT_QUESTIONS
+    r, _ = reviewer()
+    async def evaluate(state, questions):
+        return {'status': status, 'questions': questions, 'answers': {}}
+    r.service.evaluate = evaluate
+    audit = report()
+    assert not asyncio.run(r.judge('Result', [(0, 11000)], audit, 'candidate'))
+    assert audit['coherence']['attempts'][-1]['reason'] == reason
+    with pytest.raises(CoherenceRejected):
+        asyncio.run(r.audit_edit('Result', TimeMap([(0, 2000), (6000, 11000)], 11000), 0, 11000, audit, None))
+    cut = next(a for a in audit['coherence']['attempts'] if a['stage'] == 'cut')
+    assert cut['decision'] == 'restore' and cut['reason'] == reason
+
+
+def test_non_latin_candidate_reaches_jev_instead_of_the_size_cap():
+    from clip_engine.services.coherence_review import CORE_QUESTIONS
+    r, calls = reviewer()
+    line = '私たちは実験の結果を最初から最後まで説明しました。'
+    r.segments = [TranscriptSegment(i * 1250, i * 1250 + 1200, line * 3, words=[]) for i in range(48)]
+    r.duration_ms = 60000
+    state = r.state('結果', [(0, 60000)], report())
+    # ASCII-escaped, this request was over the old 24,000-byte cap and never sent.
+    assert len(json.dumps({'state': state, 'questions': CORE_QUESTIONS})) > 24_000
+    audit = report()
+    assert asyncio.run(r.judge('結果', [(0, 60000)], audit, 'candidate'))
+    assert calls and audit['coherence']['attempts'][-1]['reason'] == 'approved'
+
+
+def unavailable_audit(status):
+    r, _ = reviewer()
+    async def evaluate(state, questions):
+        return {'status': status, 'questions': questions, 'answers': {}}
+    r.service.evaluate = evaluate
+    audit = report()
+    asyncio.run(r.prepare(ClipPlanSegment(0, 11000, .9, summary='Result'), audit))
+    return audit
+
+
+def test_jev_unavailable_for_every_candidate_says_so_and_how_to_proceed():
+    from clip_engine.services.coherence_review import no_approved_clips_message
+    message = no_approved_clips_message([unavailable_audit('unavailable') for _ in range(3)])
+    assert 'Jev review was unavailable for every candidate (3 of 3)' in message
+    assert 'turn off Jev review in Settings → TypeSafe Jev and re-run' in message
+    assert 'No clip was forced' in message
+    # A candidate without speech is never sent to Jev and does not change the diagnosis.
+    silent = report()
+    silent['coherence'] = {'attempts': [{'judgment': None, 'policy_judgment': None}], 'repairs': []}
+    assert 'unavailable for every candidate (2 of 3)' in no_approved_clips_message([unavailable_audit('unavailable'), unavailable_audit('unavailable'), silent])
+    # Once some candidate was judged, the run is a partial review failure instead.
+    judged = report()
+    rejected, _ = reviewer(lambda state, q: False)
+    rejected.repair = AsyncMock(return_value=None)
+    asyncio.run(rejected.prepare(ClipPlanSegment(0, 11000, .9, summary='Result'), judged))
+    mixed = no_approved_clips_message([unavailable_audit('unavailable'), judged])
+    assert 'Review could not finish for 1 of 2' in mixed and 'every candidate' not in mixed
+
+
+def test_out_of_credits_is_distinct_from_an_unfinished_review():
+    from clip_engine.services.coherence_review import no_approved_clips_message
+    message = no_approved_clips_message([unavailable_audit('out_of_credits'), unavailable_audit('unavailable')])
+    assert message.startswith('No clips were approved. OpenRouter reported insufficient credits for Jev review')
+    assert 'Add OpenRouter credits and re-run, or turn off Jev review in Settings → TypeSafe Jev' in message
+    assert 'Review could not finish' not in message
+
+
+def test_desktop_bridge_maps_each_no_clip_diagnosis_to_its_own_message():
+    import importlib.util
+    from clip_engine.services.coherence_review import no_approved_clips_message
+    spec = importlib.util.spec_from_file_location('bridge_runner_for_messages', Path(__file__).parents[2] / 'bridge/bridge_runner.py')
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    unavailable = bridge.describe_failure(no_approved_clips_message([unavailable_audit('unavailable')]))
+    credits = bridge.describe_failure(no_approved_clips_message([unavailable_audit('out_of_credits')]))
+    assert unavailable['message'] == 'Jev review was unavailable, so no clips were exported.'
+    assert credits['message'] == 'OpenRouter ran out of credits during Jev review; no clips were exported.'
+    for failure in (unavailable, credits):
+        assert 'Settings → TypeSafe Jev' in failure['hint']
