@@ -4,15 +4,17 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { buildApp, launchApp, ROOT } = require('../zernio/support/electron-app.cjs')
+const { buildApp, launchApp } = require('../zernio/support/electron-app.cjs')
+const { editorTools } = require('./editor-e2e-tools.cjs')
 const fixture = require('../fixtures/editor/project.json')
 
 test('static subtitle guide supports dragging and undo, and persists across reopening', { timeout: 90000 }, async t => {
+  const tools = editorTools(t)
+  if (!tools) return
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-caption-position-'))
   const userDataDir = path.join(root, 'user-data'), run = path.join(userDataDir, 'BridgeClip', 'captions')
   fs.mkdirSync(run, { recursive: true })
-  const ffmpeg = fs.existsSync(path.join(ROOT, 'engine-bin/ffmpeg')) ? path.join(ROOT, 'engine-bin/ffmpeg') : 'ffmpeg'
-  execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=12', '-c:v', process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264', '-pix_fmt', 'yuv420p', path.join(run, 'editor-source.mp4')])
+  execFileSync(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=12', ...tools.encoder, '-pix_fmt', 'yuv420p', path.join(run, 'editor-source.mp4')])
   fs.copyFileSync(path.join(run, 'editor-source.mp4'), path.join(run, 'editor-preview.mp4'))
   const project = structuredClone(fixture)
   project.width = 640; project.height = 360

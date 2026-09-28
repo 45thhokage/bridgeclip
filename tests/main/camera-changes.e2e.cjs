@@ -4,16 +4,18 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { buildApp, launchApp, ROOT } = require('../zernio/support/electron-app.cjs')
+const { buildApp, launchApp } = require('../zernio/support/electron-app.cjs')
+const { editorTools, linkEngine } = require('./editor-e2e-tools.cjs')
 const fixture = require('../fixtures/editor/project.json')
 
 test('camera scanning, exact frame edits, dismissals and Space playback survive reopening', { timeout: 180000 }, async (t) => {
+  const tools = editorTools(t, { python: true })
+  if (!tools) return
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-camera-e2e-'))
   const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, 'BridgeClip'), run = path.join(library, 'camera-run')
   fs.mkdirSync(run, { recursive: true })
-  const ffmpeg = path.join(ROOT, 'engine-bin/ffmpeg')
-  execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', "color=red:s=320x180:r=24000/1001:d=5,drawbox=x=0:y=0:w=iw:h=ih:color=blue:t=fill:enable='gte(n,37)',drawbox=x=0:y=0:w=iw:h=ih:color=green:t=fill:enable='gte(n,73)'",
-    '-c:v', process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264', '-pix_fmt', 'yuv420p', path.join(run, 'editor-source.mp4')])
+  execFileSync(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', "color=red:s=320x180:r=24000/1001:d=5,drawbox=x=0:y=0:w=iw:h=ih:color=blue:t=fill:enable='gte(n,37)',drawbox=x=0:y=0:w=iw:h=ih:color=green:t=fill:enable='gte(n,73)'",
+    ...tools.encoder, '-pix_fmt', 'yuv420p', path.join(run, 'editor-source.mp4')])
   fs.copyFileSync(path.join(run, 'editor-source.mp4'), path.join(run, 'editor-preview.mp4'))
   const project = structuredClone(fixture)
   project.width = 320; project.height = 180; project.duration_ms = 5005; project.transcript = []
@@ -21,10 +23,10 @@ test('camera scanning, exact frame edits, dismissals and Space playback survive 
   Object.assign(project.candidates[0], { ranges: [[0, 4950]], scenes: [{ at_ms: 0, layout: 'fill', crops: [[0, 0, .3164, 1]] }], caption_edits: [], review: null, status: 'ready' })
   fs.writeFileSync(path.join(run, 'editor-project.json'), JSON.stringify(project))
   fs.writeFileSync(path.join(run, 'job_output.json'), JSON.stringify({ job_id: 'camera-run', source_video_title: 'Camera fixture', source_video_url: 'local.mp4', source_video_duration_seconds: 5, clips: [], total_clips: 0, editor_project: true }))
-  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: path.join(ROOT, 'engine/.venv/bin/python'), openrouterApiKey: '', zernioApiKey: '' }))
+  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: tools.python, openrouterApiKey: '', zernioApiKey: '' }))
   const appDir = buildApp(path.join(root, 'app'))
-  for (const dir of ['engine', 'bridge', 'engine-bin']) fs.symlinkSync(path.join(ROOT, dir), path.join(appDir, dir), 'junction')
-  const session = await launchApp({ appDir, userDataDir })
+  linkEngine(appDir)
+  const session = await launchApp({ appDir, userDataDir, env: tools.appEnv })
   t.after(async () => {
     if (process.env.BRIDGECLIP_E2E_SHOTS) { fs.mkdirSync(process.env.BRIDGECLIP_E2E_SHOTS, { recursive: true }); await session.page.screenshot({ path: path.join(process.env.BRIDGECLIP_E2E_SHOTS, 'camera-final.png') }).catch(() => {}) }
     const timer = setTimeout(() => session.app.process().kill('SIGTERM'), 5000)
@@ -277,11 +279,12 @@ test('camera scanning, exact frame edits, dismissals and Space playback survive 
 // The frame list is intentionally narrower than the source. Reaching its end
 // (including normal playback stopping at the clip end) must never trap navigation.
 test('timeline seeking preserves playback and frame controls recover from edges', { timeout: 90000 }, async (t) => {
+  const tools = editorTools(t)
+  if (!tools) return
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-frame-edges-'))
   const userDataDir = path.join(root, 'user-data'), run = path.join(userDataDir, 'BridgeClip', 'edge-run')
   fs.mkdirSync(run, { recursive: true })
-  const ffmpeg = fs.existsSync(path.join(ROOT, 'engine-bin/ffmpeg')) ? path.join(ROOT, 'engine-bin/ffmpeg') : 'ffmpeg'
-  execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=5', '-c:v', process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264', '-pix_fmt', 'yuv420p', path.join(run, 'editor-source.mp4')])
+  execFileSync(tools.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=5', ...tools.encoder, '-pix_fmt', 'yuv420p', path.join(run, 'editor-source.mp4')])
   fs.copyFileSync(path.join(run, 'editor-source.mp4'), path.join(run, 'editor-preview.mp4'))
   const project = structuredClone(fixture)
   Object.assign(project, { width: 320, height: 180, duration_ms: 5000, transcript: [], frame_preview: true })

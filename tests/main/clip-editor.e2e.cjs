@@ -4,16 +4,19 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { buildApp, launchApp, ROOT } = require('../zernio/support/electron-app.cjs')
+const { buildApp, launchApp } = require('../zernio/support/electron-app.cjs')
+const { editorTools, linkEngine } = require('./editor-e2e-tools.cjs')
 const fixture = require('../fixtures/editor/project.json')
 
 test('review editor refines candidates, restores discards, edits captions and bakes only ready clips', { timeout: 180000 }, async (t) => {
+  const tools = editorTools(t, { python: true, captions: true })
+  if (!tools) return
+  const ffmpeg = tools.ffmpeg
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-editor-e2e-'))
   const userDataDir = path.join(root, 'user-data'), library = path.join(userDataDir, 'BridgeClip'), run = path.join(library, 'review-run')
   fs.mkdirSync(run, { recursive: true })
-  const ffmpeg = fs.existsSync(path.join(ROOT, 'engine-bin/ffmpeg')) ? path.join(ROOT, 'engine-bin/ffmpeg') : 'ffmpeg'
   execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30',
-    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '45', '-c:v', process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '45', ...tools.encoder,
     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', path.join(run, 'editor-source.mp4')])
   fs.copyFileSync(path.join(run, 'editor-source.mp4'), path.join(run, 'editor-preview.mp4'))
   const project = structuredClone(fixture); project.width = 640; project.height = 360; project.duration_ms = 45000
@@ -23,10 +26,10 @@ test('review editor refines candidates, restores discards, edits captions and ba
   fs.writeFileSync(path.join(run, 'transcript.json'), JSON.stringify({ segments: project.transcript.map((s) => ({ start_time_ms: s.start_ms, end_time_ms: s.end_ms, text: s.text, words: s.text.split(' ').map((word, i, words) => ({ word, start_time_ms: Math.round(s.start_ms + i * (s.end_ms - s.start_ms) / words.length), end_time_ms: Math.round(s.start_ms + (i + 1) * (s.end_ms - s.start_ms) / words.length) })) })) }))
   fs.writeFileSync(path.join(run, 'job_output.json'), JSON.stringify({ job_id: 'review-run', source_video_url: 'local.mp4', source_video_title: project.title,
     source_video_duration_seconds: 45, clips: [], total_clips: 0, editor_project: true }))
-  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: path.join(ROOT, 'engine/.venv/bin/python'), openrouterApiKey: '', zernioApiKey: '' }))
+  fs.writeFileSync(path.join(userDataDir, 'settings.json'), JSON.stringify({ version: 6, outputDirectory: library, pythonPath: tools.python, openrouterApiKey: '', zernioApiKey: '' }))
   const appDir = buildApp(path.join(root, 'app'))
-  for (const dir of ['engine', 'bridge', 'engine-bin']) if (fs.existsSync(path.join(ROOT, dir))) fs.symlinkSync(path.join(ROOT, dir), path.join(appDir, dir), 'junction')
-  const session = await launchApp({ appDir, userDataDir })
+  linkEngine(appDir)
+  const session = await launchApp({ appDir, userDataDir, env: tools.appEnv })
   t.after(async () => {
     await session.page.mouse.up().catch(() => {})
     // A failed assertion can leave an unsaved edit or a captured pointer.
@@ -626,7 +629,7 @@ test('review editor refines candidates, restores discards, edits captions and ba
   const mismatch = path.join(root, 'different-duration.mp4')
   const makeReplacement = (file, duration) => execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error',
     '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
-    '-t', String(duration), '-c:v', process.platform === 'darwin' ? 'h264_videotoolbox' : 'libx264',
+    '-t', String(duration), ...tools.encoder,
     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', file])
   makeReplacement(mismatch, 2)
   makeReplacement(replacement, 45)
