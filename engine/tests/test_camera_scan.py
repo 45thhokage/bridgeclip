@@ -181,3 +181,27 @@ def test_failed_scan_does_not_report_complete(tmp_path, monkeypatch):
         scan_camera_changes(source, 0, 2500, progress=updates.append)
     assert updates[0] == 0
     assert 100 not in updates
+
+
+def test_scan_window_is_half_open_like_the_analysis_decode(tmp_path):
+    """A frame exactly at the window end belongs to the next window."""
+    source = source_video(tmp_path, fps='30')
+    full = scan_camera_changes(source, 0, 3000)
+    end = full['markers'][-1]['at_ms']
+    clipped = scan_camera_changes(source, 0, end)
+    assert end in full['frames']
+    assert clipped['frames'] == [t for t in full['frames'] if t < end]
+    assert all(m['at_ms'] < end for m in clipped['markers'])
+
+
+def test_frame_budget_is_checked_before_decoding(tmp_path, monkeypatch):
+    from clip_engine.services import camera_scan
+    source = source_video(tmp_path, fps='30')
+    monkeypatch.setattr(camera_scan, 'MAX_FRAMES', 50)
+    def no_decode(*_, **__):
+        raise AssertionError('a window over the frame budget must not be decoded')
+    monkeypatch.setattr(camera_scan, 'media_process', no_decode)
+    updates = []
+    with pytest.raises(ValueError, match='too long'):
+        scan_camera_changes(source, 0, 3000, progress=updates.append)
+    assert updates == [0]
