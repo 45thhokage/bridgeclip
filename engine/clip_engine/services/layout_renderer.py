@@ -6,7 +6,7 @@ shots are concatenated back into one 9:16 stream:
 
     talking_head  full-frame crop that pans with the speaker
     two_shot      each person in their own panel, stacked
-    screen_cam    screen (complete active area fitted without clipping) over the webcam
+    screen_cam    screen (zoomed on the active area) over the webcam
     screen        whole frame over a blurred copy of itself
 
 Also provides per-shot positions for captions, the title card and the
@@ -233,59 +233,87 @@ def screen_crop(
     panel_h: int,
     avoid: Optional[Box] = None,
 ) -> tuple[int, int, int, int]:
-    """Keep the entire semantic focus region; fit it rather than crop to fill.
+    """Crop of the screen at the panel's aspect, covering the focus area if known.
 
-    Webcam avoidance is secondary to preserving the text/chart. If no clean
-    rectangle contains the focus, retain it rather than cutting off its labels.
-    Without a reliable focus, show the largest unobscured screen region.
+    `avoid` (the webcam overlay) is slid out of the crop horizontally when the
+    screen has room, so the webcam doesn't show twice.
     """
-    screen = (screen or Box(0, 0, 1, 1)).clamp()
+    aspect = panel_w / panel_h
+    screen = screen or Box(0, 0, 1, 1)
     bounds = (screen.x * src_w, screen.y * src_h, screen.w * src_w, screen.h * src_h)
-    bx, by, bw, bh = bounds
-    target = None
+    bw, bh = bounds[2], bounds[3]
+
+    # Largest panel-aspect crop that fits the screen...
+    if bw / bh > aspect:
+        max_h, max_w = bh, bh * aspect
+    else:
+        max_w, max_h = bw, bw / aspect
+    crop_w, crop_h = max_w, max_h
+    cx, cy = bounds[0] + bw / 2, bounds[1] + bh / 2
+
     if focus is not None:
-        left, top = max(bx, focus.x * src_w), max(by, focus.y * src_h)
-        right = min(bx + bw, (focus.x + focus.w) * src_w)
-        bottom = min(by + bh, (focus.y + focus.h) * src_h)
-        if right > left and bottom > top:
-            target = (left, top, right - left, bottom - top)
+        # ...shrunk to the focus area (padded), but never past MAX_UPSCALE
+        # and never below 60% of the screen height so text stays in context.
+        fw, fh = focus.w * src_w * 1.1, focus.h * src_h * 1.1
+        need_w = max(fw, fh * aspect)
+        min_w = max(panel_w / MAX_UPSCALE, 0.6 * max_h * aspect)
+        crop_w = _clamp(need_w, min_w, max_w)
+        crop_h = crop_w / aspect
+        cx, cy = focus.cx * src_w, focus.cy * src_h
+    w, h, x, y = _fit_rect(cx, cy, crop_w, crop_h, bounds)
 
     if avoid is not None:
-        # Try a border margin first, then the actual camera edge. Never slide
-        # a complete paragraph out of view merely to hide a repeated webcam.
-        for margin in (AVOID_MARGIN, 0):
-            ax0 = (avoid.x - avoid.w * margin) * src_w
-            ax1 = (avoid.x + avoid.w * (1 + margin)) * src_w
-            ay0 = (avoid.y - avoid.h * margin) * src_h
-            ay1 = (avoid.y + avoid.h * (1 + margin)) * src_h
-            if ax1 <= bx or ax0 >= bx + bw or ay1 <= by or ay0 >= by + bh:
-                break
-            regions = [(bx, by, min(bw, ax0 - bx), bh),
-                       (max(bx, ax1), by, bx + bw - max(bx, ax1), bh),
-                       (bx, by, bw, min(bh, ay0 - by)),
-                       (bx, max(by, ay1), bw, by + bh - max(by, ay1))]
-            choices = [r for r in regions if r[2] >= 2 and r[3] >= 2 and
-                       (target is None or (r[0] <= target[0] and r[1] <= target[1] and
-                        r[0] + r[2] >= target[0] + target[2] and r[1] + r[3] >= target[1] + target[3]))]
+        # Overlay boxes are estimates and overlays have borders/shadows: keep
+        # a margin so no sliver of the webcam lands in the screen panel.
+        mx, my = avoid.w * AVOID_MARGIN * src_w, avoid.h * AVOID_MARGIN * src_h
+        ax0, ax1 = avoid.x * src_w - mx, (avoid.x + avoid.w) * src_w + mx
+        ay0, ay1 = avoid.y * src_h - my, (avoid.y + avoid.h) * src_h + my
+        if x < ax1 and x + w > ax0 and y < ay1 and y + h > ay0:
+            on_right = avoid.cx * src_w > x + w / 2
+            if on_right and ax0 - w >= bounds[0]:
+                x = even(ax0 - w)          # webcam on the right: slide left
+            elif not on_right and ax1 + w <= bounds[0] + bw:
+                x = even(ax1)              # webcam on the left: slide right
+            else:
+                # No room to slide: narrow the crop to the webcam's edge if
+                # that stays within MAX_UPSCALE, keeping the panel's aspect.
+                room = (ax0 - bounds[0]) if on_right else (bounds[0] + bw - ax1)
+                if room >= panel_w / MAX_UPSCALE:
+                    new_w = even(room)
+                    new_h = even(new_w / aspect)
+                    x = even(bounds[0]) if on_right else even(ax1)
+                    y = even(_clamp(y + (h - new_h) / 2, bounds[1], bounds[1] + bh - new_h))
+                    w, h = new_w, new_h
+        # A centered webcam leaves too little room on either side. Screen
+        # shares often have usable content above it, so crop vertically before
+        # allowing the same webcam to appear in both panels. Keep the output
+        # resolution budget when choosing either side.
+        if x < ax1 and x + w > ax0 and y < ay1 and y + h > ay0:
+            min_h = panel_h / MAX_UPSCALE
+            choices = []
+            for top, bottom in ((bounds[1], ay0), (ay1, bounds[1] + bh)):
+                available_h = bottom - top
+                candidate_h = min(h, available_h, bw / aspect)
+                if candidate_h < min_h:
+                    continue
+                candidate_w = candidate_h * aspect
+                candidate_x = _clamp(cx - candidate_w / 2, bounds[0], bounds[0] + bw - candidate_w)
+                candidate_y = _clamp(cy - candidate_h / 2, top, bottom - candidate_h)
+                choices.append((candidate_h, (even(candidate_w), even(candidate_h), even(candidate_x), even(candidate_y))))
             if choices:
-                bounds = max(choices, key=lambda r: r[2] * r[3])
-                break
-    bx, by, bw, bh = bounds
-    if target is None:
-        return _fit_rect(bx + bw / 2, by + bh / 2, bw, bh, bounds)
-    tx, ty, tw, th = target
-    # Keep surrounding context even if vision selects a single word. Width and
-    # height are independent: a wide paragraph must not become a narrow slice.
-    w = min(bw, max(tw * 1.12, bw * .6, panel_w / MAX_UPSCALE))
-    h = min(bh, max(th * 1.12, bh * .6, panel_h / MAX_UPSCALE))
-    return _fit_rect(tx + tw / 2, ty + th / 2, w, h, bounds)
+                _, (w, h, x, y) = max(choices, key=lambda choice: choice[0])
+    return w, h, x, y
 
 
 def screen_view(shot: ShotLayout, src_w: int, src_h: int, panel_w: int, panel_h: int):
-    """Identical contained screen geometry for rendering and inspection."""
+    """Screen panel geometry shared by rendering and inspection.
+
+    The screen fills its whole panel (main's behavior for screen + webcam
+    shots): a panel-aspect crop that covers the focus area, so the panel
+    destination is always the full panel.
+    """
     rect = screen_crop(shot.screen_box, shot.screen_focus, src_w, src_h, panel_w, panel_h, shot.cam_box)
-    width, height = panel_fit(rect, panel_w, panel_h) or (panel_w, panel_h)
-    return rect, ((panel_w - width) // 2, (panel_h - height) // 2, width, height)
+    return rect, (0, 0, panel_w, panel_h)
 
 
 # ------------------------------------------------------------------
@@ -429,11 +457,11 @@ def shot_chain(
                 f"[cf{i}]scale={fit_w}:{fit_h}:{scale}[cfg{i}];"
                 f"[cbg{i}][cfg{i}]overlay={(out_w - fit_w) // 2}:{(bottom_h - fit_h) // 2}[bot{i}]"
             )
-        screen_rect, (dx, dy, fw, fh) = screen_view(shot, src_w, src_h, out_w, top_h)
+        screen_rect, _ = screen_view(shot, src_w, src_h, out_w, top_h)
         return (
             f"[t{i}]split=2[sa{i}][sb{i}];"
-            f"[sa{i}]{_crop(screen_rect)},scale={fw}:{fh}:{scale},"
-            f"pad={out_w}:{top_h}:{dx}:{dy}:color=0x12151b[top{i}];"
+            f"[sa{i}]{_crop(screen_rect)},"
+            f"scale={out_w}:{top_h}:{scale}[top{i}];"
             f"{cam_panel};"
             f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[v{i}]"
         )

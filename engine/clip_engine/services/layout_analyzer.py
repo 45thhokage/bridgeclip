@@ -958,7 +958,7 @@ Classify the frame's layout:
 Return boxes as [ymin, xmin, ymax, xmax] integers from 0 to 1000 relative to the full frame:
 - cam_box: the ENTIRE webcam overlay rectangle (its visible border/edges, including background around the person), not just the face. [] if there is no webcam overlay.
 - screen_box: the region holding the screen/app content, excluding black bars and the webcam overlay if it sits outside the screen. [] if there is no screen content.
-- screen_focus: inside screen_box, the COMPLETE meaningful content block the viewer needs: an entire paragraph/code example, chart including axes and labels, document pane, chat exchange, or game view. Include the start and end of text lines and necessary headings. Never select just a word, glyph, cursor or unlabeled value. Leave out unrelated toolbars and empty space. This region will be fitted intact into the phone panel, not cropped to fill it. [] if the whole screen matters equally or the relevant block is uncertain.
+- screen_focus: inside screen_box, the area a viewer should see when the screen is cropped for a phone: the active editor/document pane, chat window, chart, or game view. Leave out sidebars, toolbars and empty space. [] if the whole screen matters equally.
 - people: one head-and-shoulders box per on-camera person, left to right. Exclude people inside the webcam overlay and people shown inside screen content.
 
 Detected faces (normalized x, y, w, h, may be incomplete): {faces}"""
