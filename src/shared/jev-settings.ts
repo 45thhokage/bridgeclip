@@ -9,6 +9,17 @@ export const JEV_DEFAULTS = {
   jevCutThreshold: '0.95',
 } as const
 
+/**
+ * Jev review, its visual context and source web research are opt-in beta
+ * features that spend extra OpenRouter credit. They are off unless the user
+ * turns them on. Review & edit always runs Jev regardless of `jevEnabled`.
+ */
+export const JEV_FEATURE_DEFAULTS = {
+  jevEnabled: 'off',
+  jevVisualContext: 'off',
+  sourceContextWebResearch: 'off',
+} as const
+
 export type JevThresholdKey = keyof typeof JEV_DEFAULTS
 export type JevThresholdSettings = Record<JevThresholdKey, string>
 export const JEV_DOCS_URL = 'https://docs.typesafe.ai/introduction'

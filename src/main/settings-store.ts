@@ -1,4 +1,4 @@
-import { JEV_DEFAULTS, type JevThresholdSettings } from '../shared/jev-settings'
+import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS, type JevThresholdSettings } from '../shared/jev-settings'
 import { app, safeStorage } from 'electron'
 import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join } from 'path'
@@ -13,10 +13,11 @@ export interface AppSettings extends JevThresholdSettings {
   openrouterApiKey: string
   /** Optional: connects social accounts for posting. Used only by the main process, never sent to the engine. */
   zernioApiKey: string
-  /** Jev review uses the existing OpenRouter key; the user can disable it. */
+  /** Opt-in beta: Jev review of automatic clips via the existing OpenRouter key. Review & edit always uses Jev. */
   jevEnabled: string
   /** Additional OpenRouter frame observations, explicitly opt-in. */
   jevVisualContext: string
+  /** Opt-in beta: web research of public sources before transcription. */
   sourceContextWebResearch: string
   outputDirectory: string
   pythonPath: string
@@ -35,17 +36,22 @@ type SecretKey = (typeof SECRET_KEYS)[number]
 
 const DEFAULT_SETTINGS: AppSettings = {
   ...JEV_DEFAULTS,
+  ...JEV_FEATURE_DEFAULTS,
   openrouterApiKey: '',
   zernioApiKey: '',
-  jevEnabled: 'on',
-  jevVisualContext: 'off',
-  sourceContextWebResearch: 'on',
   outputDirectory: join(app.getPath('home'), 'BridgeClip'),
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
   customVocabulary: ''
 }
 
-const SETTINGS_VERSION = 11
+const SETTINGS_VERSION = 12
+/**
+ * Versions 9-11 (pre-release builds of this feature) saved Jev review and web
+ * research as on by default, and older versions drop the fields entirely, so a
+ * saved "on" before this version is not an opt-in. Those files load both as off.
+ */
+const OPT_IN_BETA_VERSION = 12
+const SWITCHES = ['off', 'on']
 
 type PersistedSecret = { scheme: 'safeStorage' | 'base64'; value: string } | ''
 
@@ -88,25 +94,50 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
 
     openrouterApiKey: (settings.openrouterApiKey ?? DEFAULT_SETTINGS.openrouterApiKey).trim(),
     zernioApiKey: (settings.zernioApiKey ?? DEFAULT_SETTINGS.zernioApiKey).trim(),
-    jevEnabled: settings.jevEnabled ?? 'on',
-    jevVisualContext: settings.jevVisualContext ?? 'off',
-    sourceContextWebResearch: settings.sourceContextWebResearch ?? 'on',
+    jevEnabled: settings.jevEnabled ?? DEFAULT_SETTINGS.jevEnabled,
+    jevVisualContext: settings.jevVisualContext ?? DEFAULT_SETTINGS.jevVisualContext,
+    sourceContextWebResearch: settings.sourceContextWebResearch ?? DEFAULT_SETTINGS.sourceContextWebResearch,
     outputDirectory: (settings.outputDirectory || DEFAULT_SETTINGS.outputDirectory).trim(),
     pythonPath: (settings.pythonPath || DEFAULT_SETTINGS.pythonPath).trim(),
     customVocabulary: vocabularyTerms(settings.customVocabulary ?? DEFAULT_SETTINGS.customVocabulary).join('\n')
   }
   for (const key of Object.keys(JEV_DEFAULTS) as (keyof JevThresholdSettings)[]) {
-    const value = normalized[key].trim()
-    if (!/^\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(value) || !Number.isFinite(Number(value)) || Number(value) > 1) throw new Error(`Invalid Jev threshold: ${key}. Use a probability from 0 to 1.`)
-    normalized[key] = String(Number(value))
+    const value = probability(normalized[key])
+    if (value === null) throw new Error(`Invalid Jev threshold: ${key}. Use a probability from 0 to 1.`)
+    normalized[key] = value
   }
   normalized.outputDirectory ||= DEFAULT_SETTINGS.outputDirectory
   normalized.pythonPath ||= DEFAULT_SETTINGS.pythonPath
-  if (!['off', 'on'].includes(normalized.jevEnabled)) throw new Error('Invalid Jev review setting')
-  if (!['off', 'on'].includes(normalized.jevVisualContext)) throw new Error('Invalid visual context setting')
-  if (!['off', 'on'].includes(normalized.sourceContextWebResearch)) throw new Error('Invalid source research setting')
+  if (!SWITCHES.includes(normalized.jevEnabled)) throw new Error('Invalid Jev review setting')
+  if (!SWITCHES.includes(normalized.jevVisualContext)) throw new Error('Invalid visual context setting')
+  if (!SWITCHES.includes(normalized.sourceContextWebResearch)) throw new Error('Invalid source research setting')
   if (!isAbsolute(normalized.outputDirectory)) throw new Error('Settings folders must be absolute paths')
   return normalized
+}
+
+/** A canonical probability string from 0 to 1, or null. */
+function probability(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!/^\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(trimmed) || !Number.isFinite(Number(trimmed)) || Number(trimmed) > 1) return null
+  return String(Number(trimmed))
+}
+
+/**
+ * Saved Jev fields are optional preferences. One unreadable value falls back to
+ * its own default instead of making the whole file (and the saved keys) unreadable.
+ */
+function savedJevSettings(raw: Record<string, unknown>): Pick<AppSettings, keyof JevThresholdSettings | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch'> {
+  const thresholds = Object.fromEntries((Object.keys(JEV_DEFAULTS) as (keyof JevThresholdSettings)[])
+    .map((key) => [key, probability(raw[key]) ?? JEV_DEFAULTS[key]])) as JevThresholdSettings
+  const switchValue = (value: unknown, fallback: string): string => typeof value === 'string' && SWITCHES.includes(value) ? value : fallback
+  const optedIn = typeof raw.version === 'number' && raw.version >= OPT_IN_BETA_VERSION
+  return {
+    ...thresholds,
+    jevEnabled: optedIn ? switchValue(raw.jevEnabled, DEFAULT_SETTINGS.jevEnabled) : 'off',
+    jevVisualContext: switchValue(raw.jevVisualContext ?? raw.typesafeVisualContext, DEFAULT_SETTINGS.jevVisualContext),
+    sourceContextWebResearch: optedIn ? switchValue(raw.sourceContextWebResearch, DEFAULT_SETTINGS.sourceContextWebResearch) : 'off'
+  }
 }
 
 function canEncrypt(): boolean {
@@ -172,17 +203,7 @@ export function loadSettings(): AppSettings {
 
     const settings = normalizeSettings({
       ...secrets,
-      jevThreshold: raw.jevThreshold ?? JEV_DEFAULTS.jevThreshold,
-      jevSelfContainedThreshold: raw.jevSelfContainedThreshold ?? JEV_DEFAULTS.jevSelfContainedThreshold,
-      jevFaithfulToSourceThreshold: raw.jevFaithfulToSourceThreshold ?? JEV_DEFAULTS.jevFaithfulToSourceThreshold,
-      jevTitleSupportedThreshold: raw.jevTitleSupportedThreshold ?? JEV_DEFAULTS.jevTitleSupportedThreshold,
-      jevSponsorThreshold: raw.jevSponsorThreshold ?? JEV_DEFAULTS.jevSponsorThreshold,
-      jevEvidenceThreshold: raw.jevEvidenceThreshold ?? JEV_DEFAULTS.jevEvidenceThreshold,
-      jevCutThreshold: raw.jevCutThreshold ?? JEV_DEFAULTS.jevCutThreshold,
-
-      jevEnabled: raw.jevEnabled ?? 'on',
-      jevVisualContext: raw.jevVisualContext ?? raw.typesafeVisualContext ?? 'off',
-      sourceContextWebResearch: raw.sourceContextWebResearch ?? 'on',
+      ...savedJevSettings(raw),
       outputDirectory: typeof raw.outputDirectory === 'string' ? raw.outputDirectory : DEFAULT_SETTINGS.outputDirectory,
       pythonPath: typeof raw.pythonPath === 'string' ? raw.pythonPath : DEFAULT_SETTINGS.pythonPath,
       customVocabulary: typeof raw.customVocabulary === 'string' ? raw.customVocabulary : DEFAULT_SETTINGS.customVocabulary

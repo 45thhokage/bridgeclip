@@ -142,6 +142,7 @@ def test_visual_only_candidate_is_omitted_without_verifiable_dialogue(monkeypatc
     monkeypatch.setattr(RenderingService, "_verify_ffmpeg", lambda self: None)
     settings = pipeline_module.get_settings()
     monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(settings, "jev_enabled", True)  # Opt-in beta: this case covers review enabled.
     monkeypatch.setattr(settings, "local_output_dir", str(tmp_path / "out"))
     monkeypatch.setattr(type(settings), "temp_directory", property(lambda self: str(tmp_path / "work")))
     pipeline = AIClippingPipeline()

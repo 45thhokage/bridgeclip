@@ -300,9 +300,12 @@ test('saved provider keys remain in main and migrate away from legacy encoding',
     assert.equal(settingsStore.publicSettings(settingsStore.loadSettings()).zernioConfigured, true)
     assert.equal(JSON.stringify(settingsStore.publicSettings(settingsStore.loadSettings())).includes('dummy-social-value'), false)
     const editorialPublic = settingsStore.publicSettings(settingsStore.loadSettings())
-    assert.equal(editorialPublic.jevEnabled, 'on')
+    assert.equal(editorialPublic.jevEnabled, 'off', 'Jev review is an opt-in beta')
     assert.equal(editorialPublic.jevVisualContext, 'off')
-    assert.equal(editorialPublic.sourceContextWebResearch, 'on')
+    assert.equal(editorialPublic.sourceContextWebResearch, 'off', 'web research is an opt-in beta')
+    assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'false')
+    assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).JEV_ENABLED, 'false')
+    settingsStore.savePublicSettings({ ...editorialPublic, sourceContextWebResearch: 'on' })
     assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'true')
     settingsStore.savePublicSettings({ ...editorialPublic, sourceContextWebResearch: 'off' })
     assert.equal(settingsStore.getSettingsForBridge(settingsStore.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'false')
@@ -838,10 +841,10 @@ test('Jev migration drops the separate TypeSafe key without decrypting it', () =
   try {
     const loaded = store.loadSettings()
     assert.equal(loaded.openrouterApiKey, 'active-openrouter')
-    assert.equal(loaded.jevEnabled, 'on')
+    assert.equal(loaded.jevEnabled, 'off')
     assert.equal(loaded.jevVisualContext, 'on')
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
-    assert.equal(saved.version, 11)
+    assert.equal(saved.version, 12)
     assert.equal(Object.hasOwn(saved, 'typesafeApiKey'), false)
     assert.equal(Object.hasOwn(saved, 'typesafeVisualContext'), false)
     assert.equal(Object.hasOwn(loaded, 'typesafeApiKey'), false)
@@ -865,7 +868,7 @@ test('Jev thresholds migrate, validate atomically, persist, and reach the worker
     const defaults = [.75, .70, .65, .70, .80, .50, .95]
     const initial = store.publicSettings(store.loadSettings())
     keys.forEach((key, i) => assert.equal(Number(initial[key]), defaults[i]))
-    assert.equal(JSON.parse(fs.readFileSync(file)).version, 11)
+    assert.equal(JSON.parse(fs.readFileSync(file)).version, 12)
     const values = ['0', '1', '0.61', '0.72', '0.83', '0.54', '0.96']
     const saved = store.savePublicSettings({ ...initial, ...Object.fromEntries(keys.map((key, i) => [key, values[i]])) })
     const worker = store.getSettingsForBridge(store.loadSettings())
@@ -888,5 +891,80 @@ test('Jev thresholds migrate, validate atomically, persist, and reach the worker
     keys.forEach((key, i) => assert.equal(store.loadSettings()[key], values[i]))
     store.savePublicSettings({ ...saved, ...Object.fromEntries(keys.map((key, i) => [key, String(defaults[i])])) })
     keys.forEach((key, i) => assert.equal(Number(store.loadSettings()[key]), defaults[i]))
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+
+function betaSettingsStore(root) {
+  const userData = path.join(root, 'userdata')
+  fs.mkdirSync(userData, { recursive: true })
+  const store = loadSource('settings-store.ts', { electron: {
+    app: { getPath: (name) => ({ home: root, appData: root, userData }[name]), isReady: () => true },
+    safeStorage: { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'gnome_libsecret',
+      encryptString: (value) => Buffer.from(value), decryptString: (value) => value.toString() }
+  } })
+  return { store, file: path.join(userData, 'settings.json') }
+}
+
+test('Jev review and web research stay opt-in across upgrades, downgrades and missing fields', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-beta-optin-'))
+  const { store, file } = betaSettingsStore(root)
+  const key = { scheme: 'safeStorage', value: Buffer.from('kept-openrouter').toString('base64') }
+  try {
+    assert.equal(store.loadSettings().jevEnabled, 'off', 'a fresh install starts with Jev off')
+    assert.equal(store.loadSettings().sourceContextWebResearch, 'off', 'a fresh install starts with research off')
+    // Earlier builds saved "on" as a default, not an explicit opt-in; main (v7) omits the fields.
+    for (const version of [undefined, 7, 8, 9, 10, 11]) {
+      fs.writeFileSync(file, JSON.stringify({ ...(version ? { version } : {}), outputDirectory: root, openrouterApiKey: key,
+        ...(version && version >= 9 ? { jevEnabled: 'on', sourceContextWebResearch: 'on' } : {}) }))
+      const loaded = store.loadSettings()
+      assert.equal(loaded.openrouterApiKey, 'kept-openrouter')
+      assert.equal(loaded.jevEnabled, 'off', `v${version} loads Jev off`)
+      assert.equal(loaded.sourceContextWebResearch, 'off', `v${version} loads research off`)
+      assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 12)
+    }
+    // An explicit opt-in on the current version survives a reload.
+    store.savePublicSettings({ ...store.publicSettings(store.loadSettings()), jevEnabled: 'on', sourceContextWebResearch: 'on' })
+    assert.equal(store.loadSettings().jevEnabled, 'on')
+    assert.equal(store.getSettingsForBridge(store.loadSettings()).SOURCE_CONTEXT_WEB_RESEARCH, 'true')
+    // Opt out, downgrade to a build that drops the fields, then upgrade again: still off.
+    store.savePublicSettings({ ...store.publicSettings(store.loadSettings()), jevEnabled: 'off', sourceContextWebResearch: 'off' })
+    const downgraded = JSON.parse(fs.readFileSync(file, 'utf8'))
+    for (const field of ['jevEnabled', 'sourceContextWebResearch', 'jevVisualContext']) delete downgraded[field]
+    fs.writeFileSync(file, JSON.stringify({ ...downgraded, version: 7 }))
+    assert.equal(store.loadSettings().jevEnabled, 'off')
+    assert.equal(store.loadSettings().sourceContextWebResearch, 'off')
+    // A current file missing the fields also loads them off.
+    fs.writeFileSync(file, JSON.stringify({ version: 12, outputDirectory: root, openrouterApiKey: key }))
+    assert.equal(store.loadSettings().jevEnabled, 'off')
+    assert.equal(store.loadSettings().sourceContextWebResearch, 'off')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('one unreadable Jev field falls back to its default without hiding saved keys', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-jev-fallback-'))
+  const { store, file } = betaSettingsStore(root)
+  const key = { scheme: 'safeStorage', value: Buffer.from('kept-openrouter').toString('base64') }
+  try {
+    fs.writeFileSync(file, JSON.stringify({ version: 12, outputDirectory: root, openrouterApiKey: key, zernioApiKey: '',
+      jevEnabled: 'maybe', jevVisualContext: 7, sourceContextWebResearch: 'on',
+      jevThreshold: '1.5', jevSelfContainedThreshold: 'NaN', jevFaithfulToSourceThreshold: 0.6, jevTitleSupportedThreshold: 'x'.repeat(9000),
+      jevSponsorThreshold: '0.9', jevEvidenceThreshold: '-1', jevCutThreshold: '0.97' }))
+    const loaded = store.loadSettings()
+    assert.equal(loaded.openrouterApiKey, 'kept-openrouter')
+    assert.equal(store.publicSettings(loaded).openrouterConfigured, true)
+    assert.equal(loaded.jevEnabled, 'off')
+    assert.equal(loaded.jevVisualContext, 'off')
+    assert.equal(loaded.sourceContextWebResearch, 'on', 'valid neighbouring fields are kept')
+    assert.equal(loaded.jevThreshold, '0.75')
+    assert.equal(loaded.jevSelfContainedThreshold, '0.7')
+    assert.equal(loaded.jevFaithfulToSourceThreshold, '0.65')
+    assert.equal(loaded.jevTitleSupportedThreshold, '0.7')
+    assert.equal(loaded.jevSponsorThreshold, '0.9')
+    assert.equal(loaded.jevEvidenceThreshold, '0.5')
+    assert.equal(loaded.jevCutThreshold, '0.97')
+    // Saving still validates strictly.
+    assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevThreshold: '2' }), /Invalid Jev threshold/)
+    assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevEnabled: 'maybe' }), /Invalid Jev/)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })

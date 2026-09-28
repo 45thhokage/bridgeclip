@@ -1,4 +1,4 @@
-import { JEV_DEFAULTS } from '../../shared/jev-settings'
+import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS } from '../../shared/jev-settings'
 import { create } from 'zustand'
 import { errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
@@ -25,9 +25,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   openrouterConfigured: false,
   zernioConfigured: false,
   ...JEV_DEFAULTS,
-  jevEnabled: 'on',
-  jevVisualContext: 'off',
-  sourceContextWebResearch: 'on',
+  ...JEV_FEATURE_DEFAULTS,
   outputDirectory: '',
   pythonPath: 'python3',
   customVocabulary: '',
@@ -98,9 +96,9 @@ function pickSettings(s: ClipSettings): ClipSettings {
     jevEvidenceThreshold: s.jevEvidenceThreshold ?? JEV_DEFAULTS.jevEvidenceThreshold,
     jevCutThreshold: s.jevCutThreshold ?? JEV_DEFAULTS.jevCutThreshold,
     openrouterConfigured: s.openrouterConfigured,
-    jevEnabled: s.jevEnabled ?? 'on',
-    jevVisualContext: s.jevVisualContext ?? 'off',
-    sourceContextWebResearch: s.sourceContextWebResearch ?? 'on',
+    jevEnabled: s.jevEnabled ?? JEV_FEATURE_DEFAULTS.jevEnabled,
+    jevVisualContext: s.jevVisualContext ?? JEV_FEATURE_DEFAULTS.jevVisualContext,
+    sourceContextWebResearch: s.sourceContextWebResearch ?? JEV_FEATURE_DEFAULTS.sourceContextWebResearch,
     zernioConfigured: s.zernioConfigured,
     outputDirectory: s.outputDirectory,
     pythonPath: s.pythonPath,

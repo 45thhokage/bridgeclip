@@ -57,6 +57,7 @@ def test_pipeline_rediscovery_is_bounded_and_preserves_approved_clips(monkeypatc
     from tests.test_coherence_review import reviewer
     settings = module.get_settings()
     monkeypatch.setattr(settings, 'local_mode', True)
+    monkeypatch.setattr(settings, 'jev_enabled', True)  # Rediscovery only follows Jev review.
     monkeypatch.setattr(settings, 'openrouter_api_key', 'fixture')
     monkeypatch.setattr(settings, 'local_output_dir', str(tmp_path / 'out'))
     monkeypatch.setattr(settings.__class__, 'temp_directory', property(lambda self: str(tmp_path / 'work')))

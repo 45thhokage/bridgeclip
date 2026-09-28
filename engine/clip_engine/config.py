@@ -596,9 +596,11 @@ class Settings(BaseSettings):
     jev_sponsor_threshold: float = Field(default=0.80, ge=0, le=1, allow_inf_nan=False)
     jev_evidence_threshold: float = Field(default=0.50, ge=0, le=1, allow_inf_nan=False)
     jev_cut_threshold: float = Field(default=0.95, ge=0, le=1, allow_inf_nan=False)
-    jev_enabled: bool = True
+    # Opt-in beta features that spend extra OpenRouter credit. Review & edit
+    # always runs Jev; automatic clipping uses it only when enabled.
+    jev_enabled: bool = False
     jev_visual_context: bool = False
-    source_context_web_research: bool = True
+    source_context_web_research: bool = False
     source_context_model: str = "google/gemini-3.8-flash"
 
     # Security - API authentication

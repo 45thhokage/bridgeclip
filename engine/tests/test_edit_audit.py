@@ -20,6 +20,7 @@ from tests.test_coherence_review import reviewer, report, transcript, repair_res
 def test_full_transcript_and_rejected_candidates_are_saved(monkeypatch, tmp_path, accept):
     settings = module.get_settings()
     monkeypatch.setattr(settings, 'local_mode', True)
+    monkeypatch.setattr(settings, 'jev_enabled', True)  # Opt-in beta under test.
     monkeypatch.setattr(settings, 'local_output_dir', str(tmp_path / 'out'))
     monkeypatch.setattr(settings.__class__, 'temp_directory', property(lambda self: str(tmp_path / 'work')))
     monkeypatch.setattr(RenderingService, '_verify_ffmpeg', lambda self: None)

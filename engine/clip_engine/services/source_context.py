@@ -149,7 +149,7 @@ class SourceContextService:
             record['reason'] = 'no_api_key'
             return record
         public_source = source['source_type'] in ('youtube', 'twitch') and source['title'] not in ('', 'Unknown')
-        research = public_source and getattr(self.settings, 'source_context_web_research', True)
+        research = public_source and getattr(self.settings, 'source_context_web_research', False)
         record['research_status'] = 'pending' if research else 'disabled' if public_source else 'not_applicable'
         # One research request, then at most one metadata-only fallback. No retry loop.
         for use_web in ([True, False] if research else [False]):

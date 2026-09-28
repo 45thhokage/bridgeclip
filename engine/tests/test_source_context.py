@@ -36,7 +36,17 @@ def response(raw=None, citations=True, finish='stop', cost=.003):
 
 
 def service(**settings):
-    return SourceContextService(Settings(_env_file=None, openrouter_api_key='fixture-key', **settings))
+    # Web research is an opt-in beta; these cases cover a user who turned it on.
+    return SourceContextService(Settings(_env_file=None, openrouter_api_key='fixture-key', **{'source_context_web_research': True, **settings}))
+
+
+def test_jev_and_web_research_are_opt_in_by_default(monkeypatch):
+    for name in ('JEV_ENABLED', 'SOURCE_CONTEXT_WEB_RESEARCH', 'JEV_VISUAL_CONTEXT'):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.jev_enabled is False
+    assert settings.source_context_web_research is False
+    assert settings.jev_visual_context is False
 
 
 def test_every_public_video_uses_gemini_research_with_bounded_tools_and_grounded_terms(monkeypatch):

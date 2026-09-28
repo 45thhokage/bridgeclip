@@ -91,7 +91,7 @@ class JevService:
 
     @classmethod
     def from_settings(cls, settings, *, required=False):
-        key = getattr(settings, 'openrouter_api_key', None) if required or getattr(settings, 'jev_enabled', True) else None
+        key = getattr(settings, 'openrouter_api_key', None) if required or getattr(settings, 'jev_enabled', False) else None
         return cls(key)
 
     @property
