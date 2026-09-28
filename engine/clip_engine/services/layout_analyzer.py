@@ -73,6 +73,8 @@ MAX_ANALYSIS_FRAMES = int(MAX_ANALYSIS_DURATION_MS / 1000 * ANALYSIS_FPS) + 1
 MAX_RETAINED_KEYFRAMES = 256
 MAX_KEYFRAME_BYTES = 32 * 1024 * 1024
 MAX_FACES_PER_FRAME = 32
+# Inset (padding) detection runs on a copy this wide.
+CONTENT_BOX_WIDTH = 160
 
 
 def analysis_dimensions(width: int, height: int) -> tuple[int, int]:
@@ -279,13 +281,8 @@ def framing_faces(frame: FrameInfo) -> list[Box]:
             if not reliable or i >= len(frame.scores) or frame.scores[i] >= COMPETING_FACE_SCORE]
 
 
-def detect_content_box(image) -> Optional[Box]:
-    """Conservative rectangular inset detection, including textured padding.
-
-    Require matching, mostly uniform side margins and sustained straight
-    content edges. A wall behind a person alone is not a rectangular inset.
-    Work only on the already-decoded analysis image; no extra provider call.
-    """
+def _content_edges(image):
+    """(left, top, right, bottom, background) of a padded inset, in pixels."""
     h, w = image.shape[:2]
     if w < 80 or h < 60:
         return None
@@ -314,6 +311,64 @@ def detect_content_box(image) -> Optional[Box]:
     last = w - 1 - middle[:, ::-1].argmax(axis=1)
     straight = (np.abs(first - left) <= w * .015) & (np.abs(last + 1 - right) <= w * .015)
     if straight.mean() < .8 or mask[top:bottom, left:right].mean() < .7:
+        return None
+    return left, top, right, bottom, background
+
+
+def _refine_edge(image, background, center: int, radius: int, vertical: bool,
+                 span: tuple[int, int], threshold: float, last: bool) -> Optional[int]:
+    """Full-resolution edge near a coarse estimate, with the coarse criterion."""
+    length = image.shape[1] if vertical else image.shape[0]
+    lo, hi = max(0, center - radius), min(length, center + radius + 1)
+    pad = 2  # 5x5 blur support
+    if vertical:
+        strip = image[:, max(0, lo - pad):min(length, hi + pad)]
+    else:
+        strip = image[max(0, lo - pad):min(length, hi + pad), :]
+    blurred = cv2.GaussianBlur(strip, (5, 5), 0).astype(np.float32)
+    offset = lo - max(0, lo - pad)
+    mask = np.max(np.abs(blurred - background), axis=2) > 25
+    if vertical:
+        share = mask[:, offset:offset + hi - lo].mean(axis=0)
+    else:
+        share = mask[offset:offset + hi - lo, span[0]:span[1]].mean(axis=1)
+    hits = np.flatnonzero(share > threshold)
+    if not len(hits):
+        return None
+    return lo + int(hits[-1]) + 1 if last else lo + int(hits[0])
+
+
+def detect_content_box(image) -> Optional[Box]:
+    """Conservative rectangular inset detection, including textured padding.
+
+    Require matching, mostly uniform side margins and sustained straight
+    content edges. A wall behind a person alone is not a rectangular inset.
+    Work only on the already-decoded analysis image; no extra provider call.
+    Detection runs on a CONTENT_BOX_WIDTH-wide copy (most frames are rejected
+    there); a found inset's edges are then located at full resolution.
+    """
+    h, w = image.shape[:2]
+    if w <= CONTENT_BOX_WIDTH * 1.5 or h < 60:
+        edges = _content_edges(image)
+        if edges is None:
+            return None
+        left, top, right, bottom, _ = edges
+        return Box(left / w, top / h, (right - left) / w, (bottom - top) / h)
+    small_h = max(60, round(h * CONTENT_BOX_WIDTH / w))
+    coarse = _content_edges(cv2.resize(image, (CONTENT_BOX_WIDTH, small_h), interpolation=cv2.INTER_AREA))
+    if coarse is None:
+        return None
+    left, top, right, bottom, background = coarse
+    sx, sy = w / CONTENT_BOX_WIDTH, h / small_h
+    rx, ry = math.ceil(sx) + 2, math.ceil(sy) + 2
+    guess = [round(left * sx), round(top * sy), round(right * sx), round(bottom * sy)]
+    left = _refine_edge(image, background, guess[0], rx, True, (0, h), .45, False)
+    right = _refine_edge(image, background, guess[2] - 1, rx, True, (0, h), .45, True)
+    left, right = guess[0] if left is None else left, guess[2] if right is None else right
+    top = _refine_edge(image, background, guess[1], ry, False, (left, right), .55, False)
+    bottom = _refine_edge(image, background, guess[3] - 1, ry, False, (left, right), .55, True)
+    top, bottom = guess[1] if top is None else top, guess[3] if bottom is None else bottom
+    if right - left < 8 or bottom - top < 8:
         return None
     return Box(left / w, top / h, (right - left) / w, (bottom - top) / h)
 

@@ -225,3 +225,20 @@ def test_render_of_pillarboxed_speaker_has_no_bars(tmp_path):
     assert len(output) == 4
     # Every output column comes from the picture, never from a black bar.
     assert output.max(axis=(0, 1, 3)).min() > 40
+
+
+def test_downscaled_detection_matches_full_resolution_edges():
+    """Insets are found on a small copy, but their edges stay pixel-exact."""
+    from clip_engine.services.layout_analyzer import _content_edges
+    rng = np.random.default_rng(4)
+    images = [inset_frame(color, x, width) for color in (0, 230, 255) for x, width in ((190, 270), (80, 480), (120, 400))]
+    images += [pillarbox_frame(), np.full((360, 640, 3), 230, np.uint8)]
+    images += [cv2.GaussianBlur(rng.integers(0, 256, (360, 640, 3), np.uint8), (k, k), 0) for k in (1, 9, 31)]
+    for image in images:
+        edges = _content_edges(image)
+        box = detect_content_box(image)
+        if edges is None:
+            assert box is None
+        else:
+            left, top, right, bottom, _ = edges
+            assert box.to_list() == Box(left / 640, top / 360, (right - left) / 640, (bottom - top) / 360).to_list()
