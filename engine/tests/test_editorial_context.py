@@ -123,19 +123,19 @@ def test_budget_and_cancellation():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('introduction', ['Watch this video.', 'Here is the next part.'])
-def test_reaction_survives_pacing_skips_and_time_mapping(introduction):
-    transcript = [segment(1000, 2000, introduction), segment(8000, 9000, 'That was unbelievable.')]
-    client, _ = service()
-    report = asyncio.run(analyze_reactions(transcript, 1000, 9000, client))
+def test_cued_reaction_survives_pacing_but_not_planner_skips():
+    transcript = [segment(1000, 2000, 'Watch this video.'), segment(8000, 9000, 'That was unbelievable.')]
+    report = analyze_reactions(transcript, 1000, 9000)
     assert report['protected_source'] == [[1000, 9000]]
+    assert report['candidates'][0]['reason'] == 'introduction_cue'
     protected = window_protection(report, 1000, 8000)
-    words = [WindowWord(0, 1000, introduction), WindowWord(7000, 8000, 'reaction')]
+    words = [WindowWord(0, 1000, 'Watch this video.'), WindowWord(7000, 8000, 'reaction')]
     keeps = compute_keep_intervals(words, 8000, None, protected)
-    keeps = subtract_intervals(keeps, [(1500, 6500)], protected, 8000)
     assert keeps == [(0, 8000)]
     timeline = TimeMap(keeps, 8000)
     assert timeline.output_ms == 8000 and timeline.to_output(7000) == 7000
+    # A planner skip (a tangent or sponsor read) is an edit decision and still wins.
+    assert subtract_intervals(keeps, [(1500, 6500)], protected, 8000) == [(0, 1500), (6500, 8000)]
 
 
 def test_boundary_repair_or_explicit_incomplete_flag():
@@ -147,15 +147,15 @@ def test_boundary_repair_or_explicit_incomplete_flag():
     assert 'incomplete_reaction_context' in report['flags']
 
 
-def test_uncertainty_and_missing_provider_keep_context_but_dead_air_can_cut():
-    transcript = [segment(0, 1000, 'The first point.'), segment(5000, 6000, 'Next point.')]
-    for client in [service(uncertain=True)[0], JevService('key', max_requests=0)]:
-        report = asyncio.run(analyze_reactions(transcript, 0, 6000, client))
-        assert report['protected_source'] == [[0, 6000]]
-    report = asyncio.run(analyze_reactions(transcript, 0, 6000, service(reaction=False)[0]))
-    assert report['protected_source'] == []
+def test_only_gaps_with_a_cue_are_protected():
+    plain = [segment(0, 1000, 'The first point.'), segment(5000, 6000, 'Next point.')]
+    assert analyze_reactions(plain, 0, 6000)['protected_source'] == []
     local = [segment(0, 1000, 'Watch this.'), segment(5000, 6000, 'That was wild.')]
-    assert asyncio.run(analyze_reactions(local, 0, 6000, JevService()))['protected_source'] == [[0, 6000]]
+    report = analyze_reactions(local, 0, 6000)
+    assert report['protected_source'] == [[0, 6000]]
+    # Records keep the shape of saved Jev traces, but nothing was asked of a provider.
+    assert report['candidates'][0]['judgment']['status'] == 'disabled'
+    assert report['candidates'][0]['decision'] == 'protect'
 
 
 def test_pause_crossing_layout_transition_uses_all_shots():
@@ -166,14 +166,15 @@ def test_pause_crossing_layout_transition_uses_all_shots():
 
 
 def test_protection_survives_rounding_unsorted_ranges_and_sliver_removal():
-    keeps = subtract_intervals([(0, 3000)], [(0, 3000)], [(1001, 1051), (333, 601)], 3000)
+    words = [WindowWord(0, 200, 'first'), WindowWord(2800, 3000, 'last')]
+    keeps = compute_keep_intervals(words, 3000, None, [(1001, 1051), (333, 601)])
     for a, b in [(1001, 1051), (333, 601)]:
         assert any(start <= a and end >= b for start, end in keeps)
 
 
 def test_reaction_beginning_at_clip_boundary_recovers_the_watched_event():
     transcript = [segment(0, 1000, 'Watch this.'), segment(5000, 7000, 'That was wild.')]
-    report = asyncio.run(analyze_reactions(transcript, 5000, 7000, service()[0]))
+    report = analyze_reactions(transcript, 5000, 7000)
     assert report['protected_source'] == [[0, 7000]]
     assert repair_context_boundaries(5000, 7000, report, 0, 9000, 8000) == (0, 7000)
 

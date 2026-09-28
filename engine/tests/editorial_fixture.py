@@ -18,7 +18,7 @@ def editorial_fixture():
     transcript = [segment(4000, 6000, 'Watch this demonstration.'), segment(10000, 13000, 'That was the part I meant. Now the reaction makes sense.')]
     client, _ = service()
     async def evaluate():
-        report = await analyze_reactions(transcript, 2000, 14000, client)
+        report = analyze_reactions(transcript, 2000, 14000)
         await review_retained_clip(client, 'A demonstration and its reaction', transcript, report)
         report['retained_source'] = [[2000, 14000]]
         return report

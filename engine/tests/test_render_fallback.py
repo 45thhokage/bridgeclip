@@ -264,8 +264,10 @@ def test_editorial_protection_survives_every_render_path(service, monkeypatch, t
     calls, retained = [], []
     async def render_edit(request, plan, time_map, *args):
         calls.append(time_map)
-        # Both pacing and planner skips must keep this watched interval.
-        assert any(a <= 3400 and b >= 6600 for a, b in time_map.keeps)
+        # Pacing keeps the protected interval, but the planner's skip still wins.
+        assert any(a <= 3400 and b >= 3500 for a, b in time_map.keeps)
+        assert any(a <= 6000 and b >= 6600 for a, b in time_map.keeps)
+        assert not any(a < 6000 and b > 3500 for a, b in time_map.keeps)
         if len(calls) <= failures:
             raise RenderingError('fixture fallback')
         with open(request.output_path, 'wb') as output:
@@ -281,7 +283,7 @@ def test_editorial_protection_survives_every_render_path(service, monkeypatch, t
     result = render(service, request)
     assert len(calls) == failures + 1
     assert report['retained_source'] == [list(pair) for pair in calls[-1].keeps]
-    assert any(c['kind'] == 'planner_skip' for c in report['prevented_cuts'])
+    assert all(c['kind'] == 'pacing' for c in report['prevented_cuts'])
     assert len(retained) == 2
     # QA reads the actual edited timestamps, including the final fallback's map.
     assert retained[-1].start_time_ms == calls[-1].to_output(6500)

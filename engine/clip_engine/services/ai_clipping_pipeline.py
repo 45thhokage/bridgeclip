@@ -442,8 +442,8 @@ class AIClippingPipeline:
                     self._update_progress(job_id, JobStatus.PLANNING, 35,
                         f"Reviewing candidate {i + 1} for coherence (discovery {discovery_pass})..." if jev_enabled else f"Selecting planned clip {i + 1}...",
                         stage_id="reviewing" if jev_enabled else "planning", stage_percent=None)
-                    segment.editorial = await analyze_reactions(transcription_result.segments,
-                        segment.start_time_ms, segment.end_time_ms, JevService())
+                    segment.editorial = analyze_reactions(transcription_result.segments,
+                        segment.start_time_ms, segment.end_time_ms)
                     entry = {'candidate_index': i, 'title': segment.summary or '', 'discovery_pass': discovery_pass,
                         'original_interval': [segment.start_time_ms, segment.end_time_ms],
                         'clip_index': None, 'status': 'reviewing', 'report': segment.editorial}

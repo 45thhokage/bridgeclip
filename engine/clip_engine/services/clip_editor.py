@@ -255,8 +255,11 @@ def subtract_intervals(
 ) -> list[tuple[int, int]]:
     """`keeps` with every `cuts` interval removed; pieces under MIN_PIECE_MS drop.
 
-    Used for planner-chosen skips (tangents cut out of a longform episode),
-    which apply on top of pacing and at natural timing alike.
+    Used for planner-chosen skips (tangents or sponsor reads cut out of a
+    clip), which apply on top of pacing and at natural timing alike. Skips are
+    edit decisions, so they win over `protected` moments: protection only
+    restores material outside every skip, and never as a piece shorter than
+    MIN_PIECE_MS unless it extends a kept piece.
     """
     result = keeps
     for c_start, c_end in sorted(cuts):
@@ -273,8 +276,31 @@ def subtract_intervals(
             if k_end - c_end >= MIN_PIECE_MS:
                 pieces.append((c_end, k_end))
         result = pieces
-    return preserve_intervals(result or keeps, protected or [],
-                              window_ms if window_ms is not None else max((b for _, b in keeps), default=0))
+    result = result or keeps
+    if not protected:
+        return result
+    window = window_ms if window_ms is not None else max((b for _, b in keeps), default=0)
+    restored = [
+        (a, b) for a, b in remove_intervals(preserve_intervals([], protected, window), cuts)
+        if b - a >= MIN_PIECE_MS or any(a <= k_end and b >= k_start for k_start, k_end in result)
+    ]
+    return preserve_intervals(result, restored, window)
+
+
+def remove_intervals(
+    spans: list[tuple[int, int]],
+    cuts: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """`spans` minus every `cuts` interval (snapped to frames), keeping every remainder."""
+    result = list(spans)
+    for c_start, c_end in sorted(cuts):
+        c_start, c_end = _snap(c_start), _snap(c_end)
+        if c_end <= c_start:
+            continue
+        result = [piece for s_start, s_end in result
+                  for piece in ((s_start, min(s_end, c_start)), (max(s_start, c_end), s_end))
+                  if piece[1] > piece[0]]
+    return result
 
 
 class TimeMap:
