@@ -47,33 +47,6 @@ const DRAFTS_PENDING = 'Apply or discard the enhanced metadata drafts before the
 const TIKTOK_REVIEW_PENDING = 'Review a queued clip for TikTok before it can post automatically.'
 const NO_QUEUED_CLIPS = 'No queued clips are available.'
 
-/**
- * Posting takes priority over other work. Releasing the lock runs any slot
- * that came due meanwhile; runAutomation takes the lock synchronously, before
- * another request (for example, the next enhancement batch) can.
- */
-function release(automationId: string): void {
-  busy.delete(automationId)
-  const waiting = deferredSlots.get(automationId)
-  if (!waiting?.size) return
-  deferredSlots.delete(automationId)
-  void (async () => {
-    for (const entry of waiting.values()) await runDeferredSlot(automationId, entry)
-  })().catch((error) => logger.warn('automation.scheduler.failed', { message: error instanceof Error ? error.message : 'Unknown error' }))
-}
-
-async function runDeferredSlot(automationId: string, entry: { slot: { time: string; date: string }; since: number }): Promise<void> {
-  const { workspace, automation } = find(automationId)
-  const { slot } = entry
-  if (!automation.enabled || !automation.times.includes(slot.time) || automation.lastSlots[slot.time] === slot.date) return
-  if (Date.now() - entry.since <= MAX_SLOT_DEFERRAL_MS) { await runAutomation(automationId, slot); return }
-  if (busy.has(automation.id)) return
-  automation.lastSlots[slot.time] = slot.date
-  automation.lastError = `The ${slot.time} post was skipped because another task on this automation ran for too long. The next scheduled time will post as usual.`
-  automation.lastErrorAcknowledged = false
-  save(workspace)
-  logger.warn('automation.slot.missed', { automationId })
-}
 // One review per bank item; a newer preview replaces the previous one.
 const reviews = new Map<string, { id: string; fingerprint: string }>()
 
@@ -1085,6 +1058,34 @@ export function resolveAutomationMetadataDraft(id: unknown, contentId: unknown, 
     throw error
   }
   return listAutomations()
+}
+
+/**
+ * Posting takes priority over other work. Releasing the lock runs any slot
+ * that came due meanwhile; runAutomation takes the lock synchronously, before
+ * another request (for example, the next enhancement batch) can.
+ */
+function release(automationId: string): void {
+  busy.delete(automationId)
+  const waiting = deferredSlots.get(automationId)
+  if (!waiting?.size) return
+  deferredSlots.delete(automationId)
+  void (async () => {
+    for (const entry of waiting.values()) await runDeferredSlot(automationId, entry)
+  })().catch((error) => logger.warn('automation.scheduler.failed', { message: error instanceof Error ? error.message : 'Unknown error' }))
+}
+
+async function runDeferredSlot(automationId: string, entry: { slot: { time: string; date: string }; since: number }): Promise<void> {
+  const { workspace, automation } = find(automationId)
+  const { slot } = entry
+  if (!automation.enabled || !automation.times.includes(slot.time) || automation.lastSlots[slot.time] === slot.date) return
+  if (Date.now() - entry.since <= MAX_SLOT_DEFERRAL_MS) { await runAutomation(automationId, slot); return }
+  if (busy.has(automation.id)) return
+  automation.lastSlots[slot.time] = slot.date
+  automation.lastError = `The ${slot.time} post was skipped because another task on this automation ran for too long. The next scheduled time will post as usual.`
+  automation.lastErrorAcknowledged = false
+  save(workspace)
+  logger.warn('automation.slot.missed', { automationId })
 }
 
 export async function runAutomation(id: unknown, slot?: { time: string; date: string }): Promise<Automation[]> {
