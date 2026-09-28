@@ -721,6 +721,23 @@ test('worker failures map fixed codes to specific messages and log only a redact
   } finally { f.cleanup() }
 })
 
+test('progress summaries report counts without the project and refresh when the file changes', async () => {
+  const f = setup()
+  try {
+    const first = await f.main.readEditorProgress(f.run)
+    assert.deepEqual({ ...first, previewPath: path.basename(first.previewPath) }, {
+      total: 2, remaining: 2, initialCandidate: 0, counts: { refining: 2, ready: 0, baked: 0, discarded: 0 },
+      previewPath: 'editor-preview.mp4', thumbnailMs: fixture.candidates[0].ranges[0][0], mediaFreed: false, operation: null })
+    assert.equal(JSON.stringify(first).includes('transcript'), false)
+    const project = (await f.main.openEditor(f.run)).project
+    project.candidates[0].status = 'discarded'
+    await f.main.saveEditor(f.run, 0, project.candidates)
+    const second = await f.main.readEditorProgress(f.run)
+    assert.deepEqual([second.remaining, second.initialCandidate, second.counts.discarded], [1, 1, 1])
+    await assert.rejects(f.main.readEditorProgress(path.join(f.dir, 'elsewhere')), /./)
+  } finally { f.cleanup() }
+})
+
 test('idle editor runs sweep temporary folders and unreferenced media, never the active pair', async () => {
   const f = setup()
   try {
@@ -748,6 +765,7 @@ test('editor media can be freed only when nothing is left to finish, and the pro
     assert.equal(freed.project.media_freed, true)
     assert.deepEqual([freed.sourcePath, freed.previewPath], ['', ''])
     assert.equal(fs.existsSync(path.join(f.run, 'editor-source.mp4')) || fs.existsSync(path.join(f.run, 'editor-preview.mp4')), false)
+    assert.equal((await f.main.readEditorProgress(f.run)).previewPath, null)
     await assert.rejects(f.main.saveEditor(f.run, 1, freed.project.candidates), /read-only/)
     await assert.rejects(f.main.runEditor(f.run, 1, 'candidate-2', 'export'), /read-only/)
   } finally { f.cleanup() }

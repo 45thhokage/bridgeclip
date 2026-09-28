@@ -7,7 +7,6 @@ import { useSettingsStore } from '../store/use-settings-store'
 import { usePostsStore } from '../store/use-posts-store'
 import type { JobOutput } from '../store/use-job-store'
 import { parseJobOutput } from '../../shared/job-output'
-import { editorProgress } from '../../shared/clip-editor'
 import type { HistoryEntry } from '../../preload/index'
 import { BackLink, ClipList } from '../components/ClipList'
 import { Page } from '../components/ui/Page'
@@ -440,11 +439,11 @@ function useRunPreview(entry: HistoryEntry | null, revision: number): { thumb: s
         setRemaining(null)
         if (output?.editor_project) {
           try {
-            const session = await getApi().editor.open(outputDir)
+            // Counts only, cached by main until the project file changes.
+            const progress = await getApi().editor.progress(outputDir)
             if (cancelled) return null
-            const progress = editorProgress(session.project.candidates)
             setRemaining(progress.remaining)
-            if (!best) return loadThumbnail(session.previewPath, session.project.candidates[progress.initialCandidate].ranges[0][0] / 1000)
+            if (!best && progress.previewPath) return loadThumbnail(progress.previewPath, progress.thumbnailMs / 1000)
           } catch { /* Existing exports remain usable if the editor project is unavailable. */ }
         }
         if (cancelled) return null

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Ban, FileText, FolderOpen, ListVideo, Pencil, Plus, RefreshCw, RotateCcw, Search, X } from 'lucide-react'
 import type { HistoryEntry } from '../../preload/index'
 import { MAX_PARALLEL_JOBS } from '../../shared/jobs'
-import { editorProgress } from '../../shared/clip-editor'
 import { EditInspector, InspectEditsButton } from '../components/EditInspector'
 import { BackLink } from '../components/ClipList'
 import { JobFailure, JobProgress, STAGE_LABELS } from '../components/JobProgress'
@@ -437,8 +436,9 @@ function PreviousJobRow({ entry, hasDetails, onOpen, onOpenFolder }: { entry: Hi
     let active = true
     // Read saved candidate states, as Library does. Export counts cannot tell
     // whether an earlier export has since been edited or marked ready again.
-    getApi().editor.open(entry.outputDir).then(({ project }) => {
-      if (active) setProgress({ outputDir: entry.outputDir, remaining: editorProgress(project.candidates).remaining })
+    // Counts only, cached by main until the project file changes.
+    getApi().editor.progress(entry.outputDir).then(({ remaining }) => {
+      if (active) setProgress({ outputDir: entry.outputDir, remaining })
     }).catch(() => { if (active) setProgress(null) })
     return () => { active = false }
   }, [entry, completed])

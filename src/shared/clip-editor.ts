@@ -55,6 +55,14 @@ export interface EditorSession {
   /** Bytes used by the editor's source and preview, freed by "Free editor media". */
   mediaBytes?: number
 }
+/** Status counts for Library and Jobs, without sending the project to the renderer. */
+export interface EditorProgressSummary {
+  total: number; remaining: number; initialCandidate: number
+  counts: Record<CandidateEdit['status'], number>
+  /** Preview frame for a run without exports; null once media is freed. */
+  previewPath: string | null; thumbnailMs: number; mediaFreed: boolean
+  operation: EditorOperation | null; batch?: EditorBatch; progress?: EditorProgress
+}
 
 /** Fixed worker failure codes (see bridge/editor_runner.py); no tool output crosses the bridge. */
 export const editorErrorCodes = ['duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',

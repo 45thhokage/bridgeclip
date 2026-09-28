@@ -101,11 +101,20 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
   }, [outputDir])
   useEffect(() => { void load() }, [load])
   // A reopened window can reconnect to an export/review still owned by main.
+  // Poll only progress; reload the project once that operation ends.
   useEffect(() => {
     if (!session?.operation) return
-    const timer = window.setInterval(() => { void load() }, 1500)
+    let pending = false
+    const timer = window.setInterval(() => {
+      if (pending) return
+      pending = true
+      void getApi().editor.progress(outputDir).then((p) => {
+        if (!p.operation) return load()
+        setBatch(p.batch); setProgress(p.progress)
+      }).catch(() => {}).finally(() => { pending = false })
+    }, 1500)
     return () => window.clearInterval(timer)
-  }, [session?.operation, load])
+  }, [session?.operation, load, outputDir])
 
   const save = useCallback(async (): Promise<void> => {
     if (savePromise.current) await savePromise.current
@@ -315,7 +324,7 @@ export function ClipEditor({ outputDir, leading, onExports }: { outputDir: strin
         polling = window.setInterval(() => {
           if (pollPending) return
           pollPending = true
-          void getApi().editor.open(outputDir).then((s) => {
+          void getApi().editor.progress(outputDir).then((s) => {
             if (!active) return
             if (s.batch) setBatch(s.batch)
             if (s.progress) setProgress(s.progress)

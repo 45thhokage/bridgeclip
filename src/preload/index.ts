@@ -1,7 +1,7 @@
 import type { JevThresholdSettings } from '../shared/jev-settings'
 import type { LibraryClipTarget } from '../shared/library-posting'
 import type { AutomationReviewResult } from '../shared/automations'
-import type { CandidateEdit, EditorSession } from '../shared/clip-editor'
+import type { CandidateEdit, EditorProgressSummary, EditorSession } from '../shared/clip-editor'
 import type { JobOutput } from '../shared/job-output'
 import type { EditAudit } from '../shared/editorial'
 import { contextBridge, ipcRenderer } from 'electron'
@@ -79,6 +79,8 @@ export interface BridgeClipAPI {
     run: (path: string, revision: number, id: string, action: 'review' | 'export' | 'export-all' | 'scan-cameras') => Promise<EditorSession>
     cancel: (path: string) => Promise<void>
     replaceSource: (path: string, revision: number, replacement: string) => Promise<EditorSession>
+    /** Status counts only; cheap enough for list rows and polling. */
+    progress: (path: string) => Promise<EditorProgressSummary>
     freeMedia: (path: string, revision: number) => Promise<EditorSession>
   }
   edits: { inspect: (outputDir: string) => Promise<EditAudit> }
@@ -230,6 +232,7 @@ const api: BridgeClipAPI = {
     run: (path, revision, id, action) => ipcRenderer.invoke('editor:run', path, revision, id, action),
     cancel: (path) => ipcRenderer.invoke('editor:cancel', path),
     replaceSource: (path, revision, replacement) => ipcRenderer.invoke('editor:replaceSource', path, revision, replacement),
+    progress: (path) => ipcRenderer.invoke('editor:progress', path),
     freeMedia: (path, revision) => ipcRenderer.invoke('editor:freeMedia', path, revision)
   },
   edits: { inspect: (outputDir) => ipcRenderer.invoke('edits:inspect', outputDir) },

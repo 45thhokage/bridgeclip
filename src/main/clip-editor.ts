@@ -3,7 +3,7 @@ import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, join } from 'path'
 import { randomUUID } from 'crypto'
-import { editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProject, type EditorSession } from '../shared/clip-editor'
+import { editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
@@ -90,6 +90,37 @@ export async function openEditor(path: unknown): Promise<EditorSession> {
     assertMediaPath(file, loadSettings().outputDirectory)
   }
   return { project, sourcePath, previewPath, mediaBytes: mediaSize([sourcePath, previewPath]), ...state }
+}
+
+type ProgressCounts = Omit<EditorProgressSummary, 'operation' | 'batch' | 'progress'>
+const progressCache = new Map<string, { mtimeMs: number; size: number; ino: number; summary: ProgressCounts }>()
+/**
+ * Status counts for Library cards, Jobs rows and editor polling. Unlike
+ * openEditor, it sends no project to the renderer and re-reads the project
+ * only when its file changes.
+ */
+export async function readEditorProgress(path: unknown): Promise<EditorProgressSummary> {
+  const run = runPath(path)
+  const stat = lstatSync(join(run, 'editor-project.json'))
+  if (!stat.isFile()) throw new Error('This run has no editor project')
+  let summary = progressCache.get(run)
+  if (!summary || summary.mtimeMs !== stat.mtimeMs || summary.size !== stat.size || summary.ino !== stat.ino) {
+    const project = readProject(run)
+    const { remaining, initialCandidate } = editorProgress(project.candidates)
+    const counts = { refining: 0, ready: 0, baked: 0, discarded: 0 }
+    for (const c of project.candidates) counts[c.status]++
+    let previewPath: string | null = project.media_freed ? null : join(run, mediaNames(project).preview)
+    try { if (previewPath && (lstatSync(previewPath).isSymbolicLink() || !isWithinDirectory(previewPath, run))) previewPath = null } catch { previewPath = null }
+    summary = { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, summary: {
+      total: project.candidates.length, remaining, initialCandidate, counts, previewPath,
+      thumbnailMs: project.candidates[initialCandidate].ranges[0][0], mediaFreed: project.media_freed === true } }
+    progressCache.delete(run)
+    progressCache.set(run, summary)
+    if (progressCache.size > 1000) progressCache.delete(progressCache.keys().next().value!)
+  }
+  const operation = operations.get(run)
+  return { ...summary.summary, counts: { ...summary.summary.counts }, operation: operation?.action ?? null,
+    ...(operation?.batch ? { batch: { ...operation.batch } } : {}), ...(operation?.progress ? { progress: { ...operation.progress } } : {}) }
 }
 
 export async function saveEditor(path: unknown, revision: unknown, edits: unknown): Promise<EditorSession> {
