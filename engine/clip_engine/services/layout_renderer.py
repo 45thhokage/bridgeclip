@@ -337,18 +337,33 @@ def shot_chain(
             source = f"mc{i}_{j}" if n > 1 else f"t{i}"
             target = f"mp{i}_{j}" if n > 1 else f"v{i}"
             if shot.manual_transition_ms:
-                # Perspective maps a moving source rectangle to a fixed frame.
-                # Unlike changing crop dimensions, it preserves a fixed output
-                # size and supports simultaneous pan/zoom without huge buffers.
-                p = f"clip(((in+{start_frame})*1000/({fps})-({shot.manual_transition_start_ms}))/{shot.manual_transition_ms},0,1)"
-                ease = f"({p}*{p}*(3-2*{p}))"
+                # Eased pan/zoom with LGPL filters only (shipped FFmpeg builds
+                # have no GPL `perspective`). A static crop to the union of both
+                # rectangles bounds every intermediate one, since each edge moves
+                # monotonically. Per frame, scale that region so the moving crop
+                # becomes qw x qh (odd sizes are fine mid-graph; rounding to even
+                # would distort small panels), then cut a fixed qw x qh window.
                 origin, dest = shot.manual_from_crops[j], shot.manual_crops[j]
-                def coord(k, size):
-                    return f"{size}*({origin[k]:.10f}+({dest[k] - origin[k]:.10f})*{ease})"
-                left, top, width, height = (coord(k, size) for k, size in enumerate(('W', 'H', 'W', 'H')))
-                corners = [left, top, f"{left}+{width}", top, left, f"{top}+{height}", f"{left}+{width}", f"{top}+{height}"]
-                transform = 'perspective=' + ':'.join(f"{key}='{value}'" for key, value in zip(('x0', 'y0', 'x1', 'y1', 'x2', 'y2', 'x3', 'y3'), corners))
-                transform += ':sense=source:eval=frame:interpolation=cubic'
+                bx = max(0, int(min(origin[0], dest[0]) * src_w) // 2 * 2)
+                by = max(0, int(min(origin[1], dest[1]) * src_h) // 2 * 2)
+                bw = max(2, min(src_w - bx, (ceil(max(origin[0] + origin[2], dest[0] + dest[2]) * src_w) - bx + 1) // 2 * 2))
+                bh = max(2, min(src_h - by, (ceil(max(origin[1] + origin[3], dest[1] + dest[3]) * src_h) - by + 1) // 2 * 2))
+                def local(c):
+                    return [(c[0] * src_w - bx) / bw, (c[1] * src_h - by) / bh, c[2] * src_w / bw, c[3] * src_h / bh]
+                a, b = local(origin), local(dest)
+                # Move at no more than the larger crop's source resolution (the
+                # final scale upsizes), and keep the scaled frame under 8192 px.
+                qw = max(2, min(pw, even(max(a[2], b[2]) * bw), even(8192 * min(a[2], b[2]))))
+                qh = max(2, min(ph, even(max(a[3], b[3]) * bh), even(8192 * min(a[3], b[3]))))
+                # Frames arrive on the window's fps grid (pts = frame index), so
+                # `t` is the exact source clock across trims and removed gaps.
+                # Frame counters are not: scale's `n` starts at 1 in FFmpeg 8.
+                p = f"clip((t*1000-({shot.manual_transition_start_ms}))/{shot.manual_transition_ms},0,1)"
+                ease = f"({p}*{p}*(3-2*{p}))"
+                x0, y0, cw, ch = (f"({a[k]:.10f}+({b[k] - a[k]:.10f})*{ease})" for k in range(4))
+                transform = (f"crop={bw}:{bh}:{bx}:{by},"
+                    f"scale=w='round({qw}/{cw})':h='round({qh}/{ch})':eval=frame:{scale},"
+                    f"crop=w={qw}:h={qh}:x='{x0}*round({qw}/{cw})':y='{y0}*round({qh}/{ch})':exact=1")
             else:
                 transform = f"crop={w}:{h}:{x}:{y}"
             parts.append(f"[{source}]{transform},scale={pw}:{ph}:{scale},setsar=1[{target}]")
