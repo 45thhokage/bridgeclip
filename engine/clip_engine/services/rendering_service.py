@@ -246,6 +246,14 @@ class RenderingService:
         scale = min(1, 1280 / width, 720 / height)
         out_w, out_h = max(2, int(width * scale / 2) * 2), max(2, int(height * scale / 2) * 2)
         fps = await self._probe_fps(video_path)
+        # A framing preview, not an export: about 3 Mbps at 720p30 (4.5 at
+        # 60 fps) keeps an hour of source near 1.4 GB rather than 5-8 GB.
+        mbps = round(max(1, 3 * out_w * out_h / (1280 * 720)) * (1.5 if float(Fraction(fps)) > 31 else 1), 1)
+        codec = self._video_codec_args(out_w, out_h, fps)
+        if "-b:v" in codec:
+            codec[codec.index("-b:v") + 1] = f"{mbps:g}M"
+        else:
+            codec += ["-maxrate", f"{mbps:g}M", "-bufsize", f"{2 * mbps:g}M"]
         temporary = output_path + ".partial.mp4"
         try:
             cmd = [
@@ -253,7 +261,7 @@ class RenderingService:
                 "-map", "0:v:0", "-map", "0:a:0?", "-vf",
                 f"scale={out_w}:{out_h},setsar=1",
                 "-fps_mode", "passthrough", "-enc_time_base", "1:1000000",
-                *self._video_codec_args(out_w, out_h, fps), "-pix_fmt", "yuv420p",
+                *codec, "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-af", AUDIO_SYNC, "-b:a", "96k", "-movflags", "+faststart", temporary,
             ]
             if progress is None:

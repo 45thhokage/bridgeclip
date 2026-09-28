@@ -573,3 +573,38 @@ def test_failures_carry_fixed_editor_codes(monkeypatch, tmp_path):
     assert code() == 'not_ready'
     (tmp_path / 'editor-source.mp4').unlink()
     assert code() == 'source_missing'
+
+
+@pytest.mark.parametrize('source_type', ['youtube', 'local'])
+def test_downloads_move_into_the_project_and_local_files_are_copied(tmp_path, source_type):
+    gate, _ = reviewer(lambda state, q: False)
+    source = tmp_path / 'source.mp4'
+    source.write_bytes(b'downloaded')
+    out = tmp_path / 'run'; out.mkdir()
+    async def preview(src, dest, **kwargs): Path(dest).write_bytes(b'preview')
+    renderer = SimpleNamespace(_get_video_dimensions=AsyncMock(return_value=(1920, 1080)),
+        capture_framing_source=AsyncMock(side_effect=preview))
+    request = SimpleNamespace(aspect_ratio='9:16', layout_style='fit', include_captions=True, caption_preset='pop', video_speed=1)
+    asyncio.run(prepare_project(request, [ClipPlanSegment(0, 5000, .9, summary='First')], transcript(),
+        SimpleNamespace(video_path=str(source), source_type=source_type, metadata=SimpleNamespace(title='T', duration_seconds=12)),
+        renderer, gate, str(out), lambda *_: None))
+    assert (out / 'editor-source.mp4').read_bytes() == b'downloaded'
+    assert source.exists() == (source_type == 'local')
+    assert (out / 'editor-source.mp4').stat().st_mode & 0o777 == 0o600
+
+
+def test_editor_preview_is_encoded_near_3_mbps_at_720p(monkeypatch, tmp_path):
+    commands = []
+    renderer = RenderingService.__new__(RenderingService)
+    renderer.settings = SimpleNamespace(local_mode=True, ffmpeg_preset='fast', ffmpeg_crf=20)
+    renderer._local_cpu_encoder = 'libopenh264'
+    for fps, expected in (('30', '3M'), ('60', '4.5M')):
+        monkeypatch.setattr(renderer, '_get_video_dimensions', AsyncMock(return_value=(3840, 2160)), raising=False)
+        monkeypatch.setattr(renderer, '_probe_fps', AsyncMock(return_value=fps), raising=False)
+        async def run(cmd, **_):
+            commands.append(cmd)
+            Path(cmd[-1]).write_bytes(b'')
+        monkeypatch.setattr(renderer, '_run_cmd', run, raising=False)
+        asyncio.run(renderer.capture_framing_source('in.mp4', str(tmp_path / f'preview-{fps}.mp4')))
+        cmd = commands[-1]
+        assert 'scale=1280:720,setsar=1' in cmd and cmd[cmd.index('-b:v') + 1] == expected

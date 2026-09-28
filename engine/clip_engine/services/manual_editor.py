@@ -232,7 +232,20 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
         raise NoClipCandidatesError()
     progress('Saving source video…', 0, 'saving')
     destination = os.path.join(output_dir, 'editor-source.mp4')
-    # A real copy also isolates local inputs from later changes to the original file.
+    def move_download():
+        # A download in the pipeline's temporary folder is discarded after this
+        # run: rename it on the same volume instead of storing a second copy.
+        if getattr(download, 'source_type', 'local') == 'local':
+            return False
+        try:
+            if os.stat(download.video_path).st_dev != os.stat(output_dir).st_dev:
+                return False
+            os.rename(download.video_path, destination)
+        except OSError:
+            return False
+        return True
+    # Local inputs are copied: a real copy isolates the project from later
+    # changes to (or removal of) the original file.
     def copy_source():
         size, copied = os.path.getsize(download.video_path), 0
         with open(download.video_path, 'rb') as source, open(destination, 'wb') as target:
@@ -241,7 +254,8 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
                 copied += len(chunk)
                 percent = 100 * copied / max(1, size)
                 loop.call_soon_threadsafe(progress, f'Saving source video: {percent:.0f}%', percent, 'saving')
-    await asyncio.to_thread(copy_source)
+    if not await asyncio.to_thread(move_download):
+        await asyncio.to_thread(copy_source)
     os.chmod(destination, 0o600)
     loop = asyncio.get_running_loop()
     await renderer.capture_framing_source(destination, os.path.join(output_dir, 'editor-preview.mp4'),
