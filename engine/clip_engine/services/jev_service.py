@@ -99,6 +99,10 @@ class JevService:
         return bool(self._api_key)
 
     async def evaluate(self, state, questions: dict[str, Question]):
+        # Source metadata and web research are untrusted and can carry prompt
+        # injections; Jev judges transcript evidence only.
+        if isinstance(state, dict) and 'source_context' in state:
+            state = {k: v for k, v in state.items() if k != 'source_context'}
         payload = {'model': MODEL, 'state': state, 'questions': questions}
         encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
         cache_id = hashlib.sha256(RULE_VERSION.encode() + encoded).hexdigest()

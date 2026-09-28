@@ -162,7 +162,8 @@ class CoherenceReviewer:
 
     def state(self, title, keeps, report):
         a, b = keeps[0][0], keeps[-1][1]
-        return {'source_context': self.source_context, 'title': title or '', 'retained_dialogue': dialogue(self.segments, keeps),
+        # Source context (untrusted metadata and research) never goes to Jev.
+        return {'title': title or '', 'retained_dialogue': dialogue(self.segments, keeps),
                 'before': dialogue(self.segments, [(max(0, a - 60000), a)])[-1600:],
                 'after': dialogue(self.segments, [(b, min(self.duration_ms, b + 60000))])[:1600],
                 'speaker_context': 'Speaker labels identify separate voices within each transcription chunk, not verified identities. Host commentary, quoted speech and watched footage may disagree. Do not treat different voices or a new topic as a retraction.',
@@ -374,7 +375,7 @@ class CoherenceReviewer:
         removals = removed_intervals(time_map.keeps, window_ms)
         for index, (a, b) in enumerate(removals):
             start, end = window_start + a, window_start + b
-            state = {'source_context': self.source_context, 'title': title or '', 'before': dialogue(self.segments, [(max(window_start, start - 10000), start)])[-1200:],
+            state = {'title': title or '', 'before': dialogue(self.segments, [(max(window_start, start - 10000), start)])[-1200:],
                      'after': dialogue(self.segments, [(end, min(window_start + window_ms, end + 10000))])[:1200],
                      'removed_text': dialogue(self.segments, [(start, end)]),
                      'interval': [start, end],

@@ -115,8 +115,13 @@ def validate_brief(raw, source, citations):
 
 
 def context_for_prompt(record):
-    """Use the same compact, labeled brief for discovery, repairs and cut review."""
-    if not record:
+    """The compact, labeled brief for discovery and boundary repairs.
+
+    Without a brief (web research off, not applicable, or failed) there is no
+    source context: the planner already has the title, as it did before briefs.
+    Jev never receives source context (see JevService.evaluate).
+    """
+    if not record or not record.get('brief'):
         return None
     source = record['source']
     return {'rule': CONTEXT_RULE, 'status': record['status'],
@@ -151,8 +156,12 @@ class SourceContextService:
         public_source = source['source_type'] in ('youtube', 'twitch') and source['title'] not in ('', 'Unknown')
         research = public_source and getattr(self.settings, 'source_context_web_research', False)
         record['research_status'] = 'pending' if research else 'disabled' if public_source else 'not_applicable'
+        if not research:
+            # Opt-in beta: without web research, make no model call and keep only the bounded metadata.
+            record['reason'] = 'web_research_off' if public_source else 'research_not_applicable'
+            return record
         # One research request, then at most one metadata-only fallback. No retry loop.
-        for use_web in ([True, False] if research else [False]):
+        for use_web in (True, False):
             prompt = (
                 'Prepare an editorial orientation brief BEFORE transcription. You have NOT watched or heard this video. '
                 + CONTEXT_RULE + ' Infer likely topic, format and useful moment-selection approaches from the supplied metadata. '
