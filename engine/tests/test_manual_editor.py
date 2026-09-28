@@ -426,6 +426,7 @@ def test_caption_suppression_pixels_follow_source_cuts_and_speed(monkeypatch, tm
         pytest.skip('FFmpeg and FFprobe are needed for the caption suppression render check')
     renderer = RenderingService()
     monkeypatch.setattr(renderer.settings, 'local_mode', True)
+    renderer._verify_ffmpeg()
     monkeypatch.setattr(rendering_service, 'get_output_dimensions', lambda _: (160, 240))
     source = tmp_path / 'source.mp4'
     subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',

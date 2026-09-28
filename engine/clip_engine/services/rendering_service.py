@@ -1241,8 +1241,18 @@ class RenderingService:
         """Run a command asynchronously."""
         logger.debug(f"Running: {' '.join(cmd[:10])}...")
 
+        reported = -1
+
+        def report_progress(percent):
+            # File-option compatibility retries belong to the same render.
+            # Do not emit a second initial zero when an older FFmpeg retries.
+            nonlocal reported
+            if percent > reported:
+                reported = percent
+                progress(percent)
+
         def execute(command):
-            return self._capture_preview_progress(command, duration_ms, progress, check=False) if progress else run_media(command)
+            return self._capture_preview_progress(command, duration_ms, report_progress, check=False) if progress else run_media(command)
 
         def invoke():
             # Keep the script inside the worker: cancelling the await does not

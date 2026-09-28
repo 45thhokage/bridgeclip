@@ -58,3 +58,32 @@ def test_real_encoding_progress_preserves_file_backed_long_filter_graph(tmp_path
     assert updates[0] == 0 and updates[-1] == 100
     assert updates == sorted(set(updates))
     assert any(0 < value < 100 for value in updates)
+
+
+def test_encoding_progress_stays_monotonic_across_legacy_ffmpeg_retry(monkeypatch):
+    import asyncio
+    import io
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from clip_engine.services import rendering_service
+
+    calls = []
+
+    @contextmanager
+    def media_process(cmd):
+        calls.append(cmd)
+        legacy = '-filter_complex_script' in cmd
+        stderr = b'' if legacy else (
+            b"Unrecognized option '/filter_complex'.\n"
+            b"Error splitting the argument list: Option not found"
+        )
+        stdout = b'out_time_us=0\nout_time_us=1250000\nout_time_us=2500000\n' if legacy else b''
+        yield SimpleNamespace(stdout=io.BytesIO(stdout), returncode=0 if legacy else 1), stderr
+
+    monkeypatch.setattr(rendering_service, 'media_process', media_process)
+    service = rendering_service.RenderingService.__new__(rendering_service.RenderingService)
+    updates = []
+    asyncio.run(service._run_cmd(['ffmpeg', '-filter_complex', 'null,' * 2200],
+        progress=updates.append, duration_ms=2500))
+    assert len(calls) == 2
+    assert updates == [0, 50, 99, 100]
