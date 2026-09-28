@@ -3,14 +3,16 @@ import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, join } from 'path'
 import { randomUUID } from 'crypto'
-import { parseCandidateEdit, parseEditorProject, renderEditKey, sourceReplacementErrors, type CandidateEdit, type EditorSession } from '../shared/clip-editor'
+import { editorFailureMessage, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProject, type EditorSession } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
 import { getBridgeRunnerPath, getEnginePath, resolvePythonPath, runtimeEnvironment } from './pipeline-runner'
 import { resolveBinary } from './tools'
+import { logger } from './logger'
 
-interface EditorOperation { progress?: EditorSession['progress']; action: NonNullable<EditorSession['operation']>; child?: ChildProcess; cancelled?: boolean; abort?: AbortController; batch?: { completed: number; total: number } }
+type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source'
+interface EditorOperation { progress?: EditorSession['progress']; action: NonNullable<EditorSession['operation']>; child?: ChildProcess; cancelled?: boolean; abort?: AbortController; batch?: EditorBatch }
 const operations = new Map<string, EditorOperation>()
 export function editorBusy(path: string): boolean { return operations.has(realpathSync(path)) }
 function runPath(path: unknown): string {
@@ -32,17 +34,35 @@ function readProject(run: string): ReturnType<typeof parseEditorProject> {
     return parseEditorProject(JSON.parse(data.subarray(0, used).toString('utf8')))
   } finally { closeSync(fd) }
 }
+function writeProject(run: string, project: EditorProject): void {
+  const data = JSON.stringify(project)
+  if (Buffer.byteLength(data) > 32 * 1024 * 1024) throw new Error('This editor project has too many caption edits to save')
+  if (runPath(run) !== run) throw new Error('Editor folder changed')
+  const temporary = join(run, `.editor-${randomUUID()}.tmp`)
+  try {
+    writeFileSync(temporary, data, { mode: 0o600, flag: 'wx' })
+    renameSync(temporary, join(run, 'editor-project.json'))
+  } finally { try { unlinkSync(temporary) } catch { /* Already committed. */ } }
+}
+function mediaNames(project: EditorProject): { source: string; preview: string } {
+  const suffix = project.source_id ? `-${project.source_id}` : ''
+  return { source: `editor-source${suffix}.mp4`, preview: `editor-preview${project.preview_id ? `-${project.preview_id}` : suffix}.mp4` }
+}
+
 export async function openEditor(path: unknown): Promise<EditorSession> {
   const run = runPath(path)
   if (!(await getJobOutput(run, loadSettings().outputDirectory))?.editor_project) throw new Error('This run has no editor project')
-  const project = readProject(run), suffix = project.source_id ? `-${project.source_id}` : ''
-  const sourcePath = join(run, `editor-source${suffix}.mp4`), previewPath = join(run, `editor-preview${project.preview_id ? `-${project.preview_id}` : suffix}.mp4`)
+  const project = readProject(run), names = mediaNames(project)
+  const operation = operations.get(run)
+  const state = { progress: operation?.progress ? { ...operation.progress } : undefined, operation: operation?.action ?? null, batch: operation?.batch ? { ...operation.batch } : undefined }
+  const sourcePath = join(run, names.source), previewPath = join(run, names.preview)
   for (const file of [sourcePath, previewPath]) {
     if (lstatSync(file).isSymbolicLink() || !isWithinDirectory(file, run)) throw new Error('Editor source is missing')
     assertMediaPath(file, loadSettings().outputDirectory)
   }
-  return { project, sourcePath, previewPath, progress: operations.get(run)?.progress ? { ...operations.get(run)!.progress! } : undefined, operation: operations.get(run)?.action ?? null, batch: operations.get(run)?.batch ? { ...operations.get(run)!.batch! } : undefined }
+  return { project, sourcePath, previewPath, ...state }
 }
+
 export async function saveEditor(path: unknown, revision: unknown, edits: unknown): Promise<EditorSession> {
   const run = runPath(path)
   if (operations.has(run)) throw new Error('Wait for the current editor operation to finish')
@@ -60,14 +80,7 @@ export async function saveEditor(path: unknown, revision: unknown, edits: unknow
       return { ...c, ...edit }
     })
     project.revision++
-    const data = JSON.stringify(project)
-    if (Buffer.byteLength(data) > 32 * 1024 * 1024) throw new Error('This editor project has too many caption edits to save')
-    if (runPath(run) !== run) throw new Error('Editor folder changed')
-    const temporary = join(run, `.editor-${randomUUID()}.tmp`)
-    try {
-      writeFileSync(temporary, data, { mode: 0o600, flag: 'wx' })
-      renameSync(temporary, join(run, 'editor-project.json'))
-    } finally { try { unlinkSync(temporary) } catch { /* Already committed. */ } }
+    writeProject(run, project)
   } finally { operations.delete(run) }
   return openEditor(run)
 }
@@ -92,7 +105,90 @@ export async function runEditor(path: unknown, revision: unknown, candidateId: u
   if (action !== 'review' && action !== 'export' && action !== 'export-all' && action !== 'scan-cameras') throw new Error('Invalid editor operation')
   return executeEditor(path, revision, candidateId, action)
 }
-async function executeEditor(path: unknown, revision: unknown, candidateId: unknown, action: 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source', replacement?: string): Promise<EditorSession> {
+
+/** Worker output can contain private paths and keys: log only a short, redacted tail. */
+function safeTail(stderr: string): Record<string, string> {
+  const lines = stderr.split(/\r?\n/).map((line) => line
+    .replace(/^\d{4}-\d{2}-\d{2} [\d:,.]+ - [\w.]+ - [A-Z]+ - /, '')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[url]')
+    .replace(/\b(?:sk|pk|rk)-[\w-]{8,}/g, '[key]')
+    .replace(/\b(?:authorization|api[_ -]?key|token|password|secret|bearer)\b\S*\s*[:=]?\s*\S+/gi, '[redacted]')
+    .replace(/(?:[A-Za-z]:)?[\\/][^\s'"]*/g, '[path]')
+    .replace(/[^\x20-\x7e]/g, '?').replace(/\s+/g, ' ').trim().slice(0, 160))
+    .filter(Boolean).slice(-8)
+  return Object.fromEntries(lines.map((line, i) => [`line${i + 1}`, line]))
+}
+/** Generous for long sources on CPU encoders, yet bounded if a worker hangs. */
+const workerLimitMs = (durationMs: number): number => 30 * 60 * 1000 + 3 * durationMs
+
+function runWorker(run: string, operation: EditorOperation, action: WorkerAction, env: Record<string, string | undefined>, python: string, limitMs: number, request: Record<string, unknown>): Promise<void> {
+  const engine = env.PYTHONPATH!
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(python, [join(dirname(getBridgeRunnerPath()), 'editor_runner.py')],
+      { cwd: engine, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true })
+    operation.child = child
+    let stdout = '', stderr = '', settled = false, protocolFailed = false, timedOut = false
+    let result: { ok: boolean; error?: unknown } | undefined
+    const consume = (line: string): void => {
+      if (!line.trim()) return
+      if (line.length > 16384) { protocolFailed = true; stop(child); return }
+      try {
+        const value = JSON.parse(line)
+        if (value?.type === 'progress') {
+          if (action === 'scan-cameras' && (value.phase === 'scan' || value.phase === 'preview') &&
+              typeof value.percent === 'number' && Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) {
+            const previous = operation.progress
+            if (!previous || (previous.phase === 'scan' && value.phase === 'preview') ||
+                (previous.phase === value.phase && value.percent >= previous.percent)) {
+              operation.progress = { phase: value.phase, percent: Math.floor(value.percent) }
+            }
+          }
+        } else if (typeof value?.ok === 'boolean' && !result) result = value
+        else protocolFailed = true
+      } catch { protocolFailed = true }
+    }
+    const timer = setTimeout(() => { timedOut = true; stop(child, true) }, limitMs)
+    const finish = (error?: Error): void => { if (settled) return; settled = true; clearTimeout(timer); if (error) reject(error); else resolve() }
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk)
+      let end: number
+      while ((end = stdout.indexOf('\n')) >= 0) { consume(stdout.slice(0, end)); stdout = stdout.slice(end + 1) }
+      if (stdout.length > 16384) { protocolFailed = true; stdout = ''; stop(child) }
+    })
+    // Keep a bounded tail for the log; it is redacted before it is written.
+    child.stderr.on('data', (chunk) => { stderr = (stderr + String(chunk)).slice(-8192) })
+    child.on('error', (error) => {
+      logger.error('editor.worker.spawnFailed', { action, errno: (error as NodeJS.ErrnoException).code ?? 'unknown' })
+      finish(new Error('Could not start the editor engine. Open Settings and run System check.'))
+    })
+    child.on('close', (exitCode, signal) => {
+      consume(stdout)
+      if (exitCode === 0 && !protocolFailed && result?.ok === true) return finish()
+      const code: EditorErrorCode | undefined = timedOut ? 'timeout' : operation.cancelled ? 'cancelled' : isEditorErrorCode(result?.error) ? result.error : undefined
+      logger.warn('editor.worker.failed', { action, code: code ?? 'unknown', exitCode, signal, protocolFailed, ...safeTail(stderr) })
+      finish(new Error(editorFailureMessage(action === 'export-all' ? 'export' : action, code)))
+    })
+    child.stdin.on('error', () => {})
+    child.stdin.end(JSON.stringify(request))
+  })
+}
+
+const quote = (title: string): string => `“${title.length > 60 ? `${title.slice(0, 59)}…` : title}”`
+class BatchError extends Error {}
+/** Report a partial "Bake all": what finished, which clips failed and why, and what is still ready. */
+function batchFailure(batch: EditorBatch, failed: { title: string; error: Error }[], cancelled: boolean, stoppedBy?: unknown): Error {
+  const parts = [`Baked ${batch.completed} of ${batch.total} ready clips.`]
+  if (failed.length) {
+    const reasons = [...new Set(failed.map((f) => f.error.message))]
+    parts.push(`Could not bake ${failed.slice(0, 3).map((f) => quote(f.title)).join(', ')}${failed.length > 3 ? ` and ${failed.length - 3} more` : ''}:`,
+      reasons.length === 1 ? reasons[0] : `${reasons[0]} (and other errors)`)
+  }
+  if (cancelled) parts.push('Batch cancelled.')
+  else if (stoppedBy !== undefined) parts.push(`Batch stopped: ${stoppedBy instanceof Error ? stoppedBy.message : 'Export failed.'}`)
+  if (batch.completed < batch.total) parts.push('Clips that were not baked are still ready.')
+  return new BatchError(parts.join(' '))
+}
+async function executeEditor(path: unknown, revision: unknown, candidateId: unknown, action: WorkerAction, replacement?: string): Promise<EditorSession> {
   const run = runPath(path)
   if (operations.has(run) || operations.size >= 2) throw new Error('An editor operation is already running. Try again when it finishes.')
   const operation: EditorOperation = { action, ...(action === 'scan-cameras' ? { progress: { phase: 'scan', percent: 0 } as const } : {}) }
@@ -101,6 +197,7 @@ async function executeEditor(path: unknown, revision: unknown, candidateId: unkn
   const previewId = action === 'scan-cameras' ? randomUUID().replaceAll('-', '') : undefined
   let previousPreview: string | undefined
   let previousMedia: string[] = []
+  const failed: { title: string; error: Error }[] = []
   try {
     const session = await openEditor(run)
     previousPreview = session.previewPath
@@ -120,61 +217,27 @@ async function executeEditor(path: unknown, revision: unknown, candidateId: unkn
     if (action === 'export-all') operation.batch = { completed: 0, total: candidates.length }
     const settings = loadSettings(), engine = getEnginePath()
     if (action === 'review' && !settings.openrouterApiKey) throw new Error('Add your OpenRouter key in Settings to run this review.')
-    const env: Record<string, string | undefined> = { ...runtimeEnvironment(), ...getSettingsForBridge({ ...settings, jevEnabled: 'on' }), PYTHONPATH: engine, PYTHONUNBUFFERED: '1' }
+    const env: Record<string, string | undefined> = { ...runtimeEnvironment(), ...getSettingsForBridge({ ...settings, jevEnabled: 'on' }), PYTHONPATH: engine, PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
     const ffmpeg = resolveBinary('ffmpeg')
     if (ffmpeg !== 'ffmpeg') env.PATH = `${dirname(ffmpeg)}${delimiter}${env.PATH ?? ''}`
+    const python = resolvePythonPath(engine, settings.pythonPath), limitMs = workerLimitMs(session.project.duration_ms)
     for (const candidate of candidates) {
-      if (operation.cancelled) throw new Error('Export cancelled.')
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(resolvePythonPath(engine, settings.pythonPath), [join(dirname(getBridgeRunnerPath()), 'editor_runner.py')],
-          { cwd: engine, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true })
-        operation.child = child
-        let stdout = '', settled = false, protocolFailed = false
-        let result: { ok: boolean; error?: unknown } | undefined
-        const consume = (line: string): void => {
-          if (!line.trim()) return
-          if (line.length > 16384) { protocolFailed = true; stop(child); return }
-          try {
-            const value = JSON.parse(line)
-            if (value?.type === 'progress') {
-              if (action === 'scan-cameras' && (value.phase === 'scan' || value.phase === 'preview') &&
-                  typeof value.percent === 'number' && Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) {
-                const previous = operation.progress
-                if (!previous || (previous.phase === 'scan' && value.phase === 'preview') ||
-                    (previous.phase === value.phase && value.percent >= previous.percent)) {
-                  operation.progress = { phase: value.phase, percent: Math.floor(value.percent) }
-                }
-              }
-            } else if (typeof value?.ok === 'boolean' && !result) result = value
-            else protocolFailed = true
-          } catch { protocolFailed = true }
-        }
-        const timer = setTimeout(() => stop(child, true), 30 * 60 * 1000)
-        const finish = (error?: Error): void => { if (settled) return; settled = true; clearTimeout(timer); if (error) reject(error); else resolve() }
-        child.stdout.on('data', (chunk) => {
-          stdout += String(chunk)
-          let end: number
-          while ((end = stdout.indexOf('\n')) >= 0) { consume(stdout.slice(0, end)); stdout = stdout.slice(end + 1) }
-          if (stdout.length > 16384) { protocolFailed = true; stdout = ''; stop(child) }
-        })
-        child.stderr.resume() // Provider output may contain private data. Never forward it.
-        child.on('error', () => finish(new Error('Could not start the editor engine. Check your Python setup.')))
-        child.on('close', (code) => {
-          let ok = false, reason: string | undefined
-          consume(stdout)
-          ok = !protocolFailed && result?.ok === true
-          if (typeof result?.error === 'string' && Object.hasOwn(sourceReplacementErrors, result.error)) reason = sourceReplacementErrors[result.error]
-          finish(code === 0 && ok ? undefined : new Error(action === 'scan-cameras' ? 'Camera scan stopped or failed. Your edits and previous markers are saved. Try scanning a shorter clip.' : action === 'replace-source' ? (reason ?? 'Source replacement stopped or failed. Reopen the editor to check its current source, then try again.') : action !== 'review' ? 'Export stopped or failed. Your edits are saved; check System check and try again.' : 'Review stopped or failed. Your previous review is preserved. Try again.'))
-        })
-        child.stdin.on('error', () => {})
-        child.stdin.end(JSON.stringify({ run, library: realpathSync(settings.outputDirectory), revision, candidate_id: candidate.id, action: action === 'export-all' ? 'export' : action, source_id: sourceId, preview_id: previewId }))
-      })
-      operation.child = undefined
-      if (operation.batch) operation.batch.completed++
+      if (operation.cancelled) break
+      try {
+        await runWorker(run, operation, action, env, python, limitMs, { run, library: realpathSync(settings.outputDirectory), revision, candidate_id: candidate.id, action: action === 'export-all' ? 'export' : action, source_id: sourceId, preview_id: previewId })
+        if (operation.batch) operation.batch.completed++
+      } catch (error) {
+        // One failed clip must not strand the rest of "Bake all".
+        if (action !== 'export-all' || operation.cancelled) throw error
+        failed.push({ title: candidate.title, error: error as Error })
+        operation.batch!.failed = failed.length
+      } finally { operation.child = undefined }
       revision = readProject(run).revision
     }
+    if (operation.batch && (operation.cancelled || failed.length)) throw batchFailure(operation.batch, failed, !!operation.cancelled)
+    if (operation.cancelled) throw new Error(editorFailureMessage(action, 'cancelled'))
   } catch (error) {
-    if (operation.batch) throw new Error(`Baked ${operation.batch.completed} of ${operation.batch.total} ready clips. ${operation.cancelled ? 'Batch cancelled.' : 'Batch stopped: ' + (error instanceof Error ? error.message : 'Export failed.')} Remaining clips are still ready.`)
+    if (operation.batch && !(error instanceof BatchError)) throw batchFailure(operation.batch, failed, !!operation.cancelled, error)
     throw error
   } finally {
     if (previewId) {

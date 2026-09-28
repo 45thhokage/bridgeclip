@@ -442,7 +442,7 @@ for (const cancelled of [false, true]) test(`batch ${cancelled ? 'cancellation' 
   const f = batchSetup()
   try {
     const pending = f.main.runEditor(f.run, 0, '', 'export-all')
-    const rejected = assert.rejects(pending, cancelled ? /Baked 1 of 2.*cancelled/ : /Baked 1 of 2.*Batch stopped/)
+    const rejected = assert.rejects(pending, cancelled ? /Baked 1 of 2.*cancelled/ : /Baked 1 of 2 ready clips\. Could not bake “[^”]+”: Export stopped or failed.*still ready/)
     ;(await nextWorker(f.workers, 1)).finish()
     const second = await nextWorker(f.workers, 2)
     if (cancelled) f.main.cancelEditor(f.run)
@@ -513,7 +513,7 @@ for (const outcome of ['success', 'failure', 'cancelled', 'committed-before-exit
     await assert.rejects(f.main.replaceEditorSource(f.run, 999, replacement), /changed/)
     await assert.rejects(f.main.runEditor(f.run, 0, '', 'replace-source'), /Invalid/)
     const pending = f.main.replaceEditorSource(f.run, 0, replacement)
-    const result = outcome === 'success' ? pending : assert.rejects(pending, outcome === 'failure' ? /different duration/ : /replacement stopped/)
+    const result = outcome === 'success' ? pending : assert.rejects(pending, outcome === 'failure' ? /different duration/ : outcome === 'cancelled' ? /replacement cancelled\. The previous source is still in use/ : /replacement stopped/)
     await entered
     assert.equal(config.action, 'replace-source')
     assert.equal(fs.readFileSync(path.join(f.run, `editor-source-${config.source_id}.mp4`), 'utf8'), 'higher resolution source')
@@ -614,7 +614,7 @@ test('camera scan locks edits, needs no provider key, and cancellation cleans on
   try {
     const before = fs.readFileSync(path.join(f.run, 'editor-project.json'), 'utf8')
     const pending = f.main.runEditor(f.run, 0, 'candidate-1', 'scan-cameras')
-    const rejected = assert.rejects(pending, /Camera scan stopped/)
+    const rejected = assert.rejects(pending, /Camera scan cancelled\. Your edits and previous markers are saved/)
     const worker = await nextWorker(f.workers, 1)
     assert.equal(worker.config.action, 'scan-cameras')
     assert.match(worker.config.preview_id, /^[a-f0-9]{32}$/)
@@ -663,5 +663,60 @@ for (const output of ['malformed\n', 'x'.repeat(16385)]) test('invalid editor pr
     worker.write(output); worker.write('\n{"ok":true}\n'); worker.close(0)
     await rejected
     assert.equal((await f.main.openEditor(f.run)).progress, undefined)
+  } finally { f.cleanup() }
+})
+
+test('one failed clip does not stop "Bake all"; the report names it and it stays ready', async () => {
+  const f = batchSetup()
+  try {
+    const pending = f.main.runEditor(f.run, 0, '', 'export-all')
+    const rejected = assert.rejects(pending, (error) => {
+      assert.match(error.message, /^Baked 1 of 2 ready clips\. Could not bake “The result”: /)
+      assert.doesNotMatch(error.message, /System check/)
+      assert.match(error.message, /still ready/)
+      return true
+    })
+    ;(await nextWorker(f.workers, 1)).finish(false)
+    const second = await nextWorker(f.workers, 2)
+    assert.deepEqual((await f.main.openEditor(f.run)).batch, { completed: 0, total: 2, failed: 1 })
+    second.finish()
+    await rejected
+    const reopened = await f.main.openEditor(f.run)
+    assert.deepEqual(reopened.project.candidates.map(c => c.status), ['refining', 'ready', 'baked', 'discarded', 'baked'])
+  } finally { f.cleanup() }
+})
+
+test('worker failures map fixed codes to specific messages and log only a redacted stderr tail', async () => {
+  const { EventEmitter } = require('node:events')
+  const { PassThrough } = require('node:stream')
+  let spawned
+  const f = setup({ child_process: { ...require('node:child_process'), spawn: (command, args, options) => {
+    const child = new EventEmitter()
+    child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough()
+    spawned = { command, args, options, child }
+    return child
+  } } })
+  try {
+    const project = JSON.parse(fs.readFileSync(path.join(f.run, 'editor-project.json')))
+    project.candidates[0].status = 'ready'
+    fs.writeFileSync(path.join(f.run, 'editor-project.json'), JSON.stringify(project))
+    for (const [code, expected] of [['render_failed', /^Rendering failed\. Your edits are saved\..*Show Logs/], ['source_missing', /Replace source/],
+      ['engine_unavailable', /System check/], ['/private/forged', /^Export stopped or failed\. Your edits are saved/]]) {
+      const pending = f.main.runEditor(f.run, 0, 'candidate-1', 'export')
+      const deadline = Date.now() + 5000
+      while (!spawned && Date.now() < deadline) await new Promise(r => setTimeout(r, 5))
+      const { child, options } = spawned; spawned = undefined
+      assert.equal(options.env.PYTHONDONTWRITEBYTECODE, '1')
+      child.stderr.write('2026-09-28 10:00:00,000 - editor_runner - ERROR - Editor export failed (render_failed)\n')
+      child.stderr.write("RenderingError: Error opening /Users/someone/Movies/clip.mp4 api_key=sk-or-v1-abcdef123456 https://example.com/x\nNo such filter: 'perspective'\n")
+      child.stdout.write(JSON.stringify({ ok: false, error: code }) + '\n'); child.emit('close', 1, null)
+      const error = await pending.then(() => null, (e) => e)
+      assert.match(error.message, expected)
+      if (code !== 'engine_unavailable') assert.doesNotMatch(error.message, /System check/)
+    }
+    const log = fs.readFileSync(path.join(f.dir, 'logs', 'bridgeclip.log'), 'utf8')
+    assert.match(log, /"code":"render_failed"/)
+    assert.match(log, /No such filter: 'perspective'/)
+    assert.doesNotMatch(log, /someone|sk-or|example\.com/)
   } finally { f.cleanup() }
 })

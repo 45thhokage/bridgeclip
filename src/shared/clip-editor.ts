@@ -45,13 +45,65 @@ export interface EditorProject {
   transcript: { start_ms: number; end_ms: number; text: string }[]
 }
 export interface EditorProgress { phase: 'scan' | 'preview'; percent: number }
-export interface EditorSession { progress?: EditorProgress; project: EditorProject; sourcePath: string; previewPath: string; operation?: 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras' | null; batch?: { completed: number; total: number } }
+export type EditorOperation = 'save' | 'review' | 'export' | 'export-all' | 'replace-source' | 'scan-cameras'
+export interface EditorBatch { completed: number; total: number; failed?: number }
+export interface EditorSession {
+  progress?: EditorProgress; project: EditorProject; sourcePath: string; previewPath: string
+  operation?: EditorOperation | null; batch?: EditorBatch
+}
+
+/** Fixed worker failure codes (see bridge/editor_runner.py); no tool output crosses the bridge. */
+export const editorErrorCodes = ['duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
+  'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable',
+  'cancelled', 'timeout'] as const
+export type EditorErrorCode = typeof editorErrorCodes[number]
+export function isEditorErrorCode(value: unknown): value is EditorErrorCode {
+  return typeof value === 'string' && (editorErrorCodes as readonly string[]).includes(value)
+}
 
 export const sourceReplacementErrors: Record<string, string> = {
   duration: 'The replacement has a different duration. Choose the exact same video with the same timing.',
   geometry: 'The replacement has different framing or orientation. Choose the same video and aspect ratio.',
   audio: 'The replacement has different audio availability. Choose the same video with the same audio.',
   invalid: 'Could not read the replacement video. Choose a playable video file.'
+}
+
+const logs = 'Details are in Help → Show Logs.'
+const common: Partial<Record<EditorErrorCode, string>> = {
+  project_changed: 'This project changed. Reopen the editor and try again.',
+  source_missing: "The editor's source video is missing. Use Replace source with the original video, then try again.",
+  source_incompatible: "FFmpeg could not read the editor's source video. Use Replace source with a playable copy of the same video.",
+  engine_unavailable: 'The video engine could not start. Open Settings and run System check.'
+}
+/** A user-facing message for a failed editor worker. Only render setup problems point to System check. */
+export function editorFailureMessage(action: Exclude<EditorOperation, 'save'>, code?: EditorErrorCode): string {
+  if (action === 'replace-source') {
+    if (code && Object.hasOwn(sourceReplacementErrors, code)) return sourceReplacementErrors[code]
+    return code === 'cancelled' ? 'Source replacement cancelled. The previous source is still in use.'
+      : code === 'timeout' ? 'Source replacement took too long and was stopped. The previous source is still in use.'
+      : code === 'render_failed' ? `Could not prepare a preview from the replacement video. The previous source is still in use. ${logs}`
+      : code && common[code] ? common[code]!
+      : 'Source replacement stopped or failed. Reopen the editor to check its current source, then try again.'
+  }
+  if (action === 'scan-cameras') {
+    return code === 'scan_too_long' ? 'This clip is too long to scan for camera changes. Try scanning a shorter clip. Your edits and previous markers are saved.'
+      : code === 'cancelled' ? 'Camera scan cancelled. Your edits and previous markers are saved.'
+      : code && common[code] ? `${common[code]} Your edits and previous markers are saved.`
+      : 'Camera scan stopped or failed. Your edits and previous markers are saved. Try scanning a shorter clip.'
+  }
+  if (action === 'review') {
+    return code === 'review_unavailable' ? 'Jev could not review this edit. Check your OpenRouter key and connection, then try again. Your previous review is preserved.'
+      : code === 'cancelled' ? 'Review cancelled. Your previous review is preserved.'
+      : code && common[code] ? `${common[code]} Your previous review is preserved.`
+      : 'Review stopped or failed. Your previous review is preserved. Try again.'
+  }
+  return code === 'render_failed' ? `Rendering failed. Your edits are saved. Try again, or simplify this clip's layouts. ${logs}`
+    : code === 'invalid_edit' ? "This clip has an edit that can't be rendered. Check its cuts, layouts and captions, then try again."
+    : code === 'not_ready' ? 'Mark this clip ready before baking it.'
+    : code === 'timeout' ? 'Rendering took too long and was stopped. Your edits are saved.'
+    : code === 'cancelled' ? 'Export cancelled.'
+    : code && common[code] ? common[code]!
+    : `Export stopped or failed. Your edits are saved. Try again. ${logs}`
 }
 
 export function editorProgress(candidates: Pick<CandidateEdit, 'status'>[]): { remaining: number; initialCandidate: number } {
