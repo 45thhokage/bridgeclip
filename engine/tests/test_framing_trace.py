@@ -1,6 +1,7 @@
 """Recorded diagnostics match actual analysis, edit geometry and render fallback."""
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -69,7 +70,9 @@ def test_fallback_retains_attempted_and_actual_plans(service, monkeypatch, tmp_p
         assert piece['output_end_ms'] - piece['output_start_ms'] == pytest.approx(
             (piece['source_end_ms'] - piece['source_start_ms']) / speed)
     assert 'Cannot select channel' not in json.dumps(trace)
-    assert Path(result.framing_trace_path).stat().st_mode & 0o777 == 0o600
+    # Windows reports DOS attributes here, not POSIX owner/group permissions.
+    if os.name != 'nt':
+        assert Path(result.framing_trace_path).stat().st_mode & 0o777 == 0o600
 
 
 def test_diagnostics_failure_does_not_lose_rendered_clip(service, monkeypatch, tmp_path):

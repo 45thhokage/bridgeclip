@@ -302,7 +302,7 @@ def test_manual_caption_position_pins_all_layers_and_burns_at_selected_height(tm
     positions = POS.findall(text)
     assert positions and set(positions) == {('5', str(w // 2), str(round(h * y)))}
     raw = subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', f'color=black:s={w}x{h}:d=1',
-        '-vf', f"ass='{ass}'", '-ss', '0.5', '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+        '-vf', f"ass={RenderingService._escape_filter_path(ass)}", '-ss', '0.5', '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
         capture_output=True, check=True, timeout=30)
     frame = np.frombuffer(raw.stdout, dtype=np.uint8).reshape(h, w, 3)
     rows = np.nonzero(frame.max(axis=2) > 100)[0]

@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -594,7 +595,9 @@ def test_downloads_move_into_the_project_and_local_files_are_copied(tmp_path, so
         renderer, gate, str(out), lambda *_: None))
     assert (out / 'editor-source.mp4').read_bytes() == b'downloaded'
     assert source.exists() == (source_type == 'local')
-    assert (out / 'editor-source.mp4').stat().st_mode & 0o777 == 0o600
+    # Windows reports DOS attributes here, not POSIX owner/group permissions.
+    if os.name != 'nt':
+        assert (out / 'editor-source.mp4').stat().st_mode & 0o777 == 0o600
 
 
 def test_editor_preview_is_encoded_near_3_mbps_at_720p(monkeypatch, tmp_path):
