@@ -4,8 +4,8 @@ import json
 import math
 import os
 import re
-import shutil
 import tempfile
+from contextlib import contextmanager
 from uuid import uuid4
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -21,10 +21,35 @@ from clip_engine.services.transcription_service import TranscriptSegment, Transc
 from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, PROBE_TIMEOUT_SECONDS, run_media, validate_video_dimensions
 
 
-class SourceReplacementError(ValueError):
+# Fixed failure codes; the only failure detail that crosses the bridge.
+EDITOR_ERROR_CODES = frozenset({'duration', 'geometry', 'audio', 'invalid', 'project_changed', 'invalid_edit', 'not_ready',
+    'source_missing', 'source_incompatible', 'render_failed', 'scan_too_long', 'review_unavailable', 'engine_unavailable'})
+
+
+class EditorError(ValueError):
+    def __init__(self, code, message=None):
+        self.editor_code = code
+        super().__init__(message or code)
+
+
+class SourceReplacementError(EditorError):
     def __init__(self, code):
         self.code = code
-        super().__init__('Source replacement rejected')
+        super().__init__(code, 'Source replacement rejected')
+
+
+@contextmanager
+def failure_code(code):
+    """Label failures without changing their type or message."""
+    try:
+        yield
+    except Exception as error:
+        if getattr(error, 'editor_code', None) not in EDITOR_ERROR_CODES:
+            try:
+                error.editor_code = code
+            except AttributeError:
+                pass
+        raise
 
 
 def media_name(kind, source_id=None):
@@ -69,10 +94,11 @@ async def replace_source(run, project, source_id):
     preview = run / media_name('preview', source_id)
     if preview.exists() or preview.is_symlink():
         raise ValueError('Replacement preview already exists')
-    await RenderingService().capture_framing_source(str(source), str(preview))
+    with failure_code('render_failed'):
+        await RenderingService().capture_framing_source(str(source), str(preview))
     # Recheck immediately before committing. Failed/cancelled generation never touches the project.
     if read_json(run, 'editor-project.json')['revision'] != project['revision']:
-        raise ValueError('Editor project changed')
+        raise EditorError('project_changed', 'Editor project changed')
     project.pop('preview_id', None)
     project['frame_preview'] = True
     project.update(source_id=source_id, width=new['width'], height=new['height'], revision=project['revision'] + 1)
@@ -381,7 +407,7 @@ def manual_plan(project, c):
 
 
 async def run_editor(config, progress=None):
-    from clip_engine.config import get_settings, get_caption_preset
+    from clip_engine.config import get_settings
     from clip_engine.services.editorial_vision import EditorialVision
     settings = get_settings()
     raw_run = Path(config['run'])
@@ -390,23 +416,31 @@ async def run_editor(config, progress=None):
         raise ValueError('Editor project is outside the library')
     project = read_json(run, 'editor-project.json')
     if project['version'] != 1 or project['revision'] != config['revision']:
-        raise ValueError('The editor project changed. Reopen it and retry.')
+        raise EditorError('project_changed', 'The editor project changed. Reopen it and retry.')
     if config['action'] == 'replace-source':
         source_id = config['source_id']
         if not source_id or source_id == project.get('source_id'):
             raise ValueError('Invalid source generation')
         await replace_source(run, project, source_id)
         return
-    c = next(c for c in project['candidates'] if c['id'] == config['candidate_id'])
-    validate_candidate(c, project['duration_ms'], len(project['transcript']))
-    source = str(local_file(run, media_name('source', project.get('source_id'))))
+    c = next((c for c in project['candidates'] if c['id'] == config['candidate_id']), None)
+    if c is None:
+        raise EditorError('project_changed', 'Candidate is missing')
+    with failure_code('invalid_edit'):
+        validate_candidate(c, project['duration_ms'], len(project['transcript']))
+    with failure_code('source_missing'):
+        source = str(local_file(run, media_name('source', project.get('source_id'))))
     if config['action'] == 'scan-cameras':
         from clip_engine.services.camera_scan import scan_camera_changes
         def report(phase, percent):
             if progress:
                 progress({'phase': phase, 'percent': percent})
-        scan = await asyncio.to_thread(scan_camera_changes, source, c['ranges'][0][0], c['ranges'][-1][1],
-                                       lambda percent: report('scan', percent))
+        try:
+            scan = await asyncio.to_thread(scan_camera_changes, source, c['ranges'][0][0], c['ranges'][-1][1],
+                                           lambda percent: report('scan', percent))
+        except ValueError as error:
+            error.editor_code = 'scan_too_long' if 'too long' in str(error) else 'source_incompatible'
+            raise
         preview = None
         try:
             # Upgrade old 30-fps proxies once. A new name avoids browser caching
@@ -414,11 +448,12 @@ async def run_editor(config, progress=None):
             if not project.get('frame_preview'):
                 preview_id = config.get('preview_id') or uuid4().hex
                 preview = run / media_name('preview', preview_id)
-                await RenderingService().capture_framing_source(source, str(preview),
-                    progress=lambda percent: report('preview', percent), duration_ms=project['duration_ms'])
+                with failure_code('render_failed'):
+                    await RenderingService().capture_framing_source(source, str(preview),
+                        progress=lambda percent: report('preview', percent), duration_ms=project['duration_ms'])
                 project.update(preview_id=preview_id, frame_preview=True)
             if read_json(run, 'editor-project.json')['revision'] != project['revision']:
-                raise ValueError('Editor project changed')
+                raise EditorError('project_changed', 'Editor project changed')
             c['camera_scan'] = scan
             c['dismissed_camera_markers'] = [t for t in c.get('dismissed_camera_markers', [])
                                              if any(abs(t - m['at_ms']) < .01 for m in scan['markers'])]
@@ -431,60 +466,75 @@ async def run_editor(config, progress=None):
             if preview is not None:
                 preview.unlink(missing_ok=True)
         return
-    rows = read_json(run, 'transcript.json')['segments']
-    def timing(item):
-        return {**item, 'start_time_ms': round(item['start_time_ms']), 'end_time_ms': round(item['end_time_ms'])}
-    transcript = [TranscriptSegment(**{**timing(s), 'words': [TranscriptWord(**timing(w)) for w in s.get('words', [])]}) for s in rows]
+    with failure_code('invalid_edit'):
+        rows = read_json(run, 'transcript.json')['segments']
+        def timing(item):
+            return {**item, 'start_time_ms': round(item['start_time_ms']), 'end_time_ms': round(item['end_time_ms'])}
+        transcript = [TranscriptSegment(**{**timing(s), 'words': [TranscriptWord(**timing(w)) for w in s.get('words', [])]}) for s in rows]
     action = config['action']
     if action == 'review':
-        reviewer = CoherenceReviewer(JevService.from_settings(settings, required=True), settings, transcript, project['duration_ms'])
-        context = run / 'source_context.json'
-        if context.exists():
-            from clip_engine.services.source_context import context_for_prompt
-            # Read the same bounded brief used in discovery; no new web research.
-            reviewer.source_context = context_for_prompt(read_json(run, 'source_context.json'))
-        with tempfile.TemporaryDirectory(prefix='.editor-review-', dir=run) as work:
-            vision = EditorialVision(settings, source, work, project['duration_ms'])
-            reviewer.visual_observer = vision.observe if settings.jev_visual_context else None
-            await review_candidate(c, reviewer)
+        with failure_code('review_unavailable'):
+            reviewer = CoherenceReviewer(JevService.from_settings(settings, required=True), settings, transcript, project['duration_ms'])
+            context = run / 'source_context.json'
+            if context.exists():
+                from clip_engine.services.source_context import context_for_prompt
+                # Read the same bounded brief used in discovery; no new web research.
+                reviewer.source_context = context_for_prompt(read_json(run, 'source_context.json'))
+            with tempfile.TemporaryDirectory(prefix='.editor-review-', dir=run) as work:
+                vision = EditorialVision(settings, source, work, project['duration_ms'])
+                reviewer.visual_observer = vision.observe if settings.jev_visual_context else None
+                await review_candidate(c, reviewer)
     elif action == 'export':
         if c.get('status', 'refining') != 'ready':
-            raise ValueError('Mark this clip ready before baking it')
+            raise EditorError('not_ready', 'Mark this clip ready before baking it')
         if any(edit['segment'] >= len(transcript) for edit in c.get('caption_edits', [])):
-            raise ValueError('Caption source changed')
-        render_transcript = caption_transcript(transcript, c.get('caption_edits', []))
+            raise EditorError('invalid_edit', 'Caption source changed')
         output = read_json(run, 'job_output.json')
-        next_index = output.get('next_clip_index', 0)
-        if type(next_index) is not int or not 0 <= next_index <= 1000:
-            raise ValueError('Invalid export sequence')
-        index = max(next_index, max((x['clip_index'] for x in output['clips']), default=-1) + 1)
-        while (run / f'clip_{index:02d}.mp4').exists() or (run / f'clip_{index:02d}.mp4').is_symlink():
-            index += 1
-        if index > 999:
-            raise ValueError('Too many exports in this project')
-        renderer = RenderingService()
-        a, b = c['ranges'][0][0], c['ranges'][-1][1]
-        path = run / f'clip_{index:02d}.mp4'
-        if path.exists() or path.is_symlink():
-            raise ValueError('Export file already exists')
-        # Commit complete renders only; failed/cancelled exports do not change the library.
-        with tempfile.TemporaryDirectory(prefix='.editor-export-', dir=run) as work:
-            result = await renderer.render_clip(RenderRequest(video_path=source, output_path=str(Path(work) / 'clip.mp4'),
-                start_time_ms=a, end_time_ms=b, source_width=project['width'], source_height=project['height'],
-                transcript_segments=render_transcript, include_captions=c['captions'], caption_style=get_caption_preset(c['caption_preset']),
-                caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
-                caption_y=c.get('caption_y'),
-                apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
-                manual_ranges_ms=[tuple(interval) for interval in c['ranges']], manual_plan=manual_plan(project, c)))
-            os.replace(result.output_path, path)
-        output['clips'].append({'clip_index': index, 's3_url': str(path), 'duration_ms': result.duration_ms,
-            'start_time_ms': a, 'end_time_ms': b, 'virality_score': c['score'], 'layout_type': result.layout_type,
-            'summary': c['title'], 'tags': [], 'render_fallback': None})
-        output['total_clips'] = len(output['clips'])
-        atomic_json(run / 'job_output.json', output)
-        c['exports'].append(index)
+        # job_output.json is committed before editor-project.json. If the worker
+        # was killed in between, this exact edit (same revision) is already in
+        # the library: finish that commit instead of rendering a duplicate.
+        done = next((x for x in output['clips'] if x.get('editor_candidate') == c['id'] and x.get('editor_revision') == project['revision']
+                     and x['clip_index'] not in c['exports'] and (run / f"clip_{x['clip_index']:02d}.mp4").is_file()), None)
+        c['exports'].append(done['clip_index'] if done else await export_clip(run, project, c, output, source, transcript))
         c['status'] = 'baked'
     else:
         raise ValueError('Unknown editor action')
     project['revision'] += 1
     atomic_json(run / 'editor-project.json', project)
+
+
+async def export_clip(run, project, c, output, source, transcript):
+    """Render one ready candidate and append it to the library's job output."""
+    from clip_engine.config import get_caption_preset
+    render_transcript = caption_transcript(transcript, c.get('caption_edits', []))
+    next_index = output.get('next_clip_index', 0)
+    if type(next_index) is not int or not 0 <= next_index <= 1000:
+        raise EditorError('invalid_edit', 'Invalid export sequence')
+    index = max(next_index, max((x['clip_index'] for x in output['clips']), default=-1) + 1)
+    while (run / f'clip_{index:02d}.mp4').exists() or (run / f'clip_{index:02d}.mp4').is_symlink():
+        index += 1
+    if index > 999:
+        raise EditorError('invalid_edit', 'Too many exports in this project')
+    with failure_code('engine_unavailable'):
+        renderer = RenderingService()
+    a, b = c['ranges'][0][0], c['ranges'][-1][1]
+    path = run / f'clip_{index:02d}.mp4'
+    if path.exists() or path.is_symlink():
+        raise ValueError('Export file already exists')
+    # Commit complete renders only; failed/cancelled exports do not change the library.
+    with tempfile.TemporaryDirectory(prefix='.editor-export-', dir=run) as work, failure_code('render_failed'):
+        result = await renderer.render_clip(RenderRequest(video_path=source, output_path=str(Path(work) / 'clip.mp4'),
+            start_time_ms=a, end_time_ms=b, source_width=project['width'], source_height=project['height'],
+            transcript_segments=render_transcript, include_captions=c['captions'], caption_style=get_caption_preset(c['caption_preset']),
+            caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
+            caption_y=c.get('caption_y'),
+            apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
+            manual_ranges_ms=[tuple(interval) for interval in c['ranges']], manual_plan=manual_plan(project, c)))
+        os.replace(result.output_path, path)
+    output['clips'].append({'clip_index': index, 's3_url': str(path), 'duration_ms': result.duration_ms,
+        'start_time_ms': a, 'end_time_ms': b, 'virality_score': c['score'], 'layout_type': result.layout_type,
+        'summary': c['title'], 'tags': [], 'render_fallback': None,
+        'editor_candidate': c['id'], 'editor_revision': project['revision']})
+    output['total_clips'] = len(output['clips'])
+    atomic_json(run / 'job_output.json', output)
+    return index

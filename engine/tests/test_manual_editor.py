@@ -507,3 +507,69 @@ Dialogue: 0,0:00:00.00,0:01:00.00,Default,CAPTIONS
 def test_invalid_caption_position_is_rejected(y):
     with pytest.raises(ValueError, match='caption position'):
         validate_candidate({**candidate(), 'caption_y': y}, 12000)
+
+
+def export_fixture(tmp_path, monkeypatch, render):
+    from dataclasses import asdict
+    c = {**candidate(), 'status': 'ready'}
+    project = {'version': 1, 'revision': 5, 'width': 1920, 'height': 1080, 'duration_ms': 12000, 'aspect_ratio': '9:16',
+        'candidates': [c], 'transcript': [asdict(s) for s in transcript()]}
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+    (tmp_path / 'editor-source.mp4').write_bytes(b'original')
+    (tmp_path / 'transcript.json').write_text(json.dumps({'segments': [asdict(s) for s in transcript()]}))
+    (tmp_path / 'job_output.json').write_text(json.dumps({'clips': [], 'total_clips': 0, 'editor_project': True}))
+    monkeypatch.setattr(RenderingService, '_verify_ffmpeg', lambda _: None)
+    monkeypatch.setattr(RenderingService, 'render_clip', render)
+    return {'run': str(tmp_path), 'revision': 5, 'candidate_id': c['id'], 'action': 'export'}
+
+
+def test_export_killed_between_library_and_project_commits_finishes_without_a_duplicate(monkeypatch, tmp_path):
+    from clip_engine.services import manual_editor
+    from clip_engine.services.rendering_service import RenderResult
+    async def render(self, request):
+        Path(request.output_path).write_bytes(b'final clip')
+        return RenderResult(request.output_path, 10, 4000, layout_type='two_shot')
+    render = AsyncMock(side_effect=render)
+    config = export_fixture(tmp_path, monkeypatch, lambda self, request: render(self, request))
+    real = manual_editor.atomic_json
+    def killed(path, value):
+        if path.name == 'editor-project.json':
+            raise KeyboardInterrupt('SIGKILL stand-in')
+        real(path, value)
+    monkeypatch.setattr(manual_editor, 'atomic_json', killed)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(run_editor(config))
+    assert json.loads((tmp_path / 'editor-project.json').read_text())['candidates'][0]['status'] == 'ready'
+    monkeypatch.setattr(manual_editor, 'atomic_json', real)
+    asyncio.run(run_editor(config))
+    assert render.await_count == 1
+    output = json.loads((tmp_path / 'job_output.json').read_text())
+    assert [x['clip_index'] for x in output['clips']] == [0] and not (tmp_path / 'clip_01.mp4').exists()
+    saved = json.loads((tmp_path / 'editor-project.json').read_text())
+    c = saved['candidates'][0]
+    assert (c['status'], c['exports'], saved['revision']) == ('baked', [0], 6)
+    # A later, changed edit renders again rather than reusing that export.
+    c['status'] = 'ready'
+    (tmp_path / 'editor-project.json').write_text(json.dumps(saved))
+    asyncio.run(run_editor({**config, 'revision': 6}))
+    assert render.await_count == 2 and json.loads((tmp_path / 'editor-project.json').read_text())['candidates'][0]['exports'] == [0, 1]
+
+
+def test_failures_carry_fixed_editor_codes(monkeypatch, tmp_path):
+    config = export_fixture(tmp_path, monkeypatch, AsyncMock(side_effect=RenderingError('FFmpeg failed: /private/path')))
+    def code(**patch):
+        with pytest.raises(BaseException) as error:
+            asyncio.run(run_editor({**config, **patch}))
+        return getattr(error.value, 'editor_code', None)
+    assert code() == 'render_failed'
+    assert code(revision=4) == 'project_changed'
+    assert code(candidate_id='missing') == 'project_changed'
+    project = json.loads((tmp_path / 'editor-project.json').read_text())
+    project['candidates'][0]['ranges'] = [[5000, 1000]]
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+    assert code() == 'invalid_edit'
+    project['candidates'][0].update(ranges=candidate()['ranges'], status='refining')
+    (tmp_path / 'editor-project.json').write_text(json.dumps(project))
+    assert code() == 'not_ready'
+    (tmp_path / 'editor-source.mp4').unlink()
+    assert code() == 'source_missing'
