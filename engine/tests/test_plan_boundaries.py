@@ -287,6 +287,13 @@ class TestSentenceHelpers:
         assert last_sentence_end_between(tr, ends[2] + 1, ends[3] - 1) is None
 
 
+def test_clip_request_is_trimmed_bounded_and_blank_means_none():
+    from clip_engine.services.intelligence_planner import MAX_CLIP_REQUEST_CHARS
+    assert ClippingJobRequest(video_url='x', clip_request='   ').clip_request is None
+    assert ClippingJobRequest(video_url='x', clip_request=' the pricing debate \n').clip_request == 'the pricing debate'
+    assert len(ClippingJobRequest(video_url='x', clip_request='x' * 5000).clip_request) == MAX_CLIP_REQUEST_CHARS
+
+
 class TestEmptyPlan:
     @pytest.mark.parametrize('clip_request', [None, 'every time they talk about pricing'])
     @pytest.mark.parametrize('workflow', ['automatic', 'review'])

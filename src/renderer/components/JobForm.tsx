@@ -40,7 +40,7 @@ const MAX_CLIPS = 100
 export const WIZARD_STEPS: { id: WizardStep; label: string; title: string; description: string }[] = [
   { id: 'video', label: 'Video', title: 'Choose a video', description: 'A local file, YouTube link or Twitch VOD link. Optionally suggest where to find clips.' },
   { id: 'format', label: 'Format', title: 'Format, framing and speed', description: 'Choose the look and pace of every clip in this job.' },
-  { id: 'clips', label: 'Clips', title: 'What to clip, length and count', description: 'Describe the moments you want, or leave it blank for the best ones. Pick one or more lengths, or none for any length.' },
+  { id: 'clips', label: 'Clips', title: 'What to clip, length and count', description: 'Optionally describe the moments you want. Pick one or more lengths, or none for any length.' },
   { id: 'captions', label: 'Captions', title: 'Captions', description: 'Word-by-word captions burned into each clip. Silent videos are clipped without them.' },
   { id: 'review', label: 'Review', title: 'Review and generate', description: 'Check the run, then generate. You can queue another video right after.' }
 ]
@@ -422,9 +422,10 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
           value={draft.clipRequest ?? ''}
           onChange={(e) => update({ clipRequest: e.target.value })}
           aria-label="What to clip"
-          placeholder="e.g. every time they talk about pricing, the funniest reactions, or the story about the first launch"
+          aria-describedby="clip-request-help"
+          placeholder="e.g. every time they talk about pricing, or the funniest reactions"
         />
-        <p className="mt-2 text-2xs text-ink-subtle">Only matching moments are clipped, so you may get fewer clips. Leave blank to get the best moments.</p>
+        <p id="clip-request-help" className="mt-2 text-2xs text-ink-subtle">Only matching moments are clipped, so you may get fewer clips, or none. Leave blank for the best moments.</p>
       </Group>
       <Group label="Clipping mode">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Clipping mode">

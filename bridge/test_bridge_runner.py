@@ -82,6 +82,8 @@ class BridgeTests(unittest.TestCase):
 
     def test_clip_request_validation_and_no_match_message(self):
         self.assertEqual(bridge.validate_config(self.config(clip_request="x" * 1000))["clip_request"], "x" * 1000)
+        # Main counts UTF-16 units, so the most it forwards is never over the limit in code points.
+        self.assertEqual(bridge.validate_config(self.config(clip_request="\U0001F600" * 500))["clip_request"], "\U0001F600" * 500)
         for value in ("", "   ", "x" * 1001, "a\0b", 3, ["pricing"]):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 bridge.validate_config(self.config(clip_request=value))

@@ -35,6 +35,7 @@ from clip_engine.services.editorial_context import analyze_reactions, empty_repo
 from clip_engine.services.editorial_vision import EditorialVision
 from clip_engine.services.editorial_review import protect_acknowledgments, review_duplicate_candidates, editorial_summary
 from clip_engine.services.intelligence_planner import (
+    MAX_CLIP_REQUEST_CHARS,
     ClipPlanResponse,
     ClipPlanSegment,
     IntelligencePlannerService,
@@ -125,6 +126,8 @@ class ClippingJobRequest:
 
     def __post_init__(self):
         validate_video_speed(self.video_speed)
+        # Blank means no request, so the run and its no-match error agree with the planner.
+        self.clip_request = (self.clip_request or '').strip()[:MAX_CLIP_REQUEST_CHARS] or None
         if self.job_id is None:
             self.job_id = str(uuid.uuid4())
         if not isinstance(self.job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.job_id):

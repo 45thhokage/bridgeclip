@@ -311,6 +311,37 @@ class TestPlanClips:
         assert json.loads(requests[0].split("\n", 1)[1]) == clip_request.strip()[:1000]
         assert "match the user clip request" in texts[-1]
 
+    @pytest.mark.parametrize("mode,base", [
+        ("longform", "complete, self-contained longform episodes"),
+        ("jev", "coherent, self-contained segments"),
+        ("visual", "visually compelling segments"),
+    ])
+    def test_every_mode_narrows_its_final_instruction_to_the_clip_request(self, mode, base):
+        planner = make_planner()
+        planner._jev_enabled = mode == "jev"
+        planner._clip_request = "the pricing debate"
+        transcript = [] if mode == "visual" else make_transcript(30).segments
+        frames = [{"timestamp_ms": t, "mime_type": "image/jpeg", "base64": "AA=="} for t in (0, 5000, 10000)] if mode == "visual" else []
+        messages = planner._build_vision_messages("sys", "transcript", frames, 3, transcript, longform=mode == "longform")
+        final = messages[1]["content"][-1]["text"]
+        assert base in final
+        assert "Include only moments that match the user clip request" in final
+
+    def test_clip_request_does_not_carry_over_to_the_next_plan(self, no_sleep):
+        planner = make_planner()
+        payloads = []
+        for clip_request in ("the pricing debate", "   "):
+            planner._http_client = FakeClient([(200, completion(json.dumps({"clips": [clip(10, 40)]})))])
+            asyncio.run(planner.plan_clips(
+                transcript_result=make_transcript(300), video_metadata=SimpleNamespace(duration_seconds=300),
+                max_clips=3, auto_clip_count=False, min_duration_seconds=15, max_duration_seconds=60,
+                clip_request=clip_request,
+            ))
+            payloads += planner._http_client.payloads
+        system, user = payloads[1]["messages"]
+        assert "USER CLIP REQUEST" not in system["content"] and "Return exactly 3 clips" in system["content"]
+        assert not any("clip request" in part.get("text", "").lower() for part in user["content"])
+
     def test_happy_path_records_real_cost_and_serving_model(self, no_sleep):
         planner = make_planner(planner_model="primary/model")
         content = json.dumps({

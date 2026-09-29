@@ -264,6 +264,12 @@ test('job validation rejects malformed options and invalid trim intervals', () =
   assert.equal(validateJobConfig({ ...job, clipRequest: '   ' }).clipRequest, undefined)
   assert.equal(validateJobConfig({ ...job, clipRequest: ` ${'x'.repeat(1000)} ` }).clipRequest, 'x'.repeat(1000))
   for (const clipRequest of ['x'.repeat(1001), 'a\0b', 3, null, ['pricing']]) assert.throws(() => validateJobConfig({ ...job, clipRequest }))
+  // Python's strip() also drops these, so blank-to-Python requests are never forwarded to the bridge.
+  assert.equal(validateJobConfig({ ...job, clipRequest: '\x1c\x85 \n' }).clipRequest, undefined)
+  assert.equal(validateJobConfig({ ...job, clipRequest: '\x1f the pricing debate \x85' }).clipRequest, 'the pricing debate')
+  // "Run again" resubmits the stored request, which must validate to the same value.
+  const stored = validateJobConfig({ ...job, clipRequest: '  the pricing debate ' })
+  assert.equal(validateJobConfig(stored).clipRequest, 'the pricing debate')
   for (const videoSpeed of jobContract.VIDEO_SPEED_OPTIONS) assert.equal(validateJobConfig({ ...job, videoSpeed }).videoSpeed, videoSpeed)
   for (const videoSpeed of [null, true, '1.5', 0, 0.5, 2.01, NaN, Infinity, -Infinity]) {
     assert.throws(() => validateJobConfig({ ...job, videoSpeed }), /Video speed/)
