@@ -11,6 +11,8 @@ export interface ClipJobRequest {
   /** Required in Advanced mode; presets choose their own models. */
   plannerModel?: string
   transcriptionModel?: string
+  /** What the user wants clipped, in their words. Omitted: the best moments. */
+  clipRequest?: string
   maxClips: number | null
   autoClipCount: boolean
   durationRanges: string[] | null
