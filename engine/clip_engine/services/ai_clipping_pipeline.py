@@ -26,7 +26,7 @@ from typing import Any, Callable, Optional
 
 from clip_engine.config import CaptionStyle, LayoutStyle, get_settings, is_longform, resolve_clip_duration_bounds
 from clip_engine.services.video_speed import validate_video_speed
-from clip_engine.error_policy import NoClipCandidatesError, safe_failure_code, safe_processing_error
+from clip_engine.error_policy import NoClipCandidatesError, NoRequestedMomentsError, safe_failure_code, safe_processing_error
 from clip_engine.services.source_context import SourceContextService, context_for_prompt, transcription_terms
 from clip_engine.services.editorial_evidence import discovery_feedback, overlaps
 from clip_engine.services.jev_service import JevService, MODEL as JEV_MODEL
@@ -113,6 +113,8 @@ class ClippingJobRequest:
     banner_channel_url: Optional[str] = None
     aspect_ratio: str = "9:16"
     keyterms: Optional[list[str]] = None
+    # The user's description of the moments to clip; None picks the best moments.
+    clip_request: Optional[str] = None
     layout_style: str = LayoutStyle.AUTO
     debug_capture: bool = False
     # "tight" cuts dead air and filler words; "natural" keeps original timing.
@@ -245,7 +247,7 @@ class AIClippingPipeline:
             logger.info(f"Max clips: {request.max_clips}, Duration ranges: {request.duration_ranges}")
             logger.info(
                 f"Include captions: {request.include_captions}, layout style: {request.layout_style}, "
-                f"pacing: {request.pacing}"
+                f"pacing: {request.pacing}, clip request: {'set' if request.clip_request else 'none'}"
             )
             logger.info("Webhook configured: %s", bool(self._current_callback_url))
 
@@ -409,6 +411,7 @@ class AIClippingPipeline:
                 end_time_seconds=request.end_time_seconds,
                 aspect_ratio=request.aspect_ratio,
                 jev_enabled=jev_enabled,
+                clip_request=request.clip_request,
             )
             clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
             edit_audit['planner'] = getattr(self.intelligence_planner, 'audit', {'requests': []})
@@ -416,7 +419,7 @@ class AIClippingPipeline:
             logger.info(f"Planned {len(clip_plan.segments)} clips")
             if not clip_plan.segments:
                 edit_audit['outcome'] = 'no_candidates'
-                raise NoClipCandidatesError()
+                raise NoRequestedMomentsError() if request.clip_request else NoClipCandidatesError()
             reviewer = CoherenceReviewer(coherence_service, self.settings, transcription_result.segments, round(video_duration * 1000))
             editorial_vision = EditorialVision(self.settings, download_result.video_path, work_dir, round(video_duration * 1000))
             reviewer.source_context = context_brief
@@ -958,6 +961,7 @@ class AIClippingPipeline:
                     "pacing": request.pacing,
                     "video_speed": request.video_speed,
                     "include_title": request.include_title,
+                    "clip_request": request.clip_request,
                 },
                 "transcription_status": transcription_status,
                 "planning_source": "visual" if visual_frames else "transcript",

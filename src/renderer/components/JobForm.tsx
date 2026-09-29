@@ -11,11 +11,11 @@ import { SourcePicker } from './SourcePicker'
 import { Panel } from './ui/Panel'
 import { Switch } from './ui/Switch'
 import { Button } from './ui/Button'
-import { TextInput } from './ui/Field'
+import { TextArea, TextInput } from './ui/Field'
 import { IconTile } from './ui/IconTile'
 import { SettingRow } from './ui/SettingRow'
 import { onRadioKeyDown } from './ui/Segmented'
-import { DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
+import { CLIP_REQUEST_MAX_CHARS, DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
 import { isModelId } from '../../shared/openrouter-models'
 import { useModelStore } from '../store/use-model-store'
 import { useSettingsStore } from '../store/use-settings-store'
@@ -40,7 +40,7 @@ const MAX_CLIPS = 100
 export const WIZARD_STEPS: { id: WizardStep; label: string; title: string; description: string }[] = [
   { id: 'video', label: 'Video', title: 'Choose a video', description: 'A local file, YouTube link or Twitch VOD link. Optionally suggest where to find clips.' },
   { id: 'format', label: 'Format', title: 'Format, framing and speed', description: 'Choose the look and pace of every clip in this job.' },
-  { id: 'clips', label: 'Clips', title: 'Clip length and count', description: 'Pick one or more lengths, or leave them all off for any length.' },
+  { id: 'clips', label: 'Clips', title: 'What to clip, length and count', description: 'Describe the moments you want, or leave it blank for the best ones. Pick one or more lengths, or none for any length.' },
   { id: 'captions', label: 'Captions', title: 'Captions', description: 'Word-by-word captions burned into each clip. Silent videos are clipped without them.' },
   { id: 'review', label: 'Review', title: 'Review and generate', description: 'Check the run, then generate. You can queue another video right after.' }
 ]
@@ -66,6 +66,7 @@ export function buildJobRequest(draft: ClipDraft, trim: { start: number | null; 
     workflow: draft.workflow,
     clippingMode: draft.clippingMode,
     ...(draft.clippingMode === 'advanced' ? { plannerModel: draft.plannerModel, transcriptionModel: draft.transcriptionModel } : {}),
+    ...(draft.clipRequest?.trim() ? { clipRequest: draft.clipRequest.trim() } : {}),
     maxClips: draft.autoClipCount ? null : draft.maxClips,
     autoClipCount: draft.autoClipCount,
     durationRanges: draft.durations.length > 0 ? draft.durations : null,
@@ -414,6 +415,17 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
   }
   return (
     <div className="space-y-4">
+      <Group label="What to clip" aside="Optional">
+        <TextArea
+          rows={3}
+          maxLength={CLIP_REQUEST_MAX_CHARS}
+          value={draft.clipRequest ?? ''}
+          onChange={(e) => update({ clipRequest: e.target.value })}
+          aria-label="What to clip"
+          placeholder="e.g. every time they talk about pricing, the funniest reactions, or the story about the first launch"
+        />
+        <p className="mt-2 text-2xs text-ink-subtle">Only matching moments are clipped, so you may get fewer clips. Leave blank to get the best moments.</p>
+      </Group>
       <Group label="Clipping mode">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Clipping mode">
           {([
@@ -552,6 +564,7 @@ function ReviewStep({ draft, trim, onEdit }: {
     { step: 'format', label: 'Speed', value: `${draft.videoSpeed ?? 1}×${(draft.videoSpeed ?? 1) === 1 ? ' · Normal' : ' · All exported clips'}` },
     { step: 'clips', label: 'Mode', value: draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
     { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? 'AI decides how many' : `Up to ${draft.maxClips}`}` },
+    { step: 'clips', label: 'What to clip', value: draft.clipRequest?.trim() || 'The best moments' },
     { step: 'captions', label: 'Captions', value: draft.includeCaptions ? CAPTION_PRESET_NAMES[draft.captionPreset] ?? draft.captionPreset : 'Off' }
   ]
   if (draft.workflow !== 'review') rows.push({ step: 'captions', label: 'Title', value: draft.includeTitle ? 'Shown at the top' : 'Off' })

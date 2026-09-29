@@ -2,7 +2,7 @@ import { normalizeVideoSource, twitchSourceError } from '../shared/video-source'
 import { isAbsolute } from 'path'
 import type { ClipJobConfig } from './pipeline-runner'
 import { isWebUrl } from './security'
-import { DURATION_IDS, isVideoSpeed } from '../shared/job-contract'
+import { CLIP_REQUEST_MAX_CHARS, DURATION_IDS, isVideoSpeed } from '../shared/job-contract'
 import { isModelId } from '../shared/openrouter-models'
 
 export function validateJobConfig(value: unknown): ClipJobConfig {
@@ -14,6 +14,7 @@ export function validateJobConfig(value: unknown): ClipJobConfig {
   if (typeof v.autoClipCount !== 'boolean' || typeof v.includeCaptions !== 'boolean') throw new Error('Invalid job options')
   if (typeof v.layoutVision !== 'boolean') throw new Error('Invalid vision option')
   if (v.includeTitle !== undefined && typeof v.includeTitle !== 'boolean') throw new Error('Invalid title option')
+  if (v.clipRequest !== undefined && (typeof v.clipRequest !== 'string' || v.clipRequest.includes('\0') || v.clipRequest.trim().length > CLIP_REQUEST_MAX_CHARS)) throw new Error(`Describe what to clip in ${CLIP_REQUEST_MAX_CHARS} characters or fewer`)
   if (v.videoSpeed !== undefined && !isVideoSpeed(v.videoSpeed)) throw new Error('Video speed must be between 1× and 2×')
   if (v.workflow !== undefined && !['automatic', 'review'].includes(v.workflow)) throw new Error('Invalid workflow')
   if (v.clippingMode !== undefined && !['quality', 'economy', 'advanced'].includes(v.clippingMode)) throw new Error('Invalid clipping mode')
@@ -32,5 +33,6 @@ export function validateJobConfig(value: unknown): ClipJobConfig {
   if (v.bannerPlatform !== null && (typeof v.bannerPlatform !== 'string' || !/^[a-z0-9_-]{1,64}$/i.test(v.bannerPlatform))) throw new Error('Invalid banner platform')
   if (v.bannerChannelUrl !== null && (!isWebUrl(v.bannerChannelUrl) || v.bannerChannelUrl.length > 8192)) throw new Error('Invalid banner URL')
   // Capabilities are looked up in main after validation, never accepted from the renderer.
-  return { ...v, videoUrl: normalizeVideoSource(v.videoUrl), videoSpeed: v.videoSpeed ?? 1, includeTitle: v.includeTitle ?? true, plannerCapabilities: undefined }
+  const clipRequest = v.clipRequest?.trim() || undefined
+  return { ...v, videoUrl: normalizeVideoSource(v.videoUrl), videoSpeed: v.videoSpeed ?? 1, includeTitle: v.includeTitle ?? true, clipRequest, plannerCapabilities: undefined }
 }

@@ -127,6 +127,25 @@ test('the title card is shown by default and can be turned off for automatic run
   } finally { useDraftStore.setState(original) }
 })
 
+test('what to clip is optional, trimmed into the request and cleared for the next video', () => {
+  const { ClipsStep, useDraftStore, buildJobRequest } = form.exports
+  const original = useDraftStore.getState()
+  try {
+    assert.equal(original.clipRequest, '')
+    original.update({ workflow: 'automatic', source: 'https://example.com/video' })
+    const html = renderToStaticMarkup(React.createElement(ClipsStep, { draft: useDraftStore.getState(), update() {} }))
+    assert.match(html, /aria-label="What to clip"/)
+    assert.match(html, /maxLength="1000"/)
+    assert.equal(Object.hasOwn(buildJobRequest(useDraftStore.getState(), { start: null, end: null }), 'clipRequest'), false)
+    original.update({ clipRequest: '   ' })
+    assert.equal(Object.hasOwn(buildJobRequest(useDraftStore.getState(), { start: null, end: null }), 'clipRequest'), false)
+    original.update({ clipRequest: '  every time they talk about pricing \n' })
+    assert.equal(buildJobRequest(useDraftStore.getState(), { start: null, end: null }).clipRequest, 'every time they talk about pricing')
+    original.startAnother()
+    assert.equal(useDraftStore.getState().clipRequest, '')
+  } finally { useDraftStore.setState(original) }
+})
+
 test('format and framing radio groups each expose one keyboard tab stop', () => {
   const draft = { aspectRatio: '9:16', layoutStyle: 'auto', layoutVision: true, pacing: 'tight' }
   const html = renderToStaticMarkup(React.createElement(FormatStep, { draft, update() {} }))

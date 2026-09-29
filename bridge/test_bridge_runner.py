@@ -75,6 +75,19 @@ class BridgeTests(unittest.TestCase):
         with patch.dict(sys.modules, modules), redirect_stdout(io.StringIO()):
             self.assertTrue(asyncio.run(bridge.run(self.config(include_title=False))))
         self.assertFalse(requests[-1]["include_title"])
+        self.assertIsNone(requests[-1]["clip_request"])
+        with patch.dict(sys.modules, modules), redirect_stdout(io.StringIO()):
+            self.assertTrue(asyncio.run(bridge.run(self.config(clip_request="the pricing debate"))))
+        self.assertEqual(requests[-1]["clip_request"], "the pricing debate")
+
+    def test_clip_request_validation_and_no_match_message(self):
+        self.assertEqual(bridge.validate_config(self.config(clip_request="x" * 1000))["clip_request"], "x" * 1000)
+        for value in ("", "   ", "x" * 1001, "a\0b", 3, ["pricing"]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                bridge.validate_config(self.config(clip_request=value))
+        failure = bridge.describe_failure("No moments matched the clip request")
+        self.assertEqual(failure["message"], "No moments matched what you asked to clip.")
+        self.assertIn("What to clip", failure["hint"])
 
     def test_video_speed_validation(self):
         for speed in (1, 1.1, 1.25, 1.5, 1.75, 2):

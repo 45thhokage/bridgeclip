@@ -259,6 +259,11 @@ test('job validation rejects malformed options and invalid trim intervals', () =
   assert.equal(validateJobConfig(job).videoSpeed, 1)
   assert.equal(validateJobConfig(job).includeTitle, true)
   assert.equal(validateJobConfig({ ...job, includeTitle: false }).includeTitle, false)
+  assert.equal(validateJobConfig(job).clipRequest, undefined)
+  assert.equal(validateJobConfig({ ...job, clipRequest: '  the pricing debate \n' }).clipRequest, 'the pricing debate')
+  assert.equal(validateJobConfig({ ...job, clipRequest: '   ' }).clipRequest, undefined)
+  assert.equal(validateJobConfig({ ...job, clipRequest: ` ${'x'.repeat(1000)} ` }).clipRequest, 'x'.repeat(1000))
+  for (const clipRequest of ['x'.repeat(1001), 'a\0b', 3, null, ['pricing']]) assert.throws(() => validateJobConfig({ ...job, clipRequest }))
   for (const videoSpeed of jobContract.VIDEO_SPEED_OPTIONS) assert.equal(validateJobConfig({ ...job, videoSpeed }).videoSpeed, videoSpeed)
   for (const videoSpeed of [null, true, '1.5', 0, 0.5, 2.01, NaN, Infinity, -Infinity]) {
     assert.throws(() => validateJobConfig({ ...job, videoSpeed }), /Video speed/)
@@ -631,12 +636,13 @@ test('pipeline preserves split JSON messages and protects the job identity', asy
   })
   const window = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (channel, data) => sent.push({ channel, data }) } }
   runner.startClipJob('trusted-job', {
-    videoUrl: '/tmp/video.mp4', debugCapture: true, videoSpeed: 1.5, clippingMode: 'advanced', plannerModel: 'custom/planner', transcriptionModel: 'custom/speech',
+    videoUrl: '/tmp/video.mp4', debugCapture: true, videoSpeed: 1.5, clipRequest: 'the pricing debate', clippingMode: 'advanced', plannerModel: 'custom/planner', transcriptionModel: 'custom/speech',
     plannerCapabilities: { maxOutputTokens: 8192, supportsImages: false, inputPrice: .000001, outputPrice: .000005 }
   }, window, undefined, '/tmp/queued-output')
   const forwarded = JSON.parse(workerInput)
   assert.equal(forwarded.video_speed, 1.5)
   assert.equal(forwarded.include_title, true)
+  assert.equal(forwarded.clip_request, 'the pricing debate')
   assert.equal(forwarded.debug_capture, undefined)
   assert.equal(forwarded.contract_version, 3)
   assert.equal(forwarded.output_dir, '/tmp/queued-output')

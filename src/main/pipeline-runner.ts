@@ -457,6 +457,7 @@ export function startClipJob(
       planner_input_price: config.plannerCapabilities?.inputPrice ?? null,
       planner_output_price: config.plannerCapabilities?.outputPrice ?? null
     } : {}),
+    ...(config.clipRequest ? { clip_request: config.clipRequest } : {}),
     max_clips: config.maxClips,
     auto_clip_count: config.autoClipCount,
     duration_ranges: config.durationRanges,
