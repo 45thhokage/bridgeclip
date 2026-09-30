@@ -17,6 +17,15 @@ Run `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` when wo
 
 Use imperative, scoped commit messages and pull request titles, such as `fix(clips): validate saved run output`. By contributing, you agree to follow the [code of conduct](CODE_OF_CONDUCT.md).
 
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) is bundled into the app and shown under **Settings → About → Changelog** and **Help → Changelog**, so write it for users.
+
+- **Every user-visible change:** add a bullet under `## [Unreleased]` in the matching group: `### Added`, `### Changed`, `### Fixed` or `### Removed` (`Deprecated` and `Security` also work). Say what people can now do or what works better, and name the screen or setting. Leave out tests, CI, refactors and other internal changes. The app shows **bold** and `code`; links show as plain text.
+- **Each release:** in the PR that bumps `package.json` and `package-lock.json` to `X.Y.Z`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add an empty `## [Unreleased]` above it. At the bottom, point `[Unreleased]` at `compare/vX.Y.Z...HEAD` and add `[X.Y.Z]: https://github.com/bridge-mind/bridgeclip/releases/tag/vX.Y.Z`. Tag `vX.Y.Z` after the PR merges, and reuse the section as the GitHub Release notes.
+
+`npm run test:release` fails when the `package.json` version has no dated section, versions are out of order, or a group isn't one of those types.
+
 ## Pull request descriptions
 
 - Write every PR description as a concise, human-friendly list of changes in plain language. Avoid jargon and explain what people can now do or what works better.
