@@ -219,6 +219,10 @@ export interface BridgeClipAPI {
     /** The GitHub release page for the new version (or this one). */
     openReleaseNotes: () => Promise<boolean>
   }
+  changelog: {
+    /** Help → Changelog asks the window to show the changelog. */
+    onShow: (cb: () => void) => () => void
+  }
 }
 
 function subscribe<T>(channel: string, callback: (data: T) => void): () => void {
@@ -348,6 +352,9 @@ const api: BridgeClipAPI = {
     install: () => ipcRenderer.invoke('update:install'),
     moveToApplications: () => ipcRenderer.invoke('update:moveToApplications'),
     openReleaseNotes: () => ipcRenderer.invoke('update:openReleaseNotes')
+  },
+  changelog: {
+    onShow: (callback) => subscribe('changelog:show', () => callback())
   }
 }
 

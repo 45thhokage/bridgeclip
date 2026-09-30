@@ -238,6 +238,8 @@ test('external URLs reject executable schemes and embedded credentials', () => {
   assert.equal(security.isWebUrl('https://example.com/video'), true)
   assert.equal(security.isTrustedExternalUrl('https://example.com/video'), false)
   assert.equal(security.isTrustedExternalUrl('https://github.com/bridge-mind/bridgeclip'), true)
+  assert.equal(security.isTrustedExternalUrl('https://github.com/bridge-mind/bridgeclip/releases'), true)
+  assert.equal(security.isTrustedExternalUrl('https://github.com/bridge-mind/bridgeclip/releases/download/v0.1.19/evil.exe'), false)
 })
 
 test('source video links normalize supported YouTube forms and allow only canonical browser URLs', () => {
