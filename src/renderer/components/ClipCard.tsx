@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { FolderOpen, ImageOff, ListPlus, Play, Send, TrendingUp, TriangleAlert } from 'lucide-react'
+import { Check, FolderOpen, ImageOff, ListPlus, Play, Send, Trash2, TrendingUp, TriangleAlert, Undo2 } from 'lucide-react'
 import { cn, formatTimecode, isMac, localFileUrl } from '../lib/utils'
 import { getApi } from '../lib/ipc'
 import { clipFilePath, loadThumbnail } from '../lib/thumbnails'
@@ -7,6 +7,8 @@ import type { ClipArtifact } from '../store/use-job-store'
 import { Checkbox } from './ui/Checkbox'
 import { Badge } from './ui/Badge'
 import { Skeleton } from './ui/Skeleton'
+import { ActionMenu } from './ui/ActionMenu'
+import { LIBRARY_POSTING_LABELS, type LibraryClipPostingStatus } from '../../shared/library-posting'
 
 // How the engine framed a vertical clip (its dominant layout).
 const LAYOUT_LABELS: Record<string, string> = {
@@ -19,6 +21,7 @@ const LAYOUT_LABELS: Record<string, string> = {
 }
 
 interface ClipCardProps {
+  postingStatus?: LibraryClipPostingStatus
   clip: ClipArtifact
   vertical: boolean
   topPick?: boolean
@@ -30,10 +33,14 @@ interface ClipCardProps {
   /** Opens the post dialog for this clip. */
   onPost?: () => void
   onAddToAutomation?: () => void
+  onSetPosted?: (posted: boolean) => Promise<void>
+  onDelete?: () => void
+  actionsDisabled?: boolean
 }
 
 export function ClipCard({
   clip,
+  postingStatus,
   vertical,
   topPick,
   selected,
@@ -41,7 +48,10 @@ export function ClipCard({
   onToggleSelect,
   onAspect,
   onPost,
-  onAddToAutomation
+  onAddToAutomation,
+  onSetPosted,
+  onDelete,
+  actionsDisabled
 }: ClipCardProps): React.JSX.Element {
   const filePath = clipFilePath(clip.s3_url)
   const [thumb, setThumb] = useState<string | null | undefined>(undefined)
@@ -49,7 +59,9 @@ export function ClipCard({
   const [hovering, setHovering] = useState(false)
   const [previewFailed, setPreviewFailed] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [markingPosted, setMarkingPosted] = useState(false)
   const title = clip.summary || `Clip ${clip.clip_index + 1}`
+  const postingBadge = postingStatus ? <Badge tone={postingStatus.state === 'posted' ? 'success' : postingStatus.state === 'partial' || postingStatus.state === 'failed' ? 'warning' : 'neutral'}>{LIBRARY_POSTING_LABELS[postingStatus.state]}</Badge> : null
   const score = (clip.virality_score * 10).toFixed(1)
   const clipVertical = aspect == null ? vertical : aspect < 1
   const layout = clipVertical && Object.prototype.hasOwnProperty.call(LAYOUT_LABELS, clip.layout_type)
@@ -89,10 +101,18 @@ export function ClipCard({
     }
   }
 
+  const setPosted = async (posted: boolean): Promise<void> => {
+    if (!onSetPosted || markingPosted) return
+    setMarkingPosted(true); setActionError(null)
+    try { await onSetPosted(posted) }
+    catch (cause) { setActionError(cause instanceof Error ? cause.message : 'Could not update posted status. Try again.') }
+    finally { setMarkingPosted(false) }
+  }
+
   return (
     <article
       className={cn(
-        'glass group relative flex flex-col rounded-2xl p-1.5 transition-[transform,box-shadow] duration-300 ease-out',
+        'glass group relative isolate flex flex-col rounded-2xl p-1.5 transition-[transform,box-shadow] duration-300 ease-out',
         selected
           ? 'shadow-accent-ring'
           : 'hover:-translate-y-0.5 hover:shadow-[inset_0_1px_0_rgb(255_255_255/0.1),0_0_0_1px_rgb(255_255_255/0.08),0_24px_48px_-20px_rgb(0_0_0/0.75)]'
@@ -167,7 +187,7 @@ export function ClipCard({
         </div>
         <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-1">
           {topPick && (
-            <span className="inline-flex h-5 items-center rounded-full bg-accent px-2 text-2xs font-semibold text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.35)]">
+            <span className="inline-flex h-5 items-center rounded-full bg-accent px-2 text-2xs font-semibold text-accent-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.16)]">
               Top pick
             </span>
           )}
@@ -182,20 +202,30 @@ export function ClipCard({
         <span className="glass-chip pointer-events-none absolute bottom-2 left-2 z-10 rounded-full px-1.5 py-px font-mono text-2xs tabular text-white/95">
           {formatTimecode(clip.duration_ms)}
         </span>
-        {!selecting && (
-          <div className="absolute bottom-2 right-2 z-10 flex items-center gap-1 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
-            {onPost && <MediaAction label={`Post “${title}”`} title="Post to social accounts" icon={<Send />} onClick={onPost} />}
-            {onAddToAutomation && <MediaAction label={`Add “${title}” to automation`} title="Add to automation" icon={<ListPlus />} onClick={onAddToAutomation} />}
-            <MediaAction label={isMac ? 'Show in Finder' : 'Show in folder'} icon={<FolderOpen />} onClick={() => { void showInFolder() }} />
-          </div>
-        )}
       </div>
 
-      <div className="px-1.5 pb-1 pt-2">
+      <div className="px-2 pb-2 pt-3">
+        <div className="mb-3 flex min-h-8 flex-wrap items-center justify-between gap-2">
+          {postingBadge}
+          {!selecting && <div className="ml-auto">
+            <ActionMenu label={`Actions for “${title}”`} disabled={markingPosted || actionsDisabled} actions={[
+              ...(onPost ? [{ label: 'Post or schedule', icon: <Send className="h-3.5 w-3.5" />, onSelect: onPost }] : []),
+              ...(onAddToAutomation ? [{ label: 'Add to automation', icon: <ListPlus className="h-3.5 w-3.5" />, onSelect: onAddToAutomation }] : []),
+              ...(onSetPosted && postingStatus && (postingStatus.state !== 'posted' || postingStatus.manuallyPosted) ? [postingStatus.manuallyPosted
+                ? { label: 'Undo manual posted mark', icon: <Undo2 className="h-3.5 w-3.5" />, onSelect: () => { void setPosted(false) } }
+                : { label: 'Mark as posted', icon: <Check className="h-3.5 w-3.5" />, onSelect: () => { void setPosted(true) } }] : []),
+              { label: isMac ? 'Show in Finder' : 'Show in folder', icon: <FolderOpen className="h-3.5 w-3.5" />, onSelect: () => { void showInFolder() } },
+              ...(onDelete ? [{ label: 'Delete clip', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, onSelect: onDelete }] : [])
+            ]} />
+          </div>}
+        </div>
         <h3 className="line-clamp-2 text-sm font-medium leading-[18px] text-ink" title={title}>
           {title}
         </h3>
-        <p className="mt-1 truncate text-2xs text-ink-subtle">
+        {clip.editorial && clip.editorial.flags.length > 0 && <p className="mt-2 text-2xs text-amber-200" title={clip.editorial.flags.map((f) => f.replaceAll('_', ' ')).join('; ')}>
+          Editorial review: {clip.editorial.flags.includes('incomplete_reaction_context') ? 'incomplete reaction context' : `${clip.editorial.flags.length} flag${clip.editorial.flags.length === 1 ? '' : 's'}`}
+        </p>}
+        <p className="mt-1.5 truncate text-2xs text-ink-subtle">
           <span className="font-mono tabular" title="Position in the source video">
             {formatTimecode(clip.start_time_ms)} – {formatTimecode(clip.end_time_ms)}
           </span>
@@ -215,20 +245,5 @@ export function ClipCard({
         {actionError && <p role="alert" className="mt-1.5 text-xs text-danger">{actionError}</p>}
       </div>
     </article>
-  )
-}
-
-/** Small frosted button over the clip's media; shown on hover or focus. */
-function MediaAction({ label, title, icon, onClick }: { label: string; title?: string; icon: React.ReactNode; onClick: () => void }): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={title ?? label}
-      onClick={onClick}
-      className="glass-chip flex h-7 w-7 items-center justify-center rounded-full text-white/90 transition-colors duration-150 hover:bg-white/25 hover:text-white [&_svg]:h-3.5 [&_svg]:w-3.5"
-    >
-      {icon}
-    </button>
   )
 }

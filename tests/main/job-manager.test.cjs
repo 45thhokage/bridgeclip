@@ -16,8 +16,10 @@ function loadModule(file, mocks = {}) {
   return module.exports
 }
 
+const progress = loadModule('shared/job-progress.ts')
+const diagnostics = loadModule('shared/run-diagnostics.ts', { './job-progress': progress })
 const jobs = loadModule('shared/jobs.ts')
-const jobOutput = loadModule('shared/job-output.ts')
+const jobOutput = loadModule('shared/job-output.ts', { './editorial': loadModule('shared/editorial.ts'), './job-progress': progress, './run-diagnostics': diagnostics })
 
 /** A job manager wired to a fake runner that records each start and lets the test drive it. */
 function setup() {
@@ -33,7 +35,9 @@ function setup() {
     './run-history': { finishRunRecord: (dir, jobId, status) => records.push({ dir, jobId, status }) },
     './logger': { logger: { info() {}, warn() {}, error() {} } },
     '../shared/job-output': jobOutput,
-    '../shared/jobs': jobs
+    '../shared/jobs': jobs,
+    '../shared/job-progress': progress,
+    '../shared/run-diagnostics': diagnostics
   })
   const sent = []
   let window = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (channel, data) => sent.push({ channel, data }) } }
@@ -112,6 +116,24 @@ test('cancelling a queued job removes it from the queue and records the cancella
   assert.equal(manager.cancelTrackedJob('c'), false, 'a finished job cannot be cancelled again')
 })
 
+test('live usage survives window reloads and saved results without private fields', () => {
+  const f = setup(); f.enqueue('usage')
+  const usage = { models: [{ stage: 'planning', model: 'test/model', requests: 1, active: 0, failed: 0,
+    input_tokens: 120, output_tokens: 30, cost_usd: .02, elapsed_ms: 3000, unknown_usage: 0, unknown_cost: 0,
+    prompt: 'private source text' }] }
+  const sink = f.starts[0].sink
+  sink.webContents.send('job:progress', { status: 'planning', diagnostics: usage })
+  const snapshot = f.manager.listJobs()[0]
+  assert.equal(snapshot.diagnostics.models[0].input_tokens, 120)
+  assert.equal(snapshot.diagnostics.models[0].prompt, undefined)
+  sink.webContents.send('job:progress', { diagnostics: { models: 'invalid' } })
+  assert.equal(f.manager.listJobs()[0].diagnostics.models[0].cost_usd, .02)
+  sink.webContents.send('job:complete', { output: { job_id: 'usage', clips: [], metrics: { diagnostics: usage } } })
+  const saved = f.manager.listJobs()[0].output.metrics.diagnostics
+  assert.equal(saved.models[0].output_tokens, 30)
+  assert.equal(saved.models[0].prompt, undefined)
+})
+
 test('cancelling a running job ignores its late events and frees the slot only when it exits', () => {
   const { manager, starts, cancelled, enqueue, status } = setup()
   enqueue('a'); enqueue('b'); enqueue('c')
@@ -140,4 +162,30 @@ test('only finished jobs can be dismissed from the session list', () => {
   starts[0].sink.webContents.send('job:error', { message: 'Stopped.' })
   assert.equal(manager.dismissJob('a'), true)
   assert.equal(manager.listJobs().length, 0)
+})
+
+test('stage progress survives snapshots and cancellation freezes the active elapsed time', () => {
+  const f = setup(); f.enqueue('progress')
+  const stages = [{ id: 'download', state: 'running', percent: 42, elapsed_ms: 2300, completed: 42, total: 100, unit: 'bytes' }]
+  f.starts[0].sink.webContents.send('job:progress', { status: 'downloading', percent: 7, stages })
+  let job = f.manager.listJobs()[0]
+  assert.equal(job.stages[0].percent, 42)
+  f.starts[0].sink.webContents.send('job:progress', { stages: [{ ...stages[0], id: '/private/source' }] })
+  assert.equal(f.manager.listJobs()[0].stages[0].id, 'download')
+  f.manager.cancelTrackedJob('progress')
+  job = f.manager.listJobs()[0]
+  assert.equal(job.stages[0].state, 'cancelled')
+  assert.ok(job.stages[0].elapsed_ms >= 2300)
+})
+
+
+test('saved stage timing boundary rejects invalid values and strips arbitrary fields', () => {
+  const valid = { id: 'download', state: 'completed', percent: 100, elapsed_ms: 5000, secret: '/private/source' }
+  assert.equal(progress.parseStages([valid])[0].secret, undefined)
+  for (const bad of [{ ...valid, percent: Infinity }, { ...valid, elapsed_ms: -1 }, { ...valid, id: '__proto__' }, { ...valid, state: 'secret' }]) {
+    assert.equal(progress.parseStages([bad]), undefined)
+  }
+  assert.equal(progress.parseStages([valid, valid]), undefined)
+  const output = jobOutput.parseJobOutput({ job_id: 'x', clips: [], metrics: { pipeline_stages: [valid] } })
+  assert.equal(output.metrics.pipeline_stages[0].elapsed_ms, 5000)
 })

@@ -99,6 +99,24 @@ FAILURES = (
     (("exceeds maximum allowed duration",),
      "This video is longer than BridgeClip can process.",
      "Choose a shorter source video, or trim a downloaded file before adding it."),
+    (("insufficient credits for jev review",),
+     "OpenRouter ran out of credits during Jev review; no clips were exported.",
+     "Add OpenRouter credits or raise your key's limit, then re-run. To clip without review, turn off Jev review in Settings → TypeSafe Jev."),
+    (("jev review was unavailable for every candidate",),
+     "Jev review was unavailable, so no clips were exported.",
+     "This does not mean the video has no suitable clips. Retry later, or turn off Jev review in Settings → TypeSafe Jev and re-run to clip without it."),
+    (("review could not finish",),
+     "Clip review could not finish; no clips were exported.",
+     "A review or repair response was incomplete, unavailable, or hit a limit. This does not mean the video has no suitable clips. Inspect transcript & edits in Jobs for the failed requests, then retry."),
+    (("no clips passed the coherence review", "clip omitted:"),
+     "No clips passed the coherence review.",
+     "Inspect transcript & edits in Jobs to see which context, ending, title or cut checks failed. No clip was forced."),
+    (("no moments matched the clip request",),
+     "No moments matched what you asked to clip.",
+     "Try describing it more broadly, or leave What to clip blank to get the best moments. Inspect transcript & edits in Jobs shows the planner's explanation."),
+    (("the planner returned no clip candidates",),
+     "The planner returned no clip candidates.",
+     "Open Inspect transcript & edits in Jobs and check the planner response for its explanation. The video may still contain suitable clips; this is not a rendering or system-check failure."),
     (("playlist or channel",),
      "This link is a playlist or channel, not a single video.",
      "Paste the link of one video."),
@@ -160,6 +178,8 @@ def progress_callback(progress) -> None:
         "step": progress.current_step,
         "clips_done": progress.clips_completed,
         "clips_total": progress.total_clips,
+        "stages": getattr(progress, "stages", None),
+        "diagnostics": getattr(progress, "diagnostics", None),
     })
 
 
@@ -183,6 +203,7 @@ async def run(config: dict) -> bool:
         # Each job has its own bridge process, so model choices cannot leak to
         # another queued or concurrent run. Do not fall back to higher-cost planners.
         os.environ["PLANNER_MODEL"] = "z-ai/glm-5.3-flash"
+        os.environ["EDITORIAL_REPAIR_MODEL"] = "google/gemini-3.8-flash"
         os.environ["PLANNER_FALLBACK_MODELS"] = ""
         os.environ["LAYOUT_VISION_ENABLED"] = "false"
     elif config.get("clipping_mode") == "advanced":
@@ -241,21 +262,26 @@ async def run(config: dict) -> bool:
 
     request = ClippingJobRequest(
         video_url=video_source,
+        workflow=config.get('workflow', 'automatic'),
+        caption_preset=preset_name,
         job_id=config.get("job_id"),
         max_clips=config.get("max_clips"),
         auto_clip_count=config.get("auto_clip_count", True),
         duration_ranges=duration_ranges,
         aspect_ratio=config.get("aspect_ratio", "9:16"),
         layout_style=config.get("layout_style") or "auto",
+        debug_capture=config.get("debug_capture", False),
         pacing=config.get("pacing") or "tight",
         video_speed=config.get("video_speed", 1.0),
         include_captions=config.get("include_captions", True),
         caption_style=caption_style,
+        include_title=config.get("include_title", True),
         start_time_seconds=config.get("start_time_seconds"),
         end_time_seconds=config.get("end_time_seconds"),
         banner_platform=config.get("banner_platform"),
         banner_channel_url=config.get("banner_channel_url"),
         keyterms=config.get("keyterms") or None,
+        clip_request=config.get("clip_request"),
     )
 
     emit({
@@ -301,7 +327,7 @@ def validate_config(config: object) -> dict:
     """Reject malformed bridge requests before loading the engine or writing files."""
     if not isinstance(config, dict):
         raise ValueError("Config must be a JSON object")
-    if type(config.get("contract_version")) is not int or config["contract_version"] != 2:
+    if type(config.get("contract_version")) is not int or config["contract_version"] != 3:
         raise ValueError("Unsupported clipping engine contract version")
     if type(config.get("layout_vision_enabled")) is not bool:
         raise ValueError("layout_vision_enabled must be a boolean")
@@ -321,9 +347,11 @@ def validate_config(config: object) -> dict:
     output = config.get("output_dir")
     if output is not None and (not isinstance(output, str) or not os.path.isabs(output) or "\0" in output):
         raise ValueError("Output directory must be an absolute path")
-    for field in ("include_captions", "auto_clip_count", "layout_vision_enabled"):
+    for field in ("include_captions", "include_title", "auto_clip_count", "layout_vision_enabled", "debug_capture"):
         if field in config and not isinstance(config[field], bool):
             raise ValueError(f"{field} must be a boolean")
+    if config.get('workflow', 'automatic') not in ('automatic', 'review'):
+        raise ValueError('Invalid workflow')
     count = config.get("max_clips")
     if count is not None and (type(count) is not int or not 1 <= count <= 100):
         raise ValueError("max_clips must be between 1 and 100")
@@ -359,6 +387,11 @@ def validate_config(config: object) -> dict:
         any(not isinstance(term, str) or not term.strip() or len(term) > 49 for term in keyterms)
     ):
         raise ValueError("Invalid keyterms")
+    clip_request = config.get("clip_request")
+    if clip_request is not None and (
+        not isinstance(clip_request, str) or not clip_request.strip() or len(clip_request) > 1000 or "\0" in clip_request
+    ):
+        raise ValueError("Invalid clip request")
     ranges = config.get("duration_ranges")
     if ranges is not None and (
         not isinstance(ranges, list) or len(ranges) > len(DURATION_RANGE_IDS) or

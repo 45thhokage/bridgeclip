@@ -21,7 +21,7 @@ function loadShared(file) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/shared', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require, URL })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => id.startsWith('./') ? loadShared(`${id.slice(2)}.ts`) : require(id), URL })
   return module.exports
 }
 
@@ -52,6 +52,8 @@ function startRunner({ child, env = process.env, onSpawn = () => {} }) {
     './settings-store': { loadSettings: () => settings, getSettingsForBridge: () => ({ OPENROUTER_API_KEY: SECRET, LOCAL_MODE: 'true', LOCAL_OUTPUT_DIR: WORK_HOME }), vocabularyTerms: () => [] },
     './logger': { logger: { info() {}, error() {}, warn() {} } },
     '../shared/job-output': jobOutput,
+    '../shared/run-diagnostics': loadShared('run-diagnostics.ts'),
+    '../shared/job-progress': loadShared('job-progress.ts'),
     './run-history': runHistory,
     '../shared/job-contract': jobContract,
     './tools': { resolveBinary: () => '/staged/engine-bin/ffmpeg' }
@@ -84,6 +86,7 @@ test('the worker gets a minimal environment: no proxies, interpreter hooks or in
   assert.equal(spawned.args.length, 1)
   assert.ok(!JSON.stringify(spawned.args).includes(SECRET))
   assert.ok(!workerInput.includes(SECRET), 'stdin config carries no key')
+  assert.equal(Object.hasOwn(JSON.parse(workerInput), 'clip_request'), false, 'no clip request, no clip_request field')
   assert.equal(spawned.options.shell, undefined)
   assert.equal(spawned.options.detached, true)
   assert.equal(spawned.options.cwd, runner.getEnginePath())

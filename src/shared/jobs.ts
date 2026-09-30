@@ -1,13 +1,18 @@
+import type { RunDiagnostics } from './run-diagnostics'
+import type { PipelineStage } from './job-progress'
 import type { JobOutput } from './job-output'
 
 /** Options for one clipping run, as the Create wizard submits them. */
 export interface ClipJobRequest {
+  workflow?: 'automatic' | 'review'
   videoUrl: string
   /** Missing on older queued requests; those retain the original quality mode. */
   clippingMode?: 'quality' | 'economy' | 'advanced'
   /** Required in Advanced mode; presets choose their own models. */
   plannerModel?: string
   transcriptionModel?: string
+  /** What the user wants clipped, in their words. Omitted: the best moments. */
+  clipRequest?: string
   maxClips: number | null
   autoClipCount: boolean
   durationRanges: string[] | null
@@ -19,6 +24,8 @@ export interface ClipJobRequest {
   videoSpeed?: number
   includeCaptions: boolean
   captionPreset: string
+  /** Title card at the top of Automatic clips. Older requests default to shown. */
+  includeTitle?: boolean
   startTimeSeconds: number | null
   endTimeSeconds: number | null
   bannerPlatform: string | null
@@ -30,11 +37,11 @@ export const MAX_PARALLEL_JOBS = 2
 /** Finished runs retained in the live session; older runs remain on disk. */
 export const MAX_FINISHED_JOBS = 50
 
-export type ActiveJobStatus = 'queued' | 'pending' | 'downloading' | 'transcribing' | 'planning' | 'rendering' | 'uploading'
+export type ActiveJobStatus = 'queued' | 'pending' | 'downloading' | 'contextualizing' | 'transcribing' | 'planning' | 'rendering' | 'uploading'
 export type TerminalJobStatus = 'completed' | 'failed' | 'cancelled'
 export type JobStatus = ActiveJobStatus | TerminalJobStatus
 
-export const ACTIVE_JOB_STATUSES: readonly ActiveJobStatus[] = ['queued', 'pending', 'downloading', 'transcribing', 'planning', 'rendering', 'uploading']
+export const ACTIVE_JOB_STATUSES: readonly ActiveJobStatus[] = ['queued', 'pending', 'downloading', 'contextualizing', 'transcribing', 'planning', 'rendering', 'uploading']
 
 export function isActiveJobStatus(status: string): status is ActiveJobStatus {
   return (ACTIVE_JOB_STATUSES as readonly string[]).includes(status)
@@ -51,6 +58,9 @@ export interface JobSnapshot {
   request: ClipJobRequest
   status: JobStatus
   percent: number
+  stages?: PipelineStage[]
+  diagnostics?: RunDiagnostics
+  progressAt?: number
   step: string
   clipsDone: number
   clipsTotal: number

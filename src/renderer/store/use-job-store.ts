@@ -32,6 +32,10 @@ export interface ApiCosts {
   cost_incomplete?: boolean
   transcription?: TranscriptionCost
   planning?: PlanningCost
+  source_context?: LayoutVisionCost
+  editorial?: LayoutVisionCost
+  editorial_repair?: LayoutVisionCost
+  editorial_vision?: LayoutVisionCost
   layout_vision?: LayoutVisionCost
   total_estimated_cost_usd: number
 }

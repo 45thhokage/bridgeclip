@@ -211,8 +211,8 @@ class TestPacingWithoutSmartFraming:
     def analyze_returning(self, monkeypatch, svc, plan_for):
         calls: list = []
 
-        async def analyze(video, start, window_ms, w, h, style, vision=True):
-            calls.append({"style": style, "vision": vision})
+        async def analyze(video, start, window_ms, w, h, style, vision=True, precise=None):
+            calls.append({"style": style, "vision": vision, "precise": vision if precise is None else precise})
             return plan_for(window_ms)
 
         monkeypatch.setattr(svc.layout_analyzer, "analyze", analyze)
@@ -230,7 +230,8 @@ class TestPacingWithoutSmartFraming:
             transcript_segments=paused_transcript(), layout_style=style, aspect_ratio=aspect,
         )
         result = render(plain_service, request)
-        assert calls == [{"style": "auto", "vision": False}]
+        # Pacing-only analysis: no paid vision and no every-frame camera scan.
+        assert calls == [{"style": "auto", "vision": False, "precise": False}]
         # Four 1.5s pauses cut down to a 260ms breath each.
         assert result.removed_ms >= 4 * 1000
         assert result.layout_type == "fit" and result.layout_cost_usd == 0.0
@@ -255,3 +256,65 @@ class TestPacingWithoutSmartFraming:
         )
         render(plain_service, request)
         assert calls == []
+
+
+@pytest.mark.parametrize('failures', [0, 1, 2])
+def test_editorial_protection_survives_every_render_path(service, monkeypatch, tmp_path, failures):
+    from clip_engine.services.jev_service import JevService
+    from clip_engine.services import rendering_service as module
+    calls, retained = [], []
+    async def render_edit(request, plan, time_map, *args):
+        calls.append(time_map)
+        # Pacing keeps the protected interval, but the planner's skip still wins.
+        assert any(a <= 3400 and b >= 3500 for a, b in time_map.keeps)
+        assert any(a <= 6000 and b >= 6600 for a, b in time_map.keeps)
+        assert not any(a < 6000 and b > 3500 for a, b in time_map.keeps)
+        if len(calls) <= failures:
+            raise RenderingError('fixture fallback')
+        with open(request.output_path, 'wb') as output:
+            output.write(b'fixture')
+    async def review(client, title, segments, report):
+        retained.extend(segments)
+    monkeypatch.setattr(service, '_render_edit', render_edit)
+    monkeypatch.setattr(module, 'review_retained_clip', review)
+    report = {'protected_source': [[3400, 6600]], 'candidates': [], 'flags': []}
+    request = request_for(tmp_path, apply_padding=False, editorial_context=report,
+                          editorial_service=JevService(), skip_ranges_ms=[(3500, 6000)])
+    request.end_time_ms = 14000  # Leave a removable tail to exercise natural fallback.
+    result = render(service, request)
+    assert len(calls) == failures + 1
+    assert report['retained_source'] == [list(pair) for pair in calls[-1].keeps]
+    assert all(c['kind'] == 'pacing' for c in report['prevented_cuts'])
+    assert len(retained) == 2
+    # QA reads the actual edited timestamps, including the final fallback's map.
+    assert retained[-1].start_time_ms == calls[-1].to_output(6500)
+    assert result.duration_ms == calls[-1].output_ms
+
+
+@pytest.mark.parametrize("failures", [0, 1, 2])
+def test_jev_off_preserves_final_source_timeline(service, monkeypatch, tmp_path, failures):
+    from unittest.mock import AsyncMock
+    from clip_engine.services import rendering_service as module
+    review = AsyncMock(side_effect=AssertionError("Jev must stay off"))
+    monkeypatch.setattr(module, 'review_retained_clip', review)
+    calls = []
+    stub_render(monkeypatch, service, failures, calls)
+    report = {'candidates': [], 'protected_intervals': [], 'coherence': {'status': 'skipped', 'reason': 'disabled_by_user'}}
+    request = request_for(tmp_path, editorial_context=report, debug_capture=False,
+                          editorial_service=None, coherence_reviewer=None)
+    request.start_time_ms, request.end_time_ms = 2000, 12000
+    request.transcript_segments = [TranscriptSegment(s.start_time_ms + 2000, s.end_time_ms + 2000, s.text,
+        words=[TranscriptWord(w.word, w.start_time_ms + 2000, w.end_time_ms + 2000) for w in s.words]) for s in transcript()]
+    final_keeps = []
+    original = service._render_edit
+    async def capture(req, plan, time_map, window_start, *args):
+        await original(req, plan, time_map, window_start, *args)
+        final_keeps.extend([[window_start + a, window_start + b] for a, b in time_map.keeps])
+    monkeypatch.setattr(service, '_render_edit', capture)
+    result = render(service, request)
+    assert report['retained_source'] == final_keeps
+    assert sum(b - a for a, b in final_keeps) == result.duration_ms
+    assert (result.removed_ms == 0) is (failures == 2)
+    assert report['coherence']['status'] == 'skipped'
+    assert not list(tmp_path.glob('*.framing.json'))
+    review.assert_not_awaited()

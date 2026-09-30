@@ -41,6 +41,8 @@ from clip_engine.services.layout_renderer import (
     person_crop,
     piecewise_expr,
     screen_crop,
+    screen_view,
+    shot_views,
     shot_chain,
     stacked_panel_heights,
     step_expr,
@@ -271,7 +273,8 @@ class TestGeometry:
         assert x >= mid - 2 and x + w <= SRC_W
         # Face kept at or above ~58% of the panel even near the bottom edge.
         assert (right.cy * SRC_H - y) / h <= 0.6
-        assert w / h == pytest.approx(1080 / 960, rel=0.02)
+        fit_w, fit_h = panel_fit((w, h, x, y), 1080, 960) or (1080, 960)
+        assert fit_w / fit_h == pytest.approx(w / h, rel=0.02)
 
     def test_cam_crop_stays_inside_webcam(self):
         cam = Box(0.75, 0.72, 0.22, 0.22)
@@ -392,6 +395,25 @@ def mixed_plan() -> ClipLayoutPlan:
 
 
 class TestFilterGraph:
+    @pytest.mark.parametrize('focus', [None, Box(.04, .12, .88, .4), Box(.3, .4, .1, .05)])
+    def test_screen_and_webcam_top_panel_fills_without_bars(self, focus):
+        # Maintainer decision: keep main's fill (the reported case is a
+        # 1080x1152 panel), not a fitted screen with 171 px bars.
+        shot = ShotLayout(0, 5000, LayoutType.SCREEN_CAM, cam_box=Box(.78, .70, .2, .28),
+                          cam_face=Box(.85, .75, .06, .12), screen_box=Box(0, 0, 1, 1), screen_focus=focus)
+        top, _ = stacked_panel_heights(shot, SRC_H, 1920)
+        assert top == 1152
+        (w, h, x, y), destination = screen_view(shot, SRC_W, SRC_H, 1080, top)
+        assert destination == (0, 0, 1080, top)
+        assert w / h == pytest.approx(1080 / top, rel=.01)
+        assert 1080 / w <= MAX_UPSCALE + .01
+        assert x >= 0 and y >= 0 and x + w <= SRC_W and y + h <= SRC_H
+        views = shot_views(shot, 1000, SRC_W, SRC_H, 1080, 1920)
+        assert views[0] == ((x, y, w, h), (0, 0, 1080, top))
+        chain = shot_chain(0, shot, SRC_W, SRC_H, 1080, 1920)
+        assert f"crop={w}:{h}:{x}:{y},scale=1080:{top}:flags=lanczos[top0]" in chain
+        assert "pad=" not in chain
+
     def test_graph_has_every_shot(self):
         graph = build_layout_graph(mixed_plan(), 1080, 1920)
         assert graph.count("trim=") == 4

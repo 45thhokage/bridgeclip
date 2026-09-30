@@ -2,6 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Use the engine's bundled caption faces in previews, including offline builds. */
+@font-face {
+  font-family: 'Montserrat';
+  src: url('../../engine/assets/fonts/Montserrat-Black.ttf') format('truetype');
+  font-weight: 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('../../engine/assets/fonts/Montserrat-ExtraBold.ttf') format('truetype');
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Poppins';
+  src: url('../../engine/assets/fonts/Poppins-Black.ttf') format('truetype');
+  font-weight: 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Poppins';
+  src: url('../../engine/assets/fonts/Poppins-ExtraBold.ttf') format('truetype');
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anton';
+  src: url('../../engine/assets/fonts/Anton-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Archivo Black';
+  src: url('../../engine/assets/fonts/ArchivoBlack-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Instrument Serif';
+  src: url('../../engine/assets/fonts/InstrumentSerif-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
 /* Geist is vendored (SIL OFL 1.1, see assets/fonts/Geist-OFL.txt) so the app
    renders identically offline. */
 @font-face {
@@ -36,8 +81,8 @@
     --ink-subtle: 124 129 144;
     --ink-faint: 84 89 103;
 
-    --accent: 92 143 255;
-    --accent-hover: 134 176 255;
+    --accent: 26 95 223;        /* Primary blue: #1A5FDF */
+    --accent-button-hover: 40 107 229;
     --accent-ink: 255 255 255;
     --accent-cyan: 56 204 255;  /* BridgeMind mark */
 
@@ -98,6 +143,12 @@
 
   button:disabled {
     cursor: not-allowed;
+  }
+
+  input[type='checkbox'],
+  input[type='radio'],
+  input[type='range'] {
+    accent-color: rgb(var(--accent));
   }
 
   :focus-visible {
@@ -241,18 +292,17 @@
     color: rgb(var(--accent-ink));
     background: rgb(var(--accent));
     box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.4),
-      inset 0 -1px 0 rgb(0 0 0 / 0.14),
+      inset 0 1px 0 rgb(255 255 255 / 0.16),
+      inset 0 -1px 0 rgb(0 0 0 / 0.12),
       0 0 0 1px rgb(var(--accent) / 0.6);
-    text-shadow: 0 1px 1px rgb(0 0 0 / 0.18);
   }
 
   .btn-primary:hover:not(:disabled) {
-    filter: brightness(1.08) saturate(1.05);
+    background: rgb(var(--accent-button-hover));
     box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.45),
-      inset 0 -1px 0 rgb(0 0 0 / 0.14),
-      0 0 0 1px rgb(var(--accent) / 0.7);
+      inset 0 1px 0 rgb(255 255 255 / 0.2),
+      inset 0 -1px 0 rgb(0 0 0 / 0.12),
+      0 0 0 1px rgb(var(--accent-button-hover) / 0.7);
   }
 
   .btn-primary:disabled {
@@ -331,4 +381,23 @@
   .glass-thick {
     background: rgb(var(--overlay));
   }
+}
+
+/* Native progress preserves accessible measured/indeterminate semantics. */
+.stage-progress {
+  appearance: none;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, .07);
+}
+.stage-progress::-webkit-progress-bar { background: rgba(255, 255, 255, .07); border-radius: 9999px; }
+.stage-progress::-webkit-progress-value { background: var(--color-accent, #2563eb); border-radius: 9999px; transition: width .2s ease; }
+.stage-progress:indeterminate {
+  background: linear-gradient(90deg, transparent, #2563eb 50%, transparent) -100% 0 / 50% 100% no-repeat, rgba(255, 255, 255, .07);
+  animation: stage-progress-pulse 1.8s ease-in-out infinite;
+}
+@keyframes stage-progress-pulse { to { background-position: 200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .stage-progress:indeterminate { animation: none; background-position: 50% 0; }
+  .stage-progress::-webkit-progress-value { transition: none; }
 }

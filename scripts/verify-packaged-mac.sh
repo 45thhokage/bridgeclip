@@ -25,7 +25,7 @@ getCurrentFuseWire(process.argv[2]).then((wire) => {
 }).catch((error) => { console.error(error.message); process.exitCode = 1 })
 JS
 for required in \
-  bridge/bridge_runner.py bridge/smoke_smart_render.py bridge/smoke_transcription_audio.py \
+  bridge/bridge_runner.py bridge/editor_runner.py bridge/smoke_smart_render.py bridge/smoke_transcription_audio.py \
   engine/clip_engine/bridge_contract.py engine/LICENSE engine/THIRD_PARTY_NOTICES.md \
   engine-venv/bin/python3 engine-venv/PYTHON-LICENSE \
   engine-bin/ffmpeg engine-bin/ffprobe engine-bin/yt-dlp \
@@ -79,7 +79,7 @@ for binary in "$resources/engine-bin/ffmpeg" "$resources/engine-bin/ffprobe" \
 done
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$resources/engine" "$resources/engine-venv/bin/python3" -c \
-  'import cv2, yt_dlp; from clip_engine.bridge_contract import BRIDGE_CONTRACT_VERSION; from clip_engine.services.layout_analyzer import LayoutAnalyzer; assert BRIDGE_CONTRACT_VERSION == 2; assert LayoutAnalyzer().available'
+  'import cv2, yt_dlp; from clip_engine.bridge_contract import BRIDGE_CONTRACT_VERSION; from clip_engine.services.layout_analyzer import LayoutAnalyzer; from clip_engine.services.manual_editor import run_editor; assert BRIDGE_CONTRACT_VERSION == 3; assert LayoutAnalyzer().available'
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$resources/engine" "$resources/engine-venv/bin/python3" \
   "$resources/bridge/smoke_smart_render.py" "$resources/engine-bin/ffmpeg"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$resources/engine" "$resources/engine-venv/bin/python3" \

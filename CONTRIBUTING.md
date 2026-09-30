@@ -15,6 +15,22 @@ Follow the [development instructions](README.md#develop). Install the in-repo en
 
 Run `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` when working on a local fork. For engine changes, install `pytest` in `engine/.venv` and run `engine/.venv/bin/python -m pytest -q engine/tests`; the runtime lockfile does not include test tools. Describe behavior, tests, and any user-visible screenshots or sample outputs in the PR.
 
-Use an imperative, scoped commit message such as `fix(clips): validate saved run output`. By contributing, you agree to follow the [code of conduct](CODE_OF_CONDUCT.md).
+Use imperative, scoped commit messages and pull request titles, such as `fix(clips): validate saved run output`. By contributing, you agree to follow the [code of conduct](CODE_OF_CONDUCT.md).
+
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) is bundled into the app and shown under **Settings → About → Changelog** and **Help → Changelog**, so write it for users.
+
+- **Every user-visible change:** add a bullet under `## [Unreleased]` in the matching group: `### Added`, `### Changed`, `### Fixed` or `### Removed` (`Deprecated` and `Security` also work). Say what people can now do or what works better, and name the screen or setting. Leave out tests, CI, refactors and other internal changes. The app shows **bold** and `code`; links show as plain text.
+- **Each release:** in the PR that bumps `package.json` and `package-lock.json` to `X.Y.Z`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add an empty `## [Unreleased]` above it. At the bottom, point `[Unreleased]` at `compare/vX.Y.Z...HEAD` and add `[X.Y.Z]: https://github.com/bridge-mind/bridgeclip/releases/tag/vX.Y.Z`. Tag `vX.Y.Z` after the PR merges, and reuse the section as the GitHub Release notes.
+
+`npm run test:release` fails when the `package.json` version has no dated section, versions are out of order, or a group isn't one of those types.
+
+## Pull request descriptions
+
+- Write every PR description as a concise, human-friendly list of changes in plain language. Avoid jargon and explain what people can now do or what works better.
+- Cover all meaningful changes in the final PR, with one short bullet per change. Update the description as the scope changes; do not append a running work log.
+- Focus on the result rather than file names, internal implementation details, or the order the work happened. Include technical details only when reviewers need them to understand a limitation or tradeoff.
+- End with a brief testing note: what was checked, any known failures, and anything important that was not tested. Include screenshots or examples when they help explain a visible change.
 
 Official CI logs and signing workflows are private. Build helpers, dependency pins, and release verification instructions remain available in this repository.

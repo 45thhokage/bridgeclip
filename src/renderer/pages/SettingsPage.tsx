@@ -1,6 +1,8 @@
+import { JevSettings } from '../components/JevSettings'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, Info, KeyRound, Loader2, RefreshCw, ScrollText } from 'lucide-react'
+import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal } from 'lucide-react'
 import { useSettingsStore } from '../store/use-settings-store'
+import { useChangelogStore } from '../store/use-changelog-store'
 import { useApiKeyDrafts } from '../hooks/use-api-key-drafts'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage } from '../lib/utils'
@@ -17,13 +19,14 @@ import { Badge, StatusDot } from '../components/ui/Badge'
 import { IconTile } from '../components/ui/IconTile'
 import { Callout } from '../components/ui/Callout'
 import { UpdatesRow } from '../components/Updates'
+import { OutputStorage } from '../components/OutputStorage'
 
-type SectionId = 'keys' | 'vocabulary' | 'output' | 'system' | 'about'
+type SectionId = 'keys' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
 type SectionTone = 'success' | 'warning' | 'danger' | 'idle'
 
 /** `showUpdates` changes each time Help → Check for Updates… asks for the Updates row. */
 export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): React.JSX.Element {
-  const { outputDirectory, pythonPath, customVocabulary, openrouterConfigured, zernioConfigured, saving, save, toolStatus, toolError, checkTools, checkingTools } =
+  const { outputDirectory, pythonPath, customVocabulary, openrouterConfigured, zernioConfigured, sourceContextWebResearch, saving, save, toolStatus, toolError, checkTools, checkingTools } =
     useSettingsStore()
   const keys = useApiKeyDrafts()
   const [isPackaged, setIsPackaged] = useState(true)
@@ -55,6 +58,7 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
 
   const sections: { id: SectionId; label: string; icon: ReactNode; tone: SectionTone }[] = [
     { id: 'keys', label: 'API keys', icon: <KeyRound />, tone: keysMissing ? 'warning' : 'success' },
+    { id: 'jev', label: 'TypeSafe Jev', icon: <SlidersHorizontal />, tone: 'idle' },
     { id: 'vocabulary', label: 'Vocabulary', icon: <BookA />, tone: 'idle' },
     { id: 'output', label: 'Output', icon: <FolderOpen />, tone: 'idle' },
     { id: 'system', label: 'System check', icon: <Cpu />, tone: !toolsChecked ? 'idle' : toolsMissing ? 'danger' : 'success' },
@@ -81,7 +85,7 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
       <PageHeader
         eyebrow="Preferences"
         title="Settings"
-        description="Changes save automatically."
+        description="Changes save automatically. Jev thresholds use Apply."
         actions={<SaveIndicator saving={saving} savedAt={lastSaved || null} error={error} />}
       />
 
@@ -154,6 +158,13 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
                   getKeyUrl={PROVIDER_LINKS.openrouter}
                 />
               </KeyRow>
+              <label className="flex items-start gap-3 px-3 py-2 text-sm text-ink-muted">
+                <input type="checkbox" className="mt-1" checked={sourceContextWebResearch === 'on'}
+                  onChange={(e) => commit({ sourceContextWebResearch: e.target.checked ? 'on' : 'off' })} />
+                <span>Research the source before clipping <Badge tone="warning" className="ml-1 align-middle">Beta</Badge>
+                  <span className="mt-1 block text-xs text-ink-subtle">Off by default. When on, the video’s title, description and channel go to OpenRouter web search (up to two searches) and Gemini builds a channel and video overview before transcription. Uses extra OpenRouter credit and adds time. Only YouTube and Twitch sources are researched; local files never are. View the brief and sources in the transcript inspector.</span>
+                </span>
+              </label>
               <p className="eyebrow px-1 pt-2">Optional</p>
               <KeyRow>
                 <ApiKeyInput
@@ -170,6 +181,8 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
               </KeyRow>
             </div>
           </Section>
+
+          <JevSettings />
 
           <Section id="vocabulary">
             <PanelHeader
@@ -246,6 +259,14 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
                 <Button
                   size="sm"
                   variant="ghost"
+                  icon={<History className="h-3.5 w-3.5" />}
+                  onClick={() => useChangelogStore.getState().setOpen(true)}
+                >
+                  Changelog
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
                   trailingIcon={<ArrowUpRight className="h-3.5 w-3.5" />}
                   onClick={() => getApi().shell.openPath(ISSUES_URL)}
                 >
@@ -262,6 +283,7 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
               </div>
             </div>
             <UpdatesRow />
+            <OutputStorage outputDirectory={outputDirectory} />
           </Section>
         </div>
       </div>
@@ -448,7 +470,7 @@ function DevPathField({
   )
 }
 
-interface ToolRow { name: string; ok: boolean | null; detail?: ReactNode; optional?: boolean }
+interface ToolRow { name: string; ok: boolean | null; detail?: ReactNode; hint?: string | null; repairCommand?: string | null; failureLabel?: string; optional?: boolean }
 
 function toolRows(status: ToolStatus | null): ToolRow[] {
   return [
@@ -456,7 +478,10 @@ function toolRows(status: ToolStatus | null): ToolRow[] {
     {
       name: 'Clipping dependencies and smart framing',
       ok: status?.pythonDeps ?? null,
-      detail: status && !status.pythonDeps ? status.pythonError : 'Includes OpenCV and the smart framing model'
+      detail: status && !status.pythonDeps ? status.pythonError : 'Includes OpenCV and the smart framing model',
+      hint: status && !status.pythonDeps ? status.pythonHint : null,
+      repairCommand: status && !status.pythonDeps ? status.pythonRepairCommand : null,
+      failureLabel: 'Needs attention'
     },
     { name: 'FFmpeg', ok: status?.ffmpeg ?? null },
     {
@@ -484,7 +509,7 @@ function ToolList({ rows, checking }: { rows: ToolRow[]; checking: boolean }): R
         <div className="mb-3 flex items-center gap-2 px-1 text-xs">
           <StatusDot tone={missing > 0 ? 'danger' : 'success'} />
           <span className={cn('flex-1', missing > 0 ? 'text-danger' : 'text-ink-muted')}>
-            {missing > 0 ? `${missing} required tool${missing === 1 ? '' : 's'} missing` : `Everything BridgeClip needs is installed (${rows.filter((row) => row.ok).length} tools)`}
+            {missing > 0 ? `${missing} required check${missing === 1 ? '' : 's'} need${missing === 1 ? 's' : ''} attention` : `Everything BridgeClip needs is installed (${rows.filter((row) => row.ok).length} tools)`}
           </span>
           {missing === 0 && (
             <Button
@@ -512,12 +537,18 @@ function ToolList({ rows, checking }: { rows: ToolRow[]; checking: boolean }): R
                     {row.detail}
                   </p>
                 )}
+                {row.hint && <p className="mt-2 text-xs leading-relaxed text-ink-muted">{row.hint}</p>}
+                {row.repairCommand && (
+                  <pre className="mt-2 whitespace-pre-wrap break-all rounded-lg bg-black/20 p-2 font-mono text-2xs text-ink" data-selectable>
+                    <code>{row.repairCommand}</code>
+                  </pre>
+                )}
               </div>
               {row.ok == null ? (
                 <span className="shrink-0 text-xs text-ink-faint">{checking ? 'Checking…' : 'Not checked'}</span>
               ) : (
                 <Badge tone={row.ok ? 'neutral' : row.optional ? 'warning' : 'danger'} className="shrink-0">
-                  {row.ok ? 'Found' : row.optional ? 'Unavailable' : 'Missing'}
+                  {row.ok ? 'Found' : row.optional ? 'Unavailable' : row.failureLabel ?? 'Missing'}
                 </Badge>
               )}
             </div>

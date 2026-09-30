@@ -11,14 +11,16 @@ import { SourcePicker } from './SourcePicker'
 import { Panel } from './ui/Panel'
 import { Switch } from './ui/Switch'
 import { Button } from './ui/Button'
-import { TextInput } from './ui/Field'
+import { TextArea, TextInput } from './ui/Field'
 import { IconTile } from './ui/IconTile'
 import { SettingRow } from './ui/SettingRow'
 import { onRadioKeyDown } from './ui/Segmented'
-import { DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
+import { CLIP_REQUEST_MAX_CHARS, DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
 import { isModelId } from '../../shared/openrouter-models'
 import { useModelStore } from '../store/use-model-store'
+import { useSettingsStore } from '../store/use-settings-store'
 import { ModelPicker } from './ModelPicker'
+import { WorkflowPicker } from './WorkflowPicker'
 
 const DURATIONS = DURATION_OPTIONS
 
@@ -36,9 +38,9 @@ const LAYOUT_STYLES = [
 const MAX_CLIPS = 100
 
 export const WIZARD_STEPS: { id: WizardStep; label: string; title: string; description: string }[] = [
-  { id: 'video', label: 'Video', title: 'Choose a video', description: 'A local file, YouTube link or Twitch VOD link. Optionally clip only part of it.' },
+  { id: 'video', label: 'Video', title: 'Choose a video', description: 'A local file, YouTube link or Twitch VOD link. Optionally suggest where to find clips.' },
   { id: 'format', label: 'Format', title: 'Format, framing and speed', description: 'Choose the look and pace of every clip in this job.' },
-  { id: 'clips', label: 'Clips', title: 'Clip length and count', description: 'Pick one or more lengths, or leave them all off for any length.' },
+  { id: 'clips', label: 'Clips', title: 'What to clip, length and count', description: 'Optionally describe the moments you want. Pick one or more lengths, or none for any length.' },
   { id: 'captions', label: 'Captions', title: 'Captions', description: 'Word-by-word captions burned into each clip. Silent videos are clipped without them.' },
   { id: 'review', label: 'Review', title: 'Review and generate', description: 'Check the run, then generate. You can queue another video right after.' }
 ]
@@ -58,10 +60,13 @@ export function parseTrimRange(enabled: boolean, startText: string, endText: str
 
 /** The run request for the current draft. */
 export function buildJobRequest(draft: ClipDraft, trim: { start: number | null; end: number | null }): ClipJobRequest {
+  if (!draft.workflow) throw new Error('Choose a workflow before creating clips.')
   return {
     videoUrl: normalizeVideoSource(draft.source),
+    workflow: draft.workflow,
     clippingMode: draft.clippingMode,
     ...(draft.clippingMode === 'advanced' ? { plannerModel: draft.plannerModel, transcriptionModel: draft.transcriptionModel } : {}),
+    ...(draft.clipRequest?.trim() ? { clipRequest: draft.clipRequest.trim() } : {}),
     maxClips: draft.autoClipCount ? null : draft.maxClips,
     autoClipCount: draft.autoClipCount,
     durationRanges: draft.durations.length > 0 ? draft.durations : null,
@@ -72,6 +77,7 @@ export function buildJobRequest(draft: ClipDraft, trim: { start: number | null; 
     videoSpeed: draft.videoSpeed ?? 1,
     includeCaptions: draft.includeCaptions,
     captionPreset: draft.captionPreset,
+    includeTitle: draft.includeTitle,
     startTimeSeconds: trim.start,
     endTimeSeconds: trim.end,
     bannerPlatform: null,
@@ -109,15 +115,16 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
   const meta = WIZARD_STEPS[index]
   const sourceError = twitchSourceError(draft.source)
   const hasSource = Boolean(draft.source.trim()) && !sourceError
+  const videoValid = hasSource && draft.workflow !== null && !trim.error
   const modelsValid = draft.clippingMode !== 'advanced' || (isModelId(draft.plannerModel) && isModelId(draft.transcriptionModel))
-  const stepValid = step === 'video' ? hasSource && !trim.error : step !== 'clips' || modelsValid
-  const canSubmit = hasSource && modelsValid && !blockedReason && !trim.error && !submitting && !draft.started
+  const stepValid = videoValid && (step !== 'clips' || modelsValid)
+  const canSubmit = videoValid && modelsValid && !blockedReason && !submitting && !draft.started
 
   const submit = (): void => {
     if (canSubmit) onSubmit(buildJobRequest(draft, trim))
   }
 
-  // ⌘↵ / Ctrl+↵ generates from any step once a video is chosen.
+  // ⌘↵ / Ctrl+↵ generates only once a video and workflow are chosen.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -142,13 +149,23 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
 
   return (
     <div className={cn('space-y-3', className)}>
-      <Stepper current={step} reachable={hasSource ? WIZARD_STEPS.length - 1 : 0} onSelect={goTo} />
+      <Stepper current={step} reachable={videoValid ? WIZARD_STEPS.length - 1 : 0} onSelect={goTo} />
+
+      {step === 'captions' && draft.workflow === 'review' && (
+        <aside aria-labelledby="caption-editor-note" className="rounded-2xl border border-accent/20 bg-accent/5 p-4 xl:p-5">
+          <span className="eyebrow text-accent">Review &amp; edit</span>
+          <h2 id="caption-editor-note" className="mt-1.5 text-sm font-semibold text-ink">Adjust captions in the editor</h2>
+          <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+            Choose a starting style below. Before exporting, you can change how captions look, reposition them, or hide them from selected parts of each clip.
+          </p>
+        </aside>
+      )}
 
       <Panel className="p-4 xl:p-5">
-        <div className="mb-3">
-          <h2 className="text-sm font-semibold text-ink">{meta.title}</h2>
-          <p className="mt-0.5 text-xs text-ink-muted">{meta.description}</p>
-        </div>
+        {step !== 'video' && <div className="mb-3">
+          <h2 className="text-sm font-semibold text-ink">{step === 'review' && draft.workflow === 'review' ? 'Ready to find candidates' : meta.title}</h2>
+          <p className="mt-0.5 text-xs text-ink-muted">{step === 'review' && draft.workflow === 'review' ? 'Jev reviews each candidate before the editor opens for your final cut.' : meta.description}</p>
+        </div>}
         {sourceError && <p role="alert" className="text-sm text-danger">{sourceError}</p>}
         {step === 'video' && <VideoStep draft={draft} update={update} trimError={trim.error} disabled={submitting} />}
         {step === 'format' && <FormatStep draft={draft} update={update} />}
@@ -165,13 +182,13 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
           </Button>
         ) : <span />}
         <p className="min-w-0 flex-1 truncate text-center text-2xs text-ink-subtle">
-          {blockedReason ?? (!modelsValid ? 'Choose both models in Advanced mode.' : step === 'video' && !hasSource ? 'Add a video to continue.' : `${MOD_KEY}↵ generates from any step`)}
+          {blockedReason ?? (!draft.workflow ? 'Choose a workflow to continue.' : !modelsValid ? 'Choose both models in Advanced mode.' : step === 'video' && !hasSource ? 'Add a video to continue.' : `${MOD_KEY}↵ generates from any step`)}
         </p>
         {next && step !== 'review' ? (
           <div className="flex items-center gap-2">
             {step !== 'video' && (
               <Button variant="ghost" onClick={submit} disabled={!canSubmit} loading={submitting} className="max-sm:hidden">
-                Generate now
+                {draft.workflow === 'review' ? 'Find candidates' : 'Generate now'}
               </Button>
             )}
             <Button variant="primary" trailingIcon={<ArrowRight className="h-3.5 w-3.5" />} onClick={() => goTo(next.id)} disabled={!stepValid}>
@@ -180,7 +197,7 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
           </div>
         ) : (
           <Button variant="primary" size="lg" icon={<Sparkles className="h-4 w-4" />} onClick={submit} disabled={!canSubmit} loading={submitting}>
-            Generate clips
+            {draft.workflow === 'review' ? 'Find candidates' : 'Generate clips'}
           </Button>
         )}
       </div>
@@ -233,11 +250,18 @@ function Stepper({ current, reachable, onSelect }: { current: WizardStep; reacha
 function VideoStep({ draft, update, trimError, disabled }: { draft: ClipDraft; update: Update; trimError: string | null; disabled?: boolean }): React.JSX.Element {
   return (
     <div className="space-y-3">
-      <SourcePicker value={draft.source} onChange={(source) => update({ source })} disabled={disabled} />
+      <WorkflowPicker value={draft.workflow} onChange={(workflow) => update({ workflow })} disabled={disabled} />
+      <section aria-labelledby="video-source-heading" className="space-y-3 border-t border-white/[0.06] pt-4">
+        <div>
+          <h2 id="video-source-heading" className="text-sm font-semibold text-ink">{WIZARD_STEPS[0].title}</h2>
+          <p className="mt-0.5 text-xs text-ink-muted">{WIZARD_STEPS[0].description}</p>
+        </div>
+        <SourcePicker value={draft.source} onChange={(source) => update({ source })} disabled={disabled} />
+      </section>
       <SettingRow
-        title="Clip only part of the video"
-        description="Set a start and end time. Leave either empty for an open range."
-        control={<Switch label="Trim the source" checked={draft.trimOpen} onChange={(trimOpen) => update({ trimOpen })} />}
+        title="Preferred part of the video"
+        description="Suggest where to find clips. The full source is transcribed; boundaries may expand to preserve complete ideas."
+        control={<Switch label="Prefer a source range" checked={draft.trimOpen} onChange={(trimOpen) => update({ trimOpen })} />}
       />
       {draft.trimOpen && (
         <div className="animate-fade-in">
@@ -293,7 +317,7 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
                   <span
                     className={cn(
                       'rounded-[4px] border-[1.5px] transition-colors duration-200',
-                      selected ? 'border-accent-hover bg-accent/25' : 'border-ink-subtle bg-white/[0.04]'
+                      selected ? 'border-accent bg-accent/25' : 'border-ink-subtle bg-white/[0.04]'
                     )}
                     style={{ width: f.w, height: f.h }}
                   />
@@ -355,7 +379,7 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
       <Group label="Pacing">
         <SettingRow
           title="Cut dead air"
-          description="Trims long pauses and filler words, keeps demos."
+          description="Proposes pause and filler cuts. When enabled, Jev checks each removal."
           control={
             <Switch label="Cut dead air and filler words" checked={draft.pacing === 'tight'} onChange={(on) => update({ pacing: on ? 'tight' : 'natural' })} />
           }
@@ -385,15 +409,28 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
 }
 
 export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
+  const jevEnabled = useSettingsStore((s) => s.jevEnabled === 'on')
   const toggleDuration = (id: string): void => {
     update({ durations: draft.durations.includes(id) ? draft.durations.filter((d) => d !== id) : [...draft.durations, id] })
   }
   return (
     <div className="space-y-4">
+      <Group label="What to clip" aside="Optional">
+        <TextArea
+          rows={3}
+          maxLength={CLIP_REQUEST_MAX_CHARS}
+          value={draft.clipRequest ?? ''}
+          onChange={(e) => update({ clipRequest: e.target.value })}
+          aria-label="What to clip"
+          aria-describedby="clip-request-help"
+          placeholder="e.g. every time they talk about pricing, or the funniest reactions"
+        />
+        <p id="clip-request-help" className="mt-2 text-2xs text-ink-subtle">Only matching moments are clipped, so you may get fewer clips, or none. Leave blank for the best moments.</p>
+      </Group>
       <Group label="Clipping mode">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Clipping mode">
           {([
-            { id: 'quality', label: 'Quality', hint: 'Opus 5.5 planning · MAI Transcribe 2' },
+            { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · MAI Transcribe 2` },
             { id: 'economy', label: 'Economy', hint: 'GLM 5.3 Flash planning · Whisper Turbo' },
             { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' }
           ] as const).map((mode) => {
@@ -473,12 +510,19 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
   )
 }
 
-function CaptionsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
+export function CaptionsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
   return (
     <div className="space-y-3">
+      {draft.workflow !== 'review' && (
+        <SettingRow
+          title="Show title at the top"
+          description="Each clip's title over the video. Turn off to leave it out."
+          control={<Switch label="Title at the top" checked={draft.includeTitle} onChange={(includeTitle) => update({ includeTitle })} />}
+        />
+      )}
       <SettingRow
         title="Burn in captions"
-        description="Turn off for clean clips without on-screen text."
+        description="Turn off for clips without word-by-word captions."
         control={<Switch label="Captions" checked={draft.includeCaptions} onChange={(includeCaptions) => update({ includeCaptions })} />}
       />
       <div
@@ -486,6 +530,7 @@ function CaptionsStep({ draft, update }: { draft: ClipDraft; update: Update }): 
         aria-disabled={!draft.includeCaptions}
       >
         <CaptionPresetPicker
+          showPreview
           value={draft.captionPreset}
           onChange={(captionPreset) => update({ captionPreset })}
           disabled={!draft.includeCaptions}
@@ -513,14 +558,17 @@ function ReviewStep({ draft, trim, onEdit }: {
     : ''
 
   const rows: { step: WizardStep; label: string; value: string }[] = [
+    { step: 'video', label: 'Workflow', value: draft.workflow === 'review' ? 'Review & edit · export when ready' : 'Automatic' },
     { step: 'video', label: 'Video', value: `${sourceLabel(draft.source)}${trimLabel}` },
     { step: 'format', label: 'Format', value: `${FORMATS.find((f) => f.id === draft.aspectRatio)?.label ?? draft.aspectRatio} ${draft.aspectRatio} · ${framing}` },
-    { step: 'format', label: 'Pacing', value: draft.pacing === 'tight' ? 'Cut dead air' : 'Keep pauses' },
+    { step: 'format', label: 'Pacing', value: draft.workflow === 'review' ? 'Manual · choose your own cuts in the editor' : draft.pacing === 'tight' ? 'Cut dead air' : 'Keep pauses' },
     { step: 'format', label: 'Speed', value: `${draft.videoSpeed ?? 1}×${(draft.videoSpeed ?? 1) === 1 ? ' · Normal' : ' · All exported clips'}` },
     { step: 'clips', label: 'Mode', value: draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
     { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? 'AI decides how many' : `Up to ${draft.maxClips}`}` },
+    { step: 'clips', label: 'What to clip', value: draft.clipRequest?.trim() || 'The best moments' },
     { step: 'captions', label: 'Captions', value: draft.includeCaptions ? CAPTION_PRESET_NAMES[draft.captionPreset] ?? draft.captionPreset : 'Off' }
   ]
+  if (draft.workflow !== 'review') rows.push({ step: 'captions', label: 'Title', value: draft.includeTitle ? 'Shown at the top' : 'Off' })
   if (draft.clippingMode === 'advanced') rows.splice(5, 0,
     { step: 'clips', label: 'Transcribe', value: draft.transcriptionModel || 'Choose a model' },
     { step: 'clips', label: 'Plan', value: draft.plannerModel || 'Choose a model' })
@@ -605,13 +653,13 @@ function formatSeconds(total: number): string {
 
 /** Tiny 9:16 diagram of a framing style: split panels, full bleed, or letterbox. */
 function FramingGlyph({ style, selected }: { style: 'auto' | 'fill' | 'fit'; selected: boolean }): React.JSX.Element {
-  const fill = selected ? 'bg-accent-hover/80' : 'bg-ink-subtle/60'
+  const fill = selected ? 'bg-accent' : 'bg-ink-subtle/60'
   return (
     <span
       aria-hidden
       className={cn(
         'flex h-[24px] w-[14px] shrink-0 flex-col gap-px overflow-hidden rounded-[4px] border-[1.5px] p-px transition-colors duration-200',
-        selected ? 'border-accent-hover' : 'border-ink-subtle'
+        selected ? 'border-accent' : 'border-ink-subtle'
       )}
     >
       {style === 'auto' && (

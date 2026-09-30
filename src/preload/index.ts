@@ -1,3 +1,9 @@
+import type { JevThresholdSettings } from '../shared/jev-settings'
+import type { LibraryClipTarget } from '../shared/library-posting'
+import type { AutomationReviewResult } from '../shared/automations'
+import type { CandidateEdit, EditorProgressSummary, EditorSession } from '../shared/clip-editor'
+import type { JobOutput } from '../shared/job-output'
+import type { EditAudit } from '../shared/editorial'
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ZernioConnectOptions,
@@ -7,17 +13,24 @@ import type {
   ZernioPendingConnect,
   ZernioPlatform,
   ZernioProfile,
-  ZernioSyncResult
+  ZernioSyncResult,
+  ZernioStatusCheck
 } from '../shared/zernio'
 import type { ClipMediaInfo, PostClipRequest, PostClipResult, PostProgress, PostRecord, PostsRefreshResult, TikTokCreatorInfo, TikTokLegalLink } from '../shared/zernio-posts'
 import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
-import type { Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
+import type { MetadataEnhancement, AutomationSourceGroup, AutomationBatchResult, AutomationSourceContext, Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
+import type { LibraryClipPostingStatus, LibraryEnhancementOptions, LibraryRunPostingCounts } from '../shared/library-posting'
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
+import type { OutputStorageUsage } from '../shared/output-storage'
+import type { YouTubePreview } from '../shared/youtube-preview'
 
-export interface ClipSettings {
+export interface ClipSettings extends JevThresholdSettings {
   openrouterConfigured: boolean
   zernioConfigured: boolean
+  jevEnabled: string
+  jevVisualContext: string
+  sourceContextWebResearch: string
   outputDirectory: string
   pythonPath: string
   customVocabulary: string
@@ -26,6 +39,9 @@ export interface ClipSettings {
 export type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 
 export interface HistoryEntry {
+  editorProject?: boolean
+  candidateCount?: number
+  favorite?: boolean
   jobId: string
   date: string
   videoTitle: string
@@ -43,6 +59,8 @@ export interface ToolStatus {
   pythonDeps: boolean
   pythonPath: string
   pythonError: string | null
+  pythonHint?: string | null
+  pythonRepairCommand?: string | null
   ffmpeg: boolean
   ffmpegCaptions: boolean
   ffprobe: boolean
@@ -54,12 +72,39 @@ export interface ToolStatus {
 }
 
 export interface BridgeClipAPI {
+  source: { youtubePreview: (url: string, details?: boolean) => Promise<YouTubePreview> }
+  editor: {
+    open: (path: string) => Promise<EditorSession>
+    save: (path: string, revision: number, edits: CandidateEdit[]) => Promise<EditorSession>
+    run: (path: string, revision: number, id: string, action: 'review' | 'export' | 'export-all' | 'scan-cameras') => Promise<EditorSession>
+    cancel: (path: string) => Promise<void>
+    replaceSource: (path: string, revision: number, replacement: string) => Promise<EditorSession>
+    /** Status counts only; cheap enough for list rows and polling. */
+    progress: (path: string) => Promise<EditorProgressSummary>
+    freeMedia: (path: string, revision: number) => Promise<EditorSession>
+    /** Main asks the open editor to save before a close or quit continues. */
+    onSaveBeforeClose: (callback: () => void) => () => void
+    closeReady: (saved: boolean) => Promise<void>
+  }
+  edits: { inspect: (outputDir: string) => Promise<EditAudit> }
   models: { list: (refresh?: boolean) => Promise<OpenRouterCatalog> }
   automations: {
+    reviewContent: (id: string, contentId: string, returnToQueue: boolean) => Promise<AutomationReviewResult>
+    acknowledgeWarnings: (id: string | null, contentId?: string) => Promise<Automation[]>
+    dismissMetadataError: (id: string, contentId: string) => Promise<Automation[]>
+    libraryClip: (id: string, contentId: string) => Promise<LibraryClipTarget | null>
+    showInFolder: (id: string, contentId: string) => Promise<boolean>
+    reorder: (id: string, contentId: string, beforeId: string | null) => Promise<Automation[]>
+    enhancementGroups: (id: string) => Promise<AutomationSourceGroup[]>
+    enhanceBatch: (id: string, contentIds: string[], key: string, guidance?: string) => Promise<AutomationBatchResult>
+    source: (id: string, contentId: string) => Promise<AutomationSourceContext | null>
+    enhance: (id: string, contentId: string, options: { source?: AutomationSourceContext | null; research: boolean }) => Promise<Automation[]>
+    resolveDraft: (id: string, contentId: string, draftId: string, apply: boolean) => Promise<Automation[]>
     list: () => Promise<Automation[]>
     create: (name: string) => Promise<Automation[]>
     update: (id: string, update: AutomationUpdate) => Promise<Automation[]>
     delete: (id: string) => Promise<Automation[]>
+    retryContent: (id: string, contentId: string) => Promise<Automation[]>
     run: (id: string) => Promise<Automation[]>
     addContent: (id: string) => Promise<Automation[]>
     addLibraryClips: (id: string, outputDir: string, clipIndices: number[]) => Promise<Automation[]>
@@ -70,11 +115,14 @@ export interface BridgeClipAPI {
   }
   settings: {
     load: () => Promise<ClipSettings>
+    /** Pass true to count again instead of reusing a result from the last few seconds. */
+    storageUsage: (fresh?: boolean) => Promise<OutputStorageUsage>
     save: (settings: ClipSettings) => Promise<ClipSettings>
     replaceApiKey: (key: 'openrouterApiKey' | 'zernioApiKey', value: string) => Promise<ClipSettings>
     selectOutputDir: () => Promise<string | null>
   }
   zernio: {
+    checkStatus: () => Promise<ZernioStatusCheck>
     overview: () => Promise<ZernioOverview>
     createProfile: (name: string) => Promise<ZernioProfile>
     /** Live accounts from Zernio, or the cached copy with the reason Zernio couldn't be read. Never rejects for Zernio failures. */
@@ -114,7 +162,7 @@ export interface BridgeClipAPI {
   }
   job: {
     /** Queues a clipping run; it starts right away when a slot is free (`queued: false`). */
-    start: (config: ClipJobRequest) => Promise<{ jobId?: string; queued?: boolean; error?: string }>
+    start: (config: ClipJobRequest) => Promise<{ jobId?: string; queued?: boolean; job?: JobSnapshot; error?: string }>
     cancel: (jobId: string) => Promise<boolean>
     /** Every job the main process knows about this session, newest first. */
     list: () => Promise<JobSnapshot[]>
@@ -124,6 +172,15 @@ export interface BridgeClipAPI {
     onUpdate: (callback: (job: JobSnapshot) => void) => () => void
   }
   history: {
+    setFavorite: (outputDir: string, favorite: boolean) => Promise<boolean>
+    delete: (outputDir: string) => Promise<void>
+    deleteClips: (outputDir: string, indices: number[]) => Promise<JobOutput>
+    postingStatus: (outputDir: string) => Promise<LibraryClipPostingStatus[]>
+    /** Posted counts for many runs at once, for the Library list. */
+    postingSummary: (outputDirs: string[]) => Promise<LibraryRunPostingCounts[]>
+    setPosted: (outputDir: string, clipIndex: number, posted: boolean) => Promise<boolean>
+    metadataSource: (outputDir: string, clipIndex: number) => Promise<AutomationSourceContext | null>
+    enhanceMetadata: (outputDir: string, clipIndex: number, options: LibraryEnhancementOptions) => Promise<MetadataEnhancement>
     list: () => Promise<HistoryEntry[]>
     getJob: (outputDir: string) => Promise<Record<string, unknown> | null>
   }
@@ -164,6 +221,10 @@ export interface BridgeClipAPI {
     /** The GitHub release page for the new version (or this one). */
     openReleaseNotes: () => Promise<boolean>
   }
+  changelog: {
+    /** Help → Changelog asks the window to show the changelog. */
+    onShow: (cb: () => void) => () => void
+  }
 }
 
 function subscribe<T>(channel: string, callback: (data: T) => void): () => void {
@@ -173,12 +234,37 @@ function subscribe<T>(channel: string, callback: (data: T) => void): () => void 
 }
 
 const api: BridgeClipAPI = {
+  source: { youtubePreview: (url, details = false) => ipcRenderer.invoke('source:youtubePreview', url, details) },
+  editor: {
+    open: (path) => ipcRenderer.invoke('editor:open', path),
+    save: (path, revision, edits) => ipcRenderer.invoke('editor:save', path, revision, edits),
+    run: (path, revision, id, action) => ipcRenderer.invoke('editor:run', path, revision, id, action),
+    cancel: (path) => ipcRenderer.invoke('editor:cancel', path),
+    replaceSource: (path, revision, replacement) => ipcRenderer.invoke('editor:replaceSource', path, revision, replacement),
+    progress: (path) => ipcRenderer.invoke('editor:progress', path),
+    freeMedia: (path, revision) => ipcRenderer.invoke('editor:freeMedia', path, revision),
+    onSaveBeforeClose: (callback) => subscribe<void>('editor:saveBeforeClose', () => callback()),
+    closeReady: (saved) => ipcRenderer.invoke('editor:closeReady', saved)
+  },
+  edits: { inspect: (outputDir) => ipcRenderer.invoke('edits:inspect', outputDir) },
   models: { list: (refresh = false) => ipcRenderer.invoke('models:list', refresh) },
   automations: {
+    reviewContent: (id, contentId, returnToQueue) => ipcRenderer.invoke('automations:reviewContent', id, contentId, returnToQueue),
+    acknowledgeWarnings: (id, contentId) => ipcRenderer.invoke('automations:acknowledgeWarnings', id, contentId),
+    dismissMetadataError: (id, contentId) => ipcRenderer.invoke('automations:dismissMetadataError', id, contentId),
+    libraryClip: (id, contentId) => ipcRenderer.invoke('automations:libraryClip', id, contentId),
+    showInFolder: (id, contentId) => ipcRenderer.invoke('automations:showInFolder', id, contentId),
+    reorder: (id, contentId, beforeId) => ipcRenderer.invoke('automations:reorder', id, contentId, beforeId),
+    enhancementGroups: (id) => ipcRenderer.invoke('automations:enhancementGroups', id),
+    enhanceBatch: (id, contentIds, key, guidance) => ipcRenderer.invoke('automations:enhanceBatch', id, contentIds, key, guidance),
+    source: (id, contentId) => ipcRenderer.invoke('automations:source', id, contentId),
+    enhance: (id, contentId, options) => ipcRenderer.invoke('automations:enhance', id, contentId, options),
+    resolveDraft: (id, contentId, draftId, apply) => ipcRenderer.invoke('automations:resolveDraft', id, contentId, draftId, apply),
     list: () => ipcRenderer.invoke('automations:list'),
     create: (name) => ipcRenderer.invoke('automations:create', name),
     update: (id, update) => ipcRenderer.invoke('automations:update', id, update),
     delete: (id) => ipcRenderer.invoke('automations:delete', id),
+    retryContent: (id, contentId) => ipcRenderer.invoke('automations:retryContent', id, contentId),
     run: (id) => ipcRenderer.invoke('automations:run', id),
     addContent: (id) => ipcRenderer.invoke('automations:addContent', id),
     addLibraryClips: (id, outputDir, clipIndices) => ipcRenderer.invoke('automations:addLibraryClips', id, outputDir, clipIndices),
@@ -189,11 +275,13 @@ const api: BridgeClipAPI = {
   },
   settings: {
     load: () => ipcRenderer.invoke('settings:load'),
+    storageUsage: (fresh) => ipcRenderer.invoke('settings:storageUsage', fresh === true),
     save: (settings) => ipcRenderer.invoke('settings:save', settings),
     replaceApiKey: (key, value) => ipcRenderer.invoke('settings:replaceApiKey', key, value),
     selectOutputDir: () => ipcRenderer.invoke('settings:selectOutputDir')
   },
   zernio: {
+    checkStatus: () => ipcRenderer.invoke('zernio:checkStatus'),
     overview: () => ipcRenderer.invoke('zernio:overview'),
     createProfile: (name) => ipcRenderer.invoke('zernio:profiles:create', name),
     sync: () => ipcRenderer.invoke('zernio:sync'),
@@ -228,6 +316,14 @@ const api: BridgeClipAPI = {
     onUpdate: (callback) => subscribe('jobs:update', callback)
   },
   history: {
+    setFavorite: (outputDir, favorite) => ipcRenderer.invoke('history:setFavorite', outputDir, favorite),
+    delete: (outputDir) => ipcRenderer.invoke('history:delete', outputDir),
+    deleteClips: (outputDir, indices) => ipcRenderer.invoke('history:deleteClips', outputDir, indices),
+    postingStatus: (outputDir) => ipcRenderer.invoke('history:postingStatus', outputDir),
+    postingSummary: (outputDirs) => ipcRenderer.invoke('history:postingSummary', outputDirs),
+    setPosted: (outputDir, clipIndex, posted) => ipcRenderer.invoke('history:setPosted', outputDir, clipIndex, posted),
+    metadataSource: (outputDir, clipIndex) => ipcRenderer.invoke('history:metadataSource', outputDir, clipIndex),
+    enhanceMetadata: (outputDir, clipIndex, options) => ipcRenderer.invoke('history:enhanceMetadata', outputDir, clipIndex, options),
     list: () => ipcRenderer.invoke('history:list'),
     getJob: (outputDir) => ipcRenderer.invoke('history:getJob', outputDir)
   },
@@ -260,6 +356,9 @@ const api: BridgeClipAPI = {
     install: () => ipcRenderer.invoke('update:install'),
     moveToApplications: () => ipcRenderer.invoke('update:moveToApplications'),
     openReleaseNotes: () => ipcRenderer.invoke('update:openReleaseNotes')
+  },
+  changelog: {
+    onShow: (callback) => subscribe('changelog:show', () => callback())
   }
 }
 

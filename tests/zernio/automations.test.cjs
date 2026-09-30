@@ -27,6 +27,139 @@ test('daily slots use the configured time zone and include a short restart grace
   assert.deepEqual(dueSlots(['20:00'], 'America/New_York', now), [{ time: '20:00', date: '2026-09-24' }])
 })
 
+test('reordered queues and original media provenance survive a fresh load', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-reorder-')
+  try {
+    const library = path.join(dir, 'library')
+    fs.mkdirSync(library)
+    const paths = ['first', 'second', 'third'].map((name) => {
+      const file = path.join(library, `${name}.mp4`)
+      fs.writeFileSync(file, name)
+      return file
+    })
+    const source = "export * as automations from './src/main/automations'; export * as settings from './src/main/settings-store'"
+    const mocks = { electron: fakeElectron(dir).electron }
+    const main = loadMain(source, mocks)
+    main.settings.replaceApiKey('zernioApiKey', KEY)
+    main.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    const [automation] = main.automations.createAutomation('Queue')
+    const [added] = await main.automations.addAutomationContent(automation.id, paths)
+    const [a, b, c] = added.content
+    assert.equal(a.sourceClipPath, fs.realpathSync(paths[0]))
+    main.automations.reorderAutomationContent(automation.id, c.id, a.id)
+    const reloaded = loadMain(source, mocks).automations.listAutomations()[0]
+    assert.deepEqual(reloaded.content.map((item) => item.id), [c.id, a.id, b.id])
+    assert.equal(reloaded.content[1].sourceClipPath, a.sourceClipPath)
+    assert.throws(() => main.automations.reorderAutomationContent(automation.id, 'invalid', null), /Choose queued/)
+  } finally { cleanup() }
+})
+
+test('metadata dismissal is scoped to one error, persists, and new failures warn again', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-dismiss-metadata-')
+  try {
+    const library = path.join(dir, 'library'); fs.mkdirSync(library)
+    const clip = path.join(library, 'clip.mp4'); fs.writeFileSync(clip, 'test media')
+    const source = "export * as automations from './src/main/automations'; export * as settings from './src/main/settings-store'; export { hasContentWarnings, nextAutomationContent } from './src/shared/automations'"
+    const mocks = { electron: fakeElectron(dir).electron }
+    let main = loadMain(source, mocks)
+    main.settings.replaceApiKey('zernioApiKey', KEY)
+    main.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    const [created] = main.automations.createAutomation('Queue')
+    await main.automations.addAutomationContent(created.id, [clip, clip, clip])
+    const dataFile = path.join(dir, 'userData', fs.readdirSync(path.join(dir, 'userData')).find((name) => /^automations-.*\.json$/.test(name)))
+    const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'))
+    const [a, b, held] = saved.automations[0].content
+    for (const item of [a, b, held]) item.metadataError = 'Previous writing failure'
+    held.status = 'needs_review'; held.error = 'Check the previous post'
+    fs.writeFileSync(dataFile, JSON.stringify(saved))
+    main = loadMain(source, mocks)
+    assert.throws(() => main.automations.dismissAutomationMetadataError(created.id, 'missing'), /Clip not found/)
+    main.automations.dismissAutomationMetadataError(created.id, a.id)
+    main.automations.dismissAutomationMetadataError(created.id, held.id)
+    const damaged = JSON.parse(fs.readFileSync(dataFile, 'utf8'))
+    damaged.automations[0].content[1].metadataErrorAcknowledged = 'yes'
+    fs.writeFileSync(dataFile, JSON.stringify(damaged))
+    main = loadMain(source, mocks)
+    const [bank] = main.automations.listAutomations()
+    assert.deepEqual(bank.content[0], { ...a, metadataErrorAcknowledged: true })
+    assert.deepEqual(bank.content[1], b, 'invalid optional acknowledgement is dropped without losing the clip or hiding its error')
+    assert.deepEqual(bank.content[2], { ...held, metadataErrorAcknowledged: true })
+    assert.equal(main.hasContentWarnings(bank.content[0]), false)
+    assert.equal(main.hasContentWarnings(bank.content[1]), true)
+    assert.equal(main.hasContentWarnings(bank.content[2]), true, 'posting warning stays visible')
+    assert.equal(main.nextAutomationContent(bank).id, a.id, 'dismissal does not change posting eligibility')
+    // Missing media makes a retry fail before any network request.
+    const banks = path.join(dir, 'userData', 'automation-bank')
+    const [workspace] = fs.readdirSync(banks)
+    fs.unlinkSync(path.join(banks, workspace, created.id, a.fileName))
+    const retry = await main.automations.enhanceAutomationBatch(created.id, [a.id], `clip:${a.id}`)
+    assert.equal(retry.errors.length, 1)
+    assert.equal(retry.automations[0].content[0].metadataErrorAcknowledged, false)
+    assert.equal(main.hasContentWarnings(retry.automations[0].content[0]), true)
+  } finally { cleanup() }
+})
+
+test('warnings can be acknowledged individually or across banks, persist, and preserve held clips', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-acknowledge-')
+  try {
+    const library = path.join(dir, 'library')
+    fs.mkdirSync(library)
+    const clip = path.join(library, 'clip.mp4')
+    fs.writeFileSync(clip, 'test media')
+    const source = "export * as automations from './src/main/automations'; export * as settings from './src/main/settings-store'; export { hasAutomationWarnings, nextAutomationContent } from './src/shared/automations'"
+    const mocks = { electron: fakeElectron(dir).electron }
+    const initial = loadMain(source, mocks)
+    initial.settings.replaceApiKey('zernioApiKey', KEY)
+    initial.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    for (const name of ['First', 'Second']) {
+      const [automation] = initial.automations.createAutomation(name)
+      await initial.automations.addAutomationContent(automation.id, [clip])
+    }
+    const dataFile = path.join(dir, 'userData', fs.readdirSync(path.join(dir, 'userData')).find((name) => /^automations-.*\.json$/.test(name)))
+    const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'))
+    for (const automation of saved.automations) {
+      automation.lastError = 'Previous upload failed'
+      automation.content[0].status = 'needs_review'
+      automation.content[0].error = 'Verify the previous post'
+      automation.content[0].metadataError = 'Previous writing failure'
+    }
+    fs.writeFileSync(dataFile, JSON.stringify(saved))
+    const main = loadMain(source, mocks)
+    const [first, second] = main.automations.listAutomations()
+    assert.throws(() => main.automations.acknowledgeAutomationWarnings(undefined), /Invalid automation/)
+    assert.throws(() => main.automations.acknowledgeAutomationWarnings('../all'), /Invalid automation/)
+    assert.throws(() => main.automations.acknowledgeAutomationWarnings(null, first.content[0].id), /Choose a clip/)
+    assert.throws(() => main.automations.acknowledgeAutomationWarnings(first.id, second.content[0].id), /Clip not found/)
+    const dismissed = main.automations.acknowledgeAutomationWarnings(first.id, first.content[0].id)
+    assert.equal(dismissed[0].content[0].warningsAcknowledged, true)
+    assert.equal(dismissed[0].content[0].status, 'needs_review', 'dismissal does not release held clips')
+    assert.equal(dismissed[0].lastErrorAcknowledged, undefined, 'per-clip dismissal leaves run history alone')
+    assert.equal(dismissed[1].content[0].warningsAcknowledged, undefined, 'other clips stay visible')
+    const one = main.automations.acknowledgeAutomationWarnings(first.id)
+    assert.equal(main.hasAutomationWarnings(one[0]), false)
+    assert.equal(main.hasAutomationWarnings(one[1]), true, 'individual acknowledgement leaves other banks alone')
+    main.automations.acknowledgeAutomationWarnings(null)
+    const reloaded = loadMain(source, mocks)
+    for (const automation of reloaded.automations.listAutomations()) {
+      assert.equal(reloaded.hasAutomationWarnings(automation), false)
+      assert.equal(automation.lastError, 'Previous upload failed', 'history remains available')
+      assert.equal(automation.content[0].error, 'Verify the previous post')
+      assert.equal(automation.content[0].metadataError, 'Previous writing failure')
+      assert.equal(automation.content[0].status, 'needs_review')
+      assert.equal(reloaded.nextAutomationContent(automation), undefined, 'acknowledgement never releases a held clip')
+    }
+    assert.equal(reloaded.automations.listAutomations()[1].id, second.id)
+    const returned = await reloaded.automations.reviewAutomationContent(first.id, first.content[0].id, true)
+    assert.equal(returned.outcome, 'queued')
+    assert.equal(returned.automations[0].content[0].status, 'queued')
+    assert.ok(returned.automations[0].content[0].postingAttemptId)
+    const malformed = JSON.parse(fs.readFileSync(dataFile, 'utf8'))
+    malformed.automations[0].lastErrorAcknowledged = 'yes'
+    fs.writeFileSync(dataFile, JSON.stringify(malformed))
+    assert.throws(() => loadMain(source, mocks).automations.listAutomations(), /preserved for recovery/)
+  } finally { cleanup() }
+})
+
 test('library clips can be copied to a bank only from their saved run', async () => {
   const { dir, cleanup } = tempDir('bridgeclip-library-bank-')
   try {
@@ -171,9 +304,31 @@ test('an upload failure keeps an automation clip retryable without creating a po
     fs.writeFileSync(dataPath, JSON.stringify(saved))
     const restarted = loadMain(source, { electron })
     assert.equal(restarted.automations.listAutomations()[0].content[0].status, 'queued', 'old pre-submit failures recover on restart')
-    const [posted] = await restarted.automations.runAutomation(created.id)
+    const fresh = makeClip(path.join(library, 'fresh.mp4'), 'red')
+    const later = makeClip(path.join(library, 'later.mp4'), 'green')
+    await restarted.automations.addAutomationContent(created.id, [fresh, later])
+    const [skipped] = await restarted.automations.runAutomation(created.id)
+    assert.equal(skipped.content[0].status, 'queued', 'Run now tries a fresh clip before the failed one')
+    assert.equal(skipped.content[1].status, 'posted')
+    const failedId = skipped.content[0].id
+    restarted.automations.acknowledgeAutomationWarnings(created.id, failedId)
+    let [dismissed] = loadMain(source, { electron }).automations.listAutomations()
+    assert.equal(dismissed.content[0].warningsAcknowledged, true, 'per-clip dismissal survives restart')
+    assert.equal(dismissed.content[0].error, skipped.content[0].error, 'dismissal preserves error history')
+    assert.equal(dismissed.content[0].status, 'queued')
+    posting.state.failNextUpload = 503
+    const [failedAgain] = await restarted.automations.retryAutomationContent(created.id, failedId)
+    assert.equal(failedAgain.content[0].warningsAcknowledged, false, 'a new failure warns again')
+    assert.equal(failedAgain.content[2].status, 'queued', 'retry does not consume a different queued clip')
+    const [posted] = await restarted.automations.retryAutomationContent(created.id, failedId)
     assert.equal(posted.content[0].status, 'posted')
-    assert.equal(posting.state.creates.length, 1)
+    assert.equal(posted.content[2].status, 'queued')
+    assert.equal(posted.content[0].error, null)
+    assert.equal(posting.state.creates.length, 2)
+    await assert.rejects(restarted.automations.retryAutomationContent(created.id, failedId), /failed, unposted queued/)
+    await assert.rejects(restarted.automations.retryAutomationContent(created.id, posted.content[2].id), /failed, unposted queued/)
+    await assert.rejects(restarted.automations.retryAutomationContent(created.id, 'missing'), /failed, unposted queued/)
+    assert.equal(posting.state.creates.length, 2, 'invalid retries never publish')
   } finally {
     if (previousUrl === undefined) delete process.env.BRIDGECLIP_ZERNIO_API_URL
     else process.env.BRIDGECLIP_ZERNIO_API_URL = previousUrl
@@ -372,6 +527,11 @@ test('bank clips publish once to selected accounts and keep their used state aft
     const [blocked] = await main.automations.runAutomation(created.id)
     assert.equal(blocked.content[0].status, 'queued', 'a profile mismatch does not consume the clip')
     assert.equal(posting.state.creates.length, 0)
+    main.automations.acknowledgeAutomationWarnings(created.id)
+    const [repeatedFailure] = await main.automations.runAutomation(created.id)
+    assert.equal(repeatedFailure.lastError, blocked.lastError)
+    assert.equal(repeatedFailure.lastErrorAcknowledged, false, 'the same failure on a new attempt warns again')
+    assert.equal(repeatedFailure.content[0].warningsAcknowledged, false)
     instagram.profileId = { _id: profile._id, name: profile.name }
 
     const [after] = await main.automations.runAutomation(created.id)
@@ -402,7 +562,10 @@ test('bank clips publish once to selected accounts and keep their used state aft
     posting.state.nextPublish.instagram = { status: 'failed', errorMessage: 'Platform unavailable' }
     const [partial] = await restarted.automations.runAutomation(created.id)
     assert.equal(partial.content[1].status, 'needs_review')
+    restarted.automations.acknowledgeAutomationWarnings(created.id)
+    assert.equal(restarted.automations.listAutomations()[0].content[1].status, 'needs_review')
     assert.ok(partial.content[1].postId, 'the partial post is linked for review')
+    assert.equal((await restarted.automations.reviewAutomationContent(created.id, partial.content[1].id, true)).outcome, 'held', 'partial posts cannot be queued for duplicate publishing')
     assert.throws(() => restarted.automations.updateAutomationContent(created.id, partial.content[1].id, {
       title: partial.content[1].title, caption: 'Must not be saved', returnToQueue: true
     }), /Open Posts/)
@@ -654,6 +817,31 @@ test('TikTok automations require per-clip review, preserve approved copy, and pu
     assert.equal(posting.state.creates[1].body.tiktokSettings.draft, true)
     assert.equal(delivered.content[0].tiktokApproval.options.draft, true)
 
+    // Enhanced copy and TikTok consent must be reviewed together, even in manual mode.
+    const [extended] = await restarted.automations.addAutomationContent(created.id, [clip])
+    const third = extended.content.at(-1)
+    const thirdReview = await restarted.automations.prepareAutomationTikTokReview(created.id, third.id)
+    await restarted.automations.approveAutomationTikTokReview(created.id, third.id, { ...inboxApproval, reviewId: thirdReview.reviewId })
+    const [enhanced] = await restarted.automations.enhanceAutomationContent(created.id, third.id, { research: false })
+    const draft = enhanced.content.at(-1).metadataDraft
+    assert.ok(draft)
+    const heldSlot = { time: '12:00', date: '2026-09-26' }
+    const [held] = await restarted.automations.runAutomation(created.id, heldSlot)
+    assert.match(held.lastError, /enhanced metadata draft/)
+    assert.notEqual(held.lastSlots['12:00'], heldSlot.date, 'draft review does not consume the due slot')
+    await assert.rejects(restarted.automations.prepareAutomationTikTokReview(created.id, third.id), /Apply or discard/)
+    const [applied] = restarted.automations.resolveAutomationMetadataDraft(created.id, third.id, draft.id, true)
+    assert.equal(applied.content.at(-1).tiktokApproval, null, 'applying new copy invalidates older TikTok consent')
+    const callsBeforeReview = generations
+    const enhancedReview = await restarted.automations.prepareAutomationTikTokReview(created.id, third.id)
+    assert.equal(enhancedReview.caption, draft.posts.find(post => post.platform === 'tiktok').caption)
+    assert.equal(generations, callsBeforeReview, 'manual mode reuses applied metadata without generating new copy')
+    await restarted.automations.approveAutomationTikTokReview(created.id, third.id, { ...inboxApproval, reviewId: enhancedReview.reviewId, caption: enhancedReview.caption })
+    const [enhancedPosted] = await restarted.automations.runAutomation(created.id, heldSlot)
+    assert.equal(enhancedPosted.content.at(-1).status, 'posted')
+    assert.equal(posting.state.creates.at(-1).body.platforms[0].customContent, enhancedReview.caption)
+
+
   } finally {
     for (const [name, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[name]
@@ -662,4 +850,245 @@ test('TikTok automations require per-clip review, preserve approved copy, and pu
     await mock.close()
     cleanup()
   }
+})
+
+test('held linked clips use fresh post evidence before requeuing or marking submitted', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-held-')
+  const postId = 'a'.repeat(24); const accountId = 'b'.repeat(24)
+  let remote
+  const mock = await createMockZernio({ apiKey: KEY, extraRoutes: [{ method: 'GET', path: `/api/v1/posts/${postId}`, handler: (ctx) => ctx.json(200, { post: remote }) }] })
+  const previousUrl = process.env.BRIDGECLIP_ZERNIO_API_URL
+  process.env.BRIDGECLIP_ZERNIO_API_URL = mock.apiUrl
+  try {
+    const library = path.join(dir, 'library'); fs.mkdirSync(library)
+    const clip = path.join(library, 'held.mp4'); fs.writeFileSync(clip, 'test media')
+    const source = `export * as automations from './src/main/automations'; export * as posts from './src/main/zernio/posts'; export * as settings from './src/main/settings-store'; export { PostsStore } from './src/main/zernio/posts-store'; export { workspaceId } from './src/main/zernio/workspace-cache'`
+    const mocks = { electron: fakeElectron(dir).electron }
+    const initial = loadMain(source, mocks)
+    initial.settings.replaceApiKey('zernioApiKey', KEY)
+    initial.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    const [automation] = initial.automations.createAutomation('Held')
+    const [bank] = await initial.automations.addAutomationContent(automation.id, [clip])
+    const workspace = initial.workspaceId(KEY)
+    const file = path.join(dir, 'userData', `automations-${workspace}.json`)
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    Object.assign(saved.automations[0].content[0], { status: 'needs_review', postId, error: 'All platforms failed', warningsAcknowledged: true })
+    const stamp = new Date().toISOString()
+    const history = { id: postId, clipPath: clip, clipTitle: 'Held', targets: [{ accountId, platform: 'youtube', handle: null, status: 'failed', error: 'Failed', url: null, inbox: false }], scheduledFor: null, timezone: null, status: 'failed', error: 'All platforms failed', createdAt: stamp, uploadedAt: stamp, refreshedAt: stamp }
+    for (const historyState of ['present', 'dismissed', 'evicted']) {
+      for (const [status, targetStatus, expected] of [['failed', 'failed', 'queued'], ['published', 'published', 'submitted'], ['publishing', 'processing', 'submitted'], ['partial', 'published', 'held'], ['failed', null, 'held']]) {
+        fs.writeFileSync(file, JSON.stringify(saved))
+        const store = new initial.PostsStore(path.join(dir, 'userData', 'zernio-posts.json'), workspace)
+        store.clear(); store.save(history)
+        if (historyState === 'evicted') {
+          store.save(...Array.from({ length: 300 }, (_, i) => ({ ...history, id: (i + 1).toString(16).padStart(24, '0'), createdAt: new Date(Date.parse(stamp) + i + 1).toISOString() })))
+          assert.equal(store.get(postId), null, 'finished history is actually evicted')
+        }
+        remote = { _id: postId, status, platforms: targetStatus ? [{ accountId, platform: 'youtube', status: targetStatus }] : [] }
+        const main = loadMain(source, mocks)
+        if (historyState === 'dismissed') main.posts.dismissPost(postId)
+        const requestsBefore = mock.state.requests.length
+        const result = await main.automations.reviewAutomationContent(automation.id, bank.content[0].id, true)
+        assert.equal(mock.state.requests.length, requestsBefore + 1, 'recovery checks Zernio even without local history')
+        assert.equal(result.outcome, expected, `${historyState}/${status}/${targetStatus}`)
+        const item = result.automations[0].content[0]
+        assert.equal(item.status, expected === 'submitted' ? 'posted' : expected === 'queued' ? 'queued' : 'needs_review')
+        assert.equal(item.postId, expected === 'queued' ? null : postId)
+        if (expected === 'queued') assert.ok(item.postingAttemptId && item.postingAttemptId !== item.id)
+        assert.equal(Boolean(item.postedAt), expected === 'submitted', 'moving to Submitted records when')
+      }
+    }
+    assert.ok(mock.state.requests.every((request) => request.method === 'GET'), 'reviewing never posts or retries')
+  } finally {
+    if (previousUrl === undefined) delete process.env.BRIDGECLIP_ZERNIO_API_URL
+    else process.env.BRIDGECLIP_ZERNIO_API_URL = previousUrl
+    await mock.close(); cleanup()
+  }
+})
+
+test('requeued posts cannot also retry, across restarts and overlapping recovery requests', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-recovery-ownership-')
+  const posting = createPostingMock()
+  const mock = await createMockZernio({ apiKey: KEY, extraRoutes: posting.routes })
+  const previousUrl = process.env.BRIDGECLIP_ZERNIO_API_URL
+  process.env.BRIDGECLIP_ZERNIO_API_URL = mock.apiUrl
+  const source = "export * as automations from './src/main/automations'; export * as posts from './src/main/zernio/posts'; export * as settings from './src/main/settings-store'"
+  const mocks = { electron: fakeElectron(dir).electron }
+  const releases = []
+  function holdRequest(method, postId) {
+    const route = posting.routes.find((route) => route.method === method && route.path instanceof RegExp && route.path.test(`/api/v1/posts/${postId}${method === 'POST' ? '/retry' : ''}`))
+    let release, entered
+    const waiting = new Promise((resolve) => { release = resolve })
+    const started = new Promise((resolve) => { entered = resolve })
+    releases.push(release)
+    mock.route({ method, path: `/api/v1/posts/${postId}${method === 'POST' ? '/retry' : ''}`, handler: async (ctx) => {
+      entered(); await waiting; return route.handler({ ...ctx, params: [postId] })
+    } })
+    return { started, release }
+  }
+  try {
+    const library = path.join(dir, 'library')
+    const clip = makeClip(path.join(library, 'first.mp4'))
+    let main = loadMain(source, mocks)
+    main.settings.replaceApiKey('zernioApiKey', KEY)
+    main.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    const [profile] = mock.state.profiles
+    const youtube = mock.addAccount('youtube', profile._id)
+    const [bank] = main.automations.createAutomation('Recovery')
+    await main.automations.updateAutomation(bank.id, { name: bank.name, enabled: false, profileId: profile._id,
+      metadataMode: 'manual', timezone: 'UTC', times: [], youtubeVisibility: 'unlisted', youtubeMadeForKids: false,
+      accounts: [{ platform: 'youtube', accountId: youtube._id }] })
+    await main.automations.addAutomationContent(bank.id, [clip])
+    posting.state.nextPublish.youtube = { status: 'failed', errorMessage: 'Unavailable' }
+    const [failed] = await main.automations.runAutomation(bank.id)
+    const item = failed.content[0]
+    assert.equal(item.status, 'needs_review')
+    const get = holdRequest('GET', item.postId)
+    const recovering = main.automations.reviewAutomationContent(bank.id, item.id, true)
+    await get.started
+    await assert.rejects(main.posts.retryPost(item.postId), /already in progress/)
+    assert.throws(() => main.posts.dismissPost(item.postId), /already in progress/)
+    get.release()
+    assert.equal((await recovering).outcome, 'queued')
+    main = loadMain(source, mocks)
+    assert.equal(main.posts.listPosts().find((post) => post.id === item.postId).automationRequeued, true)
+    await assert.rejects(main.posts.retryPost(item.postId), /returned to its automation queue/)
+    assert.equal(mock.requestsTo('POST', `/api/v1/posts/${item.postId}/retry`).length, 0)
+    assert.equal((await main.automations.runAutomation(bank.id))[0].content[0].status, 'posted')
+    assert.equal([...posting.state.posts.values()].filter((post) => post.status === 'published').length, 1)
+
+    // In the opposite ordering, a retry already in flight owns the post.
+    await main.automations.addAutomationContent(bank.id, [makeClip(path.join(library, 'second.mp4'), 'red')])
+    posting.state.nextPublish.youtube = { status: 'failed', errorMessage: 'Unavailable' }
+    const second = (await main.automations.runAutomation(bank.id))[0].content[1]
+    const retry = holdRequest('POST', second.postId)
+    const retrying = main.posts.retryPost(second.postId)
+    await retry.started
+    await assert.rejects(main.automations.reviewAutomationContent(bank.id, second.id, true), /already in progress/)
+    assert.equal(main.automations.listAutomations()[0].content[1].status, 'needs_review')
+    retry.release(); await retrying
+    assert.equal((await main.automations.reviewAutomationContent(bank.id, second.id, true)).outcome, 'submitted')
+    const creates = posting.state.creates.length
+    await main.automations.runAutomation(bank.id)
+    assert.equal(posting.state.creates.length, creates, 'a successful old retry cannot produce a fresh automation post')
+    assert.equal([...posting.state.posts.values()].filter((post) => post.status === 'published').length, 2)
+  } finally {
+    releases.forEach((release) => release())
+    if (previousUrl === undefined) delete process.env.BRIDGECLIP_ZERNIO_API_URL
+    else process.env.BRIDGECLIP_ZERNIO_API_URL = previousUrl
+    await mock.close(); cleanup()
+  }
+})
+
+test('a post missing from Zernio unlinks the held clip; returning it still needs a person to confirm', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-missing-post-')
+  const postId = 'c'.repeat(24); const accountId = 'd'.repeat(24)
+  const mock = await createMockZernio({ apiKey: KEY, extraRoutes: [{ method: 'GET', path: `/api/v1/posts/${postId}`, handler: (ctx) => ctx.json(404, { error: 'Post not found' }) }] })
+  const previousUrl = process.env.BRIDGECLIP_ZERNIO_API_URL
+  process.env.BRIDGECLIP_ZERNIO_API_URL = mock.apiUrl
+  try {
+    const library = path.join(dir, 'library'); fs.mkdirSync(library)
+    const clip = path.join(library, 'held.mp4'); fs.writeFileSync(clip, 'test media')
+    const source = `export * as automations from './src/main/automations'; export * as posts from './src/main/zernio/posts'; export * as settings from './src/main/settings-store'; export { PostsStore } from './src/main/zernio/posts-store'; export { workspaceId } from './src/main/zernio/workspace-cache'`
+    const mocks = { electron: fakeElectron(dir).electron }
+    let main = loadMain(source, mocks)
+    main.settings.replaceApiKey('zernioApiKey', KEY)
+    main.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    const [automation] = main.automations.createAutomation('Missing post')
+    const [bank] = await main.automations.addAutomationContent(automation.id, [clip])
+    const workspace = main.workspaceId(KEY)
+    const file = path.join(dir, 'userData', `automations-${workspace}.json`)
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    Object.assign(saved.automations[0].content[0], { status: 'needs_review', postId, error: 'BridgeClip closed while posting.' })
+    fs.writeFileSync(file, JSON.stringify(saved))
+    const stamp = new Date().toISOString()
+    new main.PostsStore(path.join(dir, 'userData', 'zernio-posts.json'), workspace).save({ id: postId, clipPath: clip, clipTitle: 'Held', targets: [{ accountId, platform: 'youtube', handle: null, status: 'pending', error: null, url: null, inbox: false }], scheduledFor: null, timezone: null, status: 'publishing', error: null, createdAt: stamp, uploadedAt: stamp, refreshedAt: null })
+    main = loadMain(source, mocks)
+    const contentId = bank.content[0].id
+
+    const held = await main.automations.reviewAutomationContent(automation.id, contentId, true)
+    assert.equal(held.outcome, 'held', 'a missing post is not evidence that the clip never published')
+    const item = held.automations[0].content[0]
+    assert.equal(item.status, 'needs_review')
+    assert.equal(item.postId, null, 'the clip is no longer stuck behind a post that cannot be checked')
+    assert.match(item.error, /Confirm it was not published/)
+    assert.equal(main.posts.listPosts()[0].status, 'missing')
+    assert.equal(main.automations.listAutomations()[0].content[0].status, 'needs_review')
+
+    const requeued = await main.automations.reviewAutomationContent(automation.id, contentId, true)
+    assert.equal(requeued.outcome, 'queued', 'with no linked post, the confirmed Return to queue works as before')
+    assert.ok(requeued.automations[0].content[0].postingAttemptId)
+    assert.ok(mock.state.requests.every((request) => request.method === 'GET'), 'reviewing never posts or retries')
+  } finally {
+    if (previousUrl === undefined) delete process.env.BRIDGECLIP_ZERNIO_API_URL
+    else process.env.BRIDGECLIP_ZERNIO_API_URL = previousUrl
+    await mock.close(); cleanup()
+  }
+})
+
+test('submitted and linked clips can be removed as history, never count toward the queue cap, and keep their post link', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-history-')
+  try {
+    const library = path.join(dir, 'library'); fs.mkdirSync(library)
+    const clips = Array.from({ length: 30 }, (_, index) => { const file = path.join(library, `clip-${index}.mp4`); fs.writeFileSync(file, `clip ${index}`); return file })
+    const source = `export * as automations from './src/main/automations'; export * as posts from './src/main/zernio/posts'; export * as settings from './src/main/settings-store'; export { PostsStore } from './src/main/zernio/posts-store'; export { workspaceId } from './src/main/zernio/workspace-cache'`
+    const mocks = { electron: fakeElectron(dir).electron }
+    let main = loadMain(source, mocks)
+    main.settings.replaceApiKey('zernioApiKey', KEY)
+    main.settings.savePublicSettings({ outputDirectory: library, pythonPath: 'python3' })
+    const [automation] = main.automations.createAutomation('History')
+    await main.automations.addAutomationContent(automation.id, clips.slice(0, 3))
+    const workspace = main.workspaceId(KEY)
+    const file = path.join(dir, 'userData', `automations-${workspace}.json`)
+    const bankDir = path.join(dir, 'userData', 'automation-bank', workspace, automation.id)
+    const postIds = ['1', '2'].map((digit) => digit.repeat(24))
+    let saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const [posted, linked] = saved.automations[0].content
+    Object.assign(posted, { status: 'posted', postId: postIds[0], postedAt: '2026-01-01T00:00:00.000Z' })
+    Object.assign(linked, { status: 'needs_review', postId: postIds[1], error: 'Some accounts failed.' })
+    fs.writeFileSync(file, JSON.stringify(saved))
+    const stamp = new Date().toISOString()
+    const target = { accountId: 'e'.repeat(24), platform: 'youtube', handle: null, status: 'published', error: null, url: null, inbox: false }
+    new main.PostsStore(path.join(dir, 'userData', 'zernio-posts.json'), workspace).save(...[posted, linked].map((item, index) => ({
+      id: postIds[index], clipPath: path.join(bankDir, item.fileName), clipTitle: item.title, targets: [target], scheduledFor: null, timezone: null, status: 'published', error: null, createdAt: stamp, uploadedAt: stamp, refreshedAt: stamp })))
+    main = loadMain(source, mocks)
+    for (const item of [posted, linked]) {
+      main.automations.removeAutomationContent(automation.id, item.id)
+      assert.equal(fs.existsSync(path.join(bankDir, item.fileName)), false)
+    }
+    assert.deepEqual(main.automations.listAutomations()[0].content.map((item) => item.status), ['queued'])
+    const history = main.posts.listPosts()
+    assert.deepEqual(postIds.map((id) => history.find((post) => post.id === id).clipPath), [posted.sourceClipPath, linked.sourceClipPath], 'post history follows the original clip')
+
+    // Fill the waiting queue: 500 unsubmitted clips is the cap, but Submitted history is not counted.
+    saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const template = saved.automations[0].content[0]
+    const fake = (status, index) => {
+      const id = require('node:crypto').randomUUID()
+      return { ...template, id, fileName: `${id}.mp4`, status, postId: null, postedAt: status === 'posted' ? new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString() : null }
+    }
+    saved.automations[0].content = [...Array.from({ length: 499 }, (_, index) => fake('queued', index)), ...Array.from({ length: 480 }, (_, index) => fake('posted', index))]
+    const oldest = saved.automations[0].content[499]
+    fs.writeFileSync(path.join(bankDir, oldest.fileName), 'old bank copy')
+    fs.writeFileSync(file, JSON.stringify(saved))
+    main = loadMain(source, mocks)
+    await assert.rejects(main.automations.addAutomationContent(automation.id, clips.slice(0, 2)), /up to 500 clips that have not been submitted/)
+    await main.automations.addAutomationContent(automation.id, clips.slice(0, 1))
+    assert.equal(main.automations.listAutomations()[0].content.length, 980)
+
+    // At the storage bound, the oldest Submitted history makes room for new clips.
+    saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    saved.automations[0].content = saved.automations[0].content.filter((item) => item.status === 'posted' || saved.automations[0].content.indexOf(item) < 470)
+    saved.automations[0].content.push(...Array.from({ length: 1000 - saved.automations[0].content.length }, (_, index) => fake('posted', 1000 + index)))
+    fs.writeFileSync(file, JSON.stringify(saved))
+    main = loadMain(source, mocks)
+    assert.equal(main.automations.listAutomations()[0].content.length, 1000)
+    await main.automations.addAutomationContent(automation.id, clips.slice(0, 30))
+    const content = main.automations.listAutomations()[0].content
+    assert.equal(content.length, 1000)
+    assert.equal(content.filter((item) => item.status === 'queued').length, 500)
+    assert.equal(content.some((item) => item.id === oldest.id), false, 'the oldest submitted clip was pruned')
+    assert.equal(fs.existsSync(path.join(bankDir, oldest.fileName)), false, 'and its bank copy removed')
+    assert.equal(loadMain(source, mocks).automations.listAutomations()[0].content.length, 1000, 'the pruned bank reloads')
+  } finally { cleanup() }
 })

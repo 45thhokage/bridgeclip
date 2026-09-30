@@ -16,6 +16,7 @@ export interface StartedJob {
  * survive navigating away (e.g. to Settings to add a key) and a failed run.
  */
 export interface ClipDraft {
+  workflow: 'automatic' | 'review' | null
   source: string
   clippingMode: 'quality' | 'economy' | 'advanced'
   plannerModel: string
@@ -28,11 +29,15 @@ export interface ClipDraft {
   /** tight: cut dead air and filler words; natural: original timing. */
   pacing: 'tight' | 'natural'
   videoSpeed: number
+  /** Optional description of the moments to clip; blank finds the best ones. */
+  clipRequest: string
   durations: string[]
   autoClipCount: boolean
   maxClips: number
   includeCaptions: boolean
   captionPreset: string
+  /** Automatic clips: the title card at the top of each clip. */
+  includeTitle: boolean
   trimOpen: boolean
   trimStart: string
   trimEnd: string
@@ -46,11 +51,12 @@ interface DraftState extends ClipDraft {
   clearSource: () => void
   /** The job was queued: show the confirmation. */
   markStarted: (started: StartedJob) => void
-  /** Back to the first step for the next video, keeping every other choice. */
+  /** Start a new video with no workflow selected, keeping output preferences (not the video-specific clip request). */
   startAnother: () => void
 }
 
 export const useDraftStore = create<DraftState>((set) => ({
+  workflow: null,
   source: '',
   clippingMode: 'quality',
   plannerModel: '',
@@ -60,11 +66,13 @@ export const useDraftStore = create<DraftState>((set) => ({
   layoutVision: true,
   pacing: 'tight',
   videoSpeed: 1,
+  clipRequest: '',
   durations: ['short'],
   autoClipCount: true,
   maxClips: 5,
   includeCaptions: true,
   captionPreset: 'pop',
+  includeTitle: true,
   trimOpen: false,
   trimStart: '',
   trimEnd: '',
@@ -74,5 +82,5 @@ export const useDraftStore = create<DraftState>((set) => ({
   setStep: (step) => set({ step }),
   clearSource: () => set({ source: '', trimStart: '', trimEnd: '' }),
   markStarted: (started) => set({ started }),
-  startAnother: () => set({ source: '', trimOpen: false, trimStart: '', trimEnd: '', step: 'video', started: null })
+  startAnother: () => set({ workflow: null, source: '', clipRequest: '', trimOpen: false, trimStart: '', trimEnd: '', step: 'video', started: null })
 }))

@@ -21,11 +21,19 @@ test('video speed supports keyboard selection, review, submission and reuse in E
     ipcMain.removeHandler('system:checkTools')
     ipcMain.handle('system:checkTools', () => ({ python: true, pythonDeps: true, ffmpeg: true, ffmpegCaptions: true, ffprobe: true, ytdlp: true, engine: true, bridgeRunner: true }))
     ipcMain.removeHandler('job:start')
-    ipcMain.handle('job:start', (_event, config) => { globalThis.speedTest.submitted = config; return { jobId: 'test-speed', queued: false } })
+    ipcMain.handle('job:start', (_event, config) => {
+      globalThis.speedTest.submitted = config
+      const now = new Date().toISOString()
+      // No jobs:update event or list entry: the start response must register it.
+      return { jobId: 'test-speed', queued: false, job: { id: 'test-speed', revision: 1, request: config,
+        status: 'downloading', percent: 25, step: 'Downloading video', clipsDone: 0, clipsTotal: 0,
+        error: null, errorHint: null, output: null, outputDir: root, queuedAt: now, startedAt: now, finishedAt: null } }
+    })
   }, root)
   await page.reload()
   await page.getByPlaceholder('YouTube, Twitch VOD or direct video link').fill('https://example.com/video.mp4')
   await page.getByRole('button', { name: 'Use link', exact: true }).click()
+  await page.getByRole('radio', { name: 'Automatic', exact: true }).click()
   const steps = page.getByRole('navigation', { name: 'Create steps' })
   await steps.getByRole('button', { name: /Format/ }).click()
   const speeds = page.getByRole('radiogroup', { name: 'Video speed' })
@@ -61,9 +69,13 @@ test('video speed supports keyboard selection, review, submission and reuse in E
   await page.getByRole('button', { name: 'Generate clips', exact: true }).click()
   await page.getByRole('button', { name: 'View job' }).waitFor()
   assert.equal(await app.evaluate(() => globalThis.speedTest.submitted.videoSpeed), 1.5)
+  await page.getByRole('button', { name: 'View job' }).click()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Create', exact: true }).click()
   await page.getByRole('button', { name: 'Clip another video' }).click()
   await page.getByPlaceholder('YouTube, Twitch VOD or direct video link').fill('https://example.com/next.mp4')
   await page.getByRole('button', { name: 'Use link', exact: true }).click()
+  await page.getByRole('radio', { name: 'Automatic', exact: true }).click()
   await steps.getByRole('button', { name: /Format/ }).click()
   assert.equal(await chosen.getAttribute('aria-checked'), 'true')
   assert.deepEqual(errors, [])

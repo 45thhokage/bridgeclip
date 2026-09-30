@@ -1,7 +1,11 @@
+import { openEditor, saveEditor, runEditor, cancelEditor, replaceEditorSource } from './clip-editor'
+import { editorCloseReady, freeEditorMedia, readEditorProgress } from './clip-editor'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
 import { ensureOutputDir, getJobHistory, getJobOutput, generateThumbnail } from './file-manager'
+import { measureOutputStorage } from './output-storage'
+import { inspectEdits } from './edit-inspector'
 import {
   getEnginePath,
   getBridgeRunnerPath,
@@ -17,9 +21,14 @@ import { assertAbsolutePath, assertMediaPath, assertTrustedSender, authorizeMedi
 import { assertPublicWebUrl } from './network-policy'
 import { validateJobConfig } from './validation'
 import { getModelCatalog, resolveAdvancedModels } from './openrouter-models'
+import { getYouTubePreview } from './youtube-preview'
 import { randomUUID } from 'crypto'
 import { resolveBinary, supportsCaptionFilter } from './tools'
-import { approveAutomationTikTokReview, prepareAutomationTikTokReview, addAutomationContent, addLibraryClipsToAutomation, createAutomation, deleteAutomation, isAutomationMedia, listAutomations, removeAutomationContent, runAutomation, updateAutomation, updateAutomationContent } from './automations'
+import { automationEnhancementGroups, enhanceAutomationBatch, automationContentSource, enhanceAutomationContent, resolveAutomationMetadataDraft, addAutomationContent, addLibraryClipsToAutomation, createAutomation, deleteAutomation, isAutomationMedia, listAutomations, removeAutomationContent, runAutomation, updateAutomation, updateAutomationContent, approveAutomationTikTokReview, prepareAutomationTikTokReview } from './automations'
+import { acknowledgeAutomationWarnings, retryAutomationContent, dismissAutomationMetadataError, automationLibraryClip, reorderAutomationContent, reviewAutomationContent, showAutomationContentInFolder } from './automations'
+import { libraryPostingStatus, libraryMetadataSource, enhanceLibraryMetadata } from './library-posting'
+import { libraryPostingSummary } from './library-posting'
+import { deleteLibraryClips, deleteLibraryRun, setLibraryFavorite, setLibraryPosted } from './library-management'
 import {
   cancelZernioConnect,
   connectZernioAccount,
@@ -29,7 +38,8 @@ import {
   getZernioOverview,
   readCachedOverview,
   resetZernioState,
-  syncZernioAccounts
+  syncZernioAccounts,
+  checkZernioStatus
 } from './zernio/service'
 import {
   cancelPost,
@@ -60,7 +70,9 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('settings:load', () => {
     return publicSettings(loadSettings())
   })
+  handle('settings:storageUsage', (_event, fresh: unknown = false) => measureOutputStorage(loadSettings().outputDirectory, { fresh: fresh === true }))
   handle('models:list', (_event, refresh: unknown = false) => getModelCatalog(refresh))
+  handle('source:youtubePreview', (_event, source: unknown, details: unknown = false) => getYouTubePreview(source, details))
 
   handle('settings:save', (_event, settings: PublicSettings) => {
     const current = loadSettings()
@@ -83,6 +95,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('zernio:overview', () => getZernioOverview())
   handle('zernio:profiles:create', (_event, name: unknown) => createZernioProfile(name))
   handle('zernio:sync', () => syncZernioAccounts())
+  handle('zernio:checkStatus', () => checkZernioStatus())
   handle('zernio:cachedOverview', () => readCachedOverview())
   handle('zernio:pendingConnect', () => getPendingZernioConnect())
   handle('zernio:connect', (_event, platform: unknown, profileId: unknown, options: unknown) => connectZernioAccount(platform, profileId, options, getMainWindow))
@@ -105,10 +118,22 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('zernio:posts:open', (_event, postId: unknown, targetIndex: unknown) => openPostLink(postId, targetIndex))
   handle('zernio:posts:openTikTokLegal', (_event, key: unknown) => openTikTokLegal(key))
 
+  handle('automations:enhancementGroups', (_event, id: unknown) => automationEnhancementGroups(id))
+  handle('automations:enhanceBatch', (_event, id: unknown, ids: unknown, key: unknown, guidance: unknown) => enhanceAutomationBatch(id, ids, key, guidance))
+  handle('automations:source', (_event, id: unknown, contentId: unknown) => automationContentSource(id, contentId))
+  handle('automations:enhance', (_event, id: unknown, contentId: unknown, options: unknown) => enhanceAutomationContent(id, contentId, options))
+  handle('automations:resolveDraft', (_event, id: unknown, contentId: unknown, draftId: unknown, apply: unknown) => resolveAutomationMetadataDraft(id, contentId, draftId, apply))
   handle('automations:list', () => listAutomations())
+  handle('automations:acknowledgeWarnings', (_event, id: unknown, contentId: unknown) => acknowledgeAutomationWarnings(id, contentId))
+  handle('automations:dismissMetadataError', (_event, id: unknown, contentId: unknown) => dismissAutomationMetadataError(id, contentId))
+  handle('automations:reviewContent', (_event, id: unknown, contentId: unknown, returnToQueue: unknown) => reviewAutomationContent(id, contentId, returnToQueue))
+  handle('automations:libraryClip', (_event, id: unknown, contentId: unknown) => automationLibraryClip(id, contentId))
+  handle('automations:showInFolder', (_event, id: unknown, contentId: unknown) => showAutomationContentInFolder(id, contentId))
+  handle('automations:reorder', (_event, id: unknown, contentId: unknown, beforeId: unknown) => reorderAutomationContent(id, contentId, beforeId))
   handle('automations:create', (_event, name: unknown) => createAutomation(name))
   handle('automations:update', (_event, id: unknown, update: unknown) => updateAutomation(id, update))
   handle('automations:delete', (_event, id: unknown) => deleteAutomation(id))
+  handle('automations:retryContent', (_event, id: unknown, contentId: unknown) => retryAutomationContent(id, contentId))
   handle('automations:run', (_event, id: unknown) => runAutomation(id))
   handle('automations:addLibraryClips', (_event, id: unknown, outputDir: unknown, clipIndices: unknown) => addLibraryClipsToAutomation(id, outputDir, clipIndices))
   handle('automations:updateContent', (_event, id: unknown, contentId: unknown, update: unknown) => updateAutomationContent(id, contentId, update))
@@ -208,7 +233,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     }
     // Starts now when a slot is free; otherwise waits its turn in the queue.
     const job = enqueueJob(jobId, config, settings.outputDirectory)
-    return { jobId, queued: job.status === 'queued' }
+    return { jobId, queued: job.status === 'queued', job }
   })
 
   handle('job:cancel', (_event, jobId: unknown) => {
@@ -238,11 +263,30 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     return getJobHistory(settings.outputDirectory, liveJobIds())
   })
 
+  handle('history:postingStatus', (_event, outputDir: unknown) => libraryPostingStatus(outputDir))
+  handle('history:postingSummary', (_event, outputDirs: unknown) => libraryPostingSummary(outputDirs))
+  handle('history:setPosted', (_event, outputDir: unknown, clipIndex: unknown, posted: unknown) => setLibraryPosted(outputDir, clipIndex, posted))
+  handle('history:setFavorite', (_event, outputDir: unknown, favorite: unknown) => setLibraryFavorite(outputDir, favorite))
+  handle('history:delete', (_event, outputDir: unknown) => deleteLibraryRun(outputDir))
+  handle('history:deleteClips', (_event, outputDir: unknown, indices: unknown) => deleteLibraryClips(outputDir, indices))
+  handle('history:metadataSource', (_event, outputDir: unknown, clipIndex: unknown) => libraryMetadataSource(outputDir, clipIndex))
+  handle('history:enhanceMetadata', (_event, outputDir: unknown, clipIndex: unknown, options: unknown) => enhanceLibraryMetadata(outputDir, clipIndex, options))
   handle('history:getJob', (_event, outputDir: string) => {
     assertAbsolutePath(outputDir)
     if (!isWithinDirectory(outputDir, loadSettings().outputDirectory)) throw new Error('Job is outside the library')
     return getJobOutput(outputDir, loadSettings().outputDirectory)
   })
+
+  handle('editor:open', (_event, path: unknown) => openEditor(path))
+  handle('editor:save', (_event, path: unknown, revision: unknown, edits: unknown) => saveEditor(path, revision, edits))
+  handle('editor:run', (_event, path: unknown, revision: unknown, id: unknown, action: unknown) => runEditor(path, revision, id, action))
+  handle('editor:cancel', (_event, path: unknown) => cancelEditor(path))
+  handle('editor:replaceSource', (_event, path: unknown, revision: unknown, replacement: unknown) => replaceEditorSource(path, revision, replacement))
+  handle('editor:progress', (_event, path: unknown) => readEditorProgress(path))
+  handle('editor:freeMedia', (_event, path: unknown, revision: unknown) => freeEditorMedia(path, revision))
+  handle('editor:closeReady', (_event, saved: unknown) => editorCloseReady(saved))
+
+  handle('edits:inspect', (_event, outputDir: string) => inspectEdits(outputDir, loadSettings().outputDirectory))
 
   handle('thumbnails:generate', async (_event, videoPath: string, seekSeconds?: number) => {
     if (isAutomationMedia(videoPath)) authorizeMedia(videoPath)
@@ -391,6 +435,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       pythonDeps: pythonValidation.ok,
       pythonPath: resolvedPython,
       pythonError: pythonValidation.error,
+      pythonHint: pythonValidation.hint,
+      pythonRepairCommand: pythonValidation.repairCommand,
       ffmpeg,
       ffmpegCaptions,
       ffprobe,

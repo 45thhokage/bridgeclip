@@ -9,7 +9,7 @@ import os
 from functools import lru_cache
 from typing import List, Literal, Optional
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
@@ -589,6 +589,19 @@ class Settings(BaseSettings):
 
     # API Keys (required)
     openrouter_api_key: Optional[str] = None
+    jev_threshold: float = Field(default=0.75, ge=0, le=1, allow_inf_nan=False)
+    jev_self_contained_threshold: float = Field(default=0.70, ge=0, le=1, allow_inf_nan=False)
+    jev_faithful_to_source_threshold: float = Field(default=0.65, ge=0, le=1, allow_inf_nan=False)
+    jev_title_supported_threshold: float = Field(default=0.70, ge=0, le=1, allow_inf_nan=False)
+    jev_sponsor_threshold: float = Field(default=0.80, ge=0, le=1, allow_inf_nan=False)
+    jev_evidence_threshold: float = Field(default=0.50, ge=0, le=1, allow_inf_nan=False)
+    jev_cut_threshold: float = Field(default=0.95, ge=0, le=1, allow_inf_nan=False)
+    # Opt-in beta features that spend extra OpenRouter credit. Review & edit
+    # always runs Jev; automatic clipping uses it only when enabled.
+    jev_enabled: bool = False
+    jev_visual_context: bool = False
+    source_context_web_research: bool = False
+    source_context_model: str = "google/gemini-3.8-flash"
 
     # Security - API authentication
     bridgeclip_api_key: Optional[str] = None  # API key for authenticating incoming requests
@@ -643,9 +656,12 @@ class Settings(BaseSettings):
     # Analysis Intelligence Index (v4.3) and a live A/B on a real transcript:
     # Opus 5.5 @ medium was fastest (~11s) and the most discriminating scorer
     # at ~$0.07 per 20 min of video. Fallbacks are cross-vendor. Every model in
-    # the chain must accept the configured reasoning effort.
+    # the chain must accept the configured reasoning effort. The same planner
+    # serves Jev review mode; Jev, not the planner model, gates those edits.
     planner_model: str = "anthropic/claude-opus-5.5"
     planner_fallback_models: str = "google/gemini-3.8-flash,openai/gpt-6-sol"
+    # Jev review mode uses Sol for boundary repair.
+    editorial_repair_model: str = "openai/gpt-6-sol"
     # none | minimal | low | medium | high | xhigh
     planner_reasoning_effort: str = "medium"
     # Includes reasoning tokens; 100 clips of JSON is ~15k on its own.

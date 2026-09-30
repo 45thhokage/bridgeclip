@@ -16,7 +16,7 @@ import bridge_runner as bridge
 
 class BridgeTests(unittest.TestCase):
     def config(self, **overrides):
-        return {"contract_version": 2, "layout_vision_enabled": True, "job_id": "job-123", "video_url": "https://example.com/video", **overrides}
+        return {"contract_version": 3, "layout_vision_enabled": True, "job_id": "job-123", "video_url": "https://example.com/video", **overrides}
 
     def test_real_subprocess_loads_in_repo_engine(self):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(bridge.__file__)))
@@ -58,7 +58,7 @@ class BridgeTests(unittest.TestCase):
             "clip_engine.config": types.SimpleNamespace(
                 get_settings=lambda: types.SimpleNamespace(openrouter_api_key="test-openrouter"),
                 get_caption_preset=lambda name: None),
-            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=2),
+            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3),
             "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None),
             "clip_engine.services.ai_clipping_pipeline": types.SimpleNamespace(
                 AIClippingPipeline=Pipeline, ClippingJobRequest=lambda **kwargs: kwargs,
@@ -71,6 +71,25 @@ class BridgeTests(unittest.TestCase):
         with patch.dict(sys.modules, modules), redirect_stdout(io.StringIO()):
             self.assertTrue(asyncio.run(bridge.run(self.config(video_speed=1.5))))
         self.assertEqual(requests[-1]["video_speed"], 1.5)
+        self.assertTrue(requests[-1]["include_title"])
+        with patch.dict(sys.modules, modules), redirect_stdout(io.StringIO()):
+            self.assertTrue(asyncio.run(bridge.run(self.config(include_title=False))))
+        self.assertFalse(requests[-1]["include_title"])
+        self.assertIsNone(requests[-1]["clip_request"])
+        with patch.dict(sys.modules, modules), redirect_stdout(io.StringIO()):
+            self.assertTrue(asyncio.run(bridge.run(self.config(clip_request="the pricing debate"))))
+        self.assertEqual(requests[-1]["clip_request"], "the pricing debate")
+
+    def test_clip_request_validation_and_no_match_message(self):
+        self.assertEqual(bridge.validate_config(self.config(clip_request="x" * 1000))["clip_request"], "x" * 1000)
+        # Main counts UTF-16 units, so the most it forwards is never over the limit in code points.
+        self.assertEqual(bridge.validate_config(self.config(clip_request="\U0001F600" * 500))["clip_request"], "\U0001F600" * 500)
+        for value in ("", "   ", "x" * 1001, "a\0b", 3, ["pricing"]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                bridge.validate_config(self.config(clip_request=value))
+        failure = bridge.describe_failure("No moments matched the clip request")
+        self.assertEqual(failure["message"], "No moments matched what you asked to clip.")
+        self.assertIn("What to clip", failure["hint"])
 
     def test_video_speed_validation(self):
         for speed in (1, 1.1, 1.25, 1.5, 1.75, 2):
@@ -80,7 +99,7 @@ class BridgeTests(unittest.TestCase):
                 bridge.validate_config(self.config(video_speed=speed))
 
     def test_rejects_invalid_config_without_importing_bridgeclip(self):
-        for value in ([], None, "config", self.config(contract_version=None), self.config(contract_version=1), self.config(layout_vision_enabled=None), self.config(job_id="../escape"), self.config(video_url="file:///etc/passwd"), self.config(max_clips=True), self.config(aspect_ratio="1:1"), self.config(layout_style="unknown"), self.config(pacing="unknown"), self.config(clipping_mode="unknown"), self.config(duration_ranges=["unknown"])):
+        for value in ([], None, "config", self.config(contract_version=None), self.config(contract_version=1), self.config(layout_vision_enabled=None), self.config(job_id="../escape"), self.config(video_url="file:///etc/passwd"), self.config(max_clips=True), self.config(include_title="false"), self.config(aspect_ratio="1:1"), self.config(layout_style="unknown"), self.config(pacing="unknown"), self.config(clipping_mode="unknown"), self.config(duration_ranges=["unknown"])):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 bridge.validate_config(value)
 
@@ -91,7 +110,7 @@ class BridgeTests(unittest.TestCase):
             return types.SimpleNamespace(openrouter_api_key=None)
         config_module = types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None)
         pipeline_module = types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None)
-        with patch.dict(sys.modules, {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=2), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}), patch.dict(os.environ, {"LOCAL_MODE": "false"}), redirect_stdout(io.StringIO()):
+        with patch.dict(sys.modules, {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}), patch.dict(os.environ, {"LOCAL_MODE": "false"}), redirect_stdout(io.StringIO()):
             self.assertFalse(asyncio.run(bridge.run(self.config(output_dir=os.path.abspath("output")))))
         self.assertEqual(observed, [("true", os.path.abspath("output"), "true")])
 
@@ -102,7 +121,7 @@ class BridgeTests(unittest.TestCase):
             return types.SimpleNamespace(openrouter_api_key=None)
         config_module = types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None)
         pipeline_module = types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None)
-        modules = {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=2), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}
+        modules = {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}
         with patch.dict(sys.modules, modules), redirect_stdout(io.StringIO()):
             self.assertFalse(asyncio.run(bridge.run(self.config(layout_vision_enabled=False))))
         self.assertEqual(observed, ["false"])
@@ -111,12 +130,12 @@ class BridgeTests(unittest.TestCase):
         observed = []
         def get_settings():
             observed.append({key: os.environ.get(key) for key in (
-                "CLIPPING_MODE", "PLANNER_MODEL", "PLANNER_FALLBACK_MODELS", "LAYOUT_VISION_ENABLED"
+                "CLIPPING_MODE", "PLANNER_MODEL", "EDITORIAL_REPAIR_MODEL", "PLANNER_FALLBACK_MODELS", "LAYOUT_VISION_ENABLED"
             )})
             return types.SimpleNamespace(openrouter_api_key=None)
         modules = {
             "clip_engine.config": types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None),
-            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=2),
+            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3),
             "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None),
             "clip_engine.services.ai_clipping_pipeline": types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None),
         }
@@ -124,6 +143,7 @@ class BridgeTests(unittest.TestCase):
             self.assertFalse(asyncio.run(bridge.run(self.config(clipping_mode="economy"))))
         self.assertEqual(observed, [{
             "CLIPPING_MODE": "economy", "PLANNER_MODEL": "z-ai/glm-5.3-flash",
+            "EDITORIAL_REPAIR_MODEL": "google/gemini-3.8-flash",
             "PLANNER_FALLBACK_MODELS": "", "LAYOUT_VISION_ENABLED": "false",
         }])
 
@@ -141,7 +161,7 @@ class BridgeTests(unittest.TestCase):
             return types.SimpleNamespace(openrouter_api_key=None)
         modules = {
             "clip_engine.config": types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None),
-            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=2),
+            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3),
             "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None),
             "clip_engine.services.ai_clipping_pipeline": types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None),
         }
@@ -184,7 +204,7 @@ class BridgeTests(unittest.TestCase):
             return types.SimpleNamespace(openrouter_api_key=None)
         config_module = types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None)
         pipeline_module = types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None)
-        with patch.dict(sys.modules, {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=2), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}), patch.dict(os.environ, {"YTDLP_PROXIES": "socks5h://user:pass@proxy:1"}), redirect_stdout(io.StringIO()):
+        with patch.dict(sys.modules, {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}), patch.dict(os.environ, {"YTDLP_PROXIES": "socks5h://user:pass@proxy:1"}), redirect_stdout(io.StringIO()):
             asyncio.run(bridge.run(self.config()))
         self.assertEqual(observed, [("", "")])
 
@@ -195,7 +215,7 @@ class BridgeTests(unittest.TestCase):
             return types.SimpleNamespace(openrouter_api_key=None)
         config_module = types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None)
         pipeline_module = types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None)
-        with patch.dict(sys.modules, {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=2), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}), patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+        with patch.dict(sys.modules, {"clip_engine.config": config_module, "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3), "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None), "clip_engine.services.ai_clipping_pipeline": pipeline_module}), patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
             asyncio.run(bridge.run(self.config()))
         self.assertEqual(observed, ["1"])
 
@@ -207,8 +227,27 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(fallback["message"], "The clipping pipeline failed.")
         self.assertNotIn("secret-pass", json.dumps(fallback))
         self.assertEqual(bridge.describe_failure(None)["message"], "The clipping pipeline failed.")
+        incomplete = bridge.describe_failure('No clips were approved. Review could not finish for 10 of 11 candidates. ' + secret)
+        self.assertEqual(incomplete['message'], 'Clip review could not finish; no clips were exported.')
+        self.assertIn('does not mean the video has no suitable clips', incomplete['hint'])
+        self.assertNotIn('secret-pass', json.dumps(incomplete))
+        self.assertEqual(bridge.describe_failure('No clips passed the coherence review.')['message'], 'No clips passed the coherence review.')
+        unavailable = bridge.describe_failure('No clips were approved because Jev review was unavailable for every candidate (3 of 3). ' + secret)
+        self.assertEqual(unavailable['message'], 'Jev review was unavailable, so no clips were exported.')
+        self.assertIn('turn off Jev review in Settings → TypeSafe Jev', unavailable['hint'])
+        credits = bridge.describe_failure('No clips were approved. OpenRouter reported insufficient credits for Jev review, so 2 of 3 candidates could not be reviewed.')
+        self.assertEqual(credits['message'], 'OpenRouter ran out of credits during Jev review; no clips were exported.')
+        self.assertIn('turn off Jev review in Settings → TypeSafe Jev', credits['hint'])
+        for failure in (unavailable, credits):
+            # The desktop app drops hints with slashes, URLs or more than 300 characters.
+            self.assertLessEqual(len(failure['hint']), 300)
+            self.assertNotRegex(failure['hint'], r'https?://|[\\/]')
         empty = bridge.describe_failure("No clip-worthy moments found (the video may have no speech, or the selected time range is too short for the chosen clip length)")
         self.assertEqual(empty["message"], "BridgeClip couldn't find any clips in this video.")
+        no_candidates = bridge.describe_failure('The planner returned no clip candidates ' + secret)
+        self.assertEqual(no_candidates['message'], 'The planner returned no clip candidates.')
+        self.assertIn('planner response', no_candidates['hint'])
+        self.assertNotIn('secret-pass', json.dumps(no_candidates))
         self.assertEqual(bridge.describe_failure("Transcription authentication failed")["message"], "OpenRouter rejected the transcription request.")
         self.assertEqual(bridge.describe_failure("Transcription account credit limit reached")["message"], "OpenRouter could not transcribe the video because the account has insufficient credit or a spending limit.")
         self.assertEqual(bridge.describe_failure("Transcription providers are temporarily rate limited")["message"], "Transcription providers are busy after automatic recovery attempts.")
