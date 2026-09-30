@@ -1,6 +1,6 @@
 # Contributing to BridgeClip
 
-BridgeClip is open source and maintained by [@matthewmiller2925](https://github.com/matthewmiller2925). Only the maintainer contributes changes to this repository and publishes official builds. Pull requests are restricted to collaborators; community bug reports and feature requests are welcome through Issues. The MIT license still permits anyone to use, modify, and fork the source.
+BridgeClip is open source and maintained by [@matthewmiller2925](https://github.com/matthewmiller2925), who reviews and merges every change and publishes official builds. Anyone can open a pull request from a fork; bug reports and feature requests are welcome through Issues. The MIT license permits anyone to use, modify, and fork the source.
 
 ## Set up
 
