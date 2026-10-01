@@ -1,6 +1,6 @@
 import { JevSettings } from '../components/JevSettings'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal } from 'lucide-react'
+import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { useSettingsStore } from '../store/use-settings-store'
 import { useChangelogStore } from '../store/use-changelog-store'
 import { useApiKeyDrafts } from '../hooks/use-api-key-drafts'
@@ -20,8 +20,11 @@ import { IconTile } from '../components/ui/IconTile'
 import { Callout } from '../components/ui/Callout'
 import { UpdatesRow } from '../components/Updates'
 import { OutputStorage } from '../components/OutputStorage'
+import { AssistantSettings } from '../components/assistant/AssistantSettings'
+import { useAssistantStore } from '../store/use-assistant-store'
+import { takeSettingsSection } from '../lib/settings-focus'
 
-type SectionId = 'keys' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
+type SectionId = 'keys' | 'assistant' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
 type SectionTone = 'success' | 'warning' | 'danger' | 'idle'
 
 /** `showUpdates` changes each time Help → Check for Updates… asks for the Updates row. */
@@ -55,9 +58,11 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
   const toolsMissing = tools.filter((row) => !row.optional && row.ok === false).length
   const keysMissing = Number(!openrouterConfigured)
   const vocabularyTerms = customVocabulary.split('\n').filter((line) => line.trim()).length
+  const assistantConnected = useAssistantStore((state) => Object.values(state.statuses).some((status) => status?.state === 'connected'))
 
   const sections: { id: SectionId; label: string; icon: ReactNode; tone: SectionTone }[] = [
     { id: 'keys', label: 'API keys', icon: <KeyRound />, tone: keysMissing ? 'warning' : 'success' },
+    { id: 'assistant', label: 'Assistant', icon: <Sparkles />, tone: assistantConnected ? 'success' : 'idle' },
     { id: 'jev', label: 'TypeSafe Jev', icon: <SlidersHorizontal />, tone: 'idle' },
     { id: 'vocabulary', label: 'Vocabulary', icon: <BookA />, tone: 'idle' },
     { id: 'output', label: 'Output', icon: <FolderOpen />, tone: 'idle' },
@@ -72,6 +77,12 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
     return () => cancelAnimationFrame(frame)
     // Only a new request scrolls; jump is recreated on every render.
   }, [showUpdates])
+  useEffect(() => {
+    const section = takeSettingsSection()
+    if (!section) return
+    const frame = requestAnimationFrame(() => jump(section))
+    return () => cancelAnimationFrame(frame)
+  }, [])
 
   const checks: { label: string; ok: boolean | null; detail: string; section: SectionId; optional?: boolean; tone?: 'danger' }[] = [
     { label: 'OpenRouter', ok: openrouterConfigured, detail: openrouterConfigured ? 'Key saved' : 'Needed to transcribe and pick clips', section: 'keys' },
@@ -180,6 +191,10 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
                 />
               </KeyRow>
             </div>
+          </Section>
+
+          <Section id="assistant">
+            <AssistantSettings />
           </Section>
 
           <JevSettings />

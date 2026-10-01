@@ -14,6 +14,8 @@ export interface OpenRouterModel {
 export interface OpenRouterCatalog {
   planning: OpenRouterModel[]
   transcription: OpenRouterModel[]
+  /** Tool-calling text models, for the chat assistant. */
+  assistant: OpenRouterModel[]
   fetchedAt: string
 }
 

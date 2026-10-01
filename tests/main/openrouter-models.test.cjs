@@ -54,6 +54,16 @@ test('incompatible models remain searchable with an explanation and cannot start
   assert.equal((await api.resolveAdvancedModels('provider/planner', 'provider/transcriber')).id, 'provider/planner')
 })
 
+test('the assistant list keeps only text models that can call tools', async () => {
+  const api = load(async (url) => Response.json({ data: url.endsWith('text')
+    ? [planner('agent/tools', { supported_parameters: ['tools', 'tool_choice'] }), planner(), planner('bad id/x', { supported_parameters: ['tools'] })]
+    : [transcriber()] }))
+  const catalog = await api.getModelCatalog()
+  assert.deepEqual(catalog.assistant.map((model) => model.id), ['agent/tools'])
+  assert.equal(catalog.assistant[0].inputPrice, 0.000001)
+  assert.deepEqual(catalog.planning.map((model) => model.id).sort(), ['agent/tools', 'provider/planner'])
+})
+
 test('search matches provider, name and ID with multiple words', () => {
   const api = load()
   const models = api.parseModelCatalog({ data: [planner(), planner('other/second', { name: 'Another choice' })] }, 'planning')

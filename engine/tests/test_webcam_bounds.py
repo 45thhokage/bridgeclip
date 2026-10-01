@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from clip_engine.services.layout_analyzer import Box, ClipLayoutPlan, LayoutAnalyzer, LayoutType, ShotLayout, refine_cam_box
-from clip_engine.services.layout_renderer import MAX_UPSCALE, cam_crop, panel_fit, shot_views, build_layout_graph
+from clip_engine.services.layout_renderer import MAX_UPSCALE, cam_crop, shot_views, stacked_panel_heights, build_layout_graph
 
 
 def image_with_camera(x=481, y=241):
@@ -83,18 +83,48 @@ def test_pixel_rounding_never_expands_beyond_camera(cam):
         assert x == 0
 
 
-def test_offcenter_subject_is_centered_without_excessive_upscaling():
-    cam, face = Box(.7578125, .672222, .2421875, .327778), Box(.8815, .7753, .0425, .0998)
-    rect = cam_crop(cam, face, 1920, 1080, 1080, 768)
-    w, h, x, y = rect
-    assert abs((face.cx * 1920 - x) / w - .5) < .01
-    fitted = panel_fit(rect, 1080, 768)
-    assert fitted is not None
-    assert fitted[0] / w <= MAX_UPSCALE and fitted[1] / h <= MAX_UPSCALE
-    shot = ShotLayout(0, 1000, LayoutType.SCREEN_CAM, cam_box=cam, cam_face=face)
+def output_face_x(shot, face):
     (sx, _, sw, _), (dx, _, dw, _) = shot_views(shot, 0, 1920, 1080, 1080, 1920)[1]
-    output_face_x = dx + (face.cx * 1920 - sx) / sw * dw
-    assert abs(output_face_x - 540) < 5
+    return dx + (face.cx * 1920 - sx) / sw * dw
+
+
+def test_offcenter_subject_moves_toward_center_within_upscale_budget():
+    cam, face = Box(.7578125, .672222, .2421875, .327778), Box(.8815, .7753, .0425, .0998)
+    w, h, x, y = cam_crop(cam, face, 1920, 1080, 1080, 768)
+    untightened = cam_crop(cam, None, 1920, 1080, 1080, 768)
+    # Fully centering needs 2.9x; the crop tightens only to MAX_UPSCALE.
+    assert 1080 / w <= MAX_UPSCALE + .01 and w < untightened[0]
+    assert w / h == pytest.approx(1080 / 768, rel=.02)
+    shot = ShotLayout(0, 1000, LayoutType.SCREEN_CAM, cam_box=cam, cam_face=face)
+    assert shot_views(shot, 0, 1920, 1080, 1080, 1920)[1][1] == (0, 1152, 1080, 768)
+    loose = ShotLayout(0, 1000, LayoutType.SCREEN_CAM, cam_box=cam)
+    assert abs(output_face_x(shot, face) - 540) < abs(output_face_x(loose, face) - 540)
+
+
+def test_offcenter_subject_is_centered_when_the_budget_allows():
+    cam, face = Box(.6, .5, .4, .5), Box(.86, .62, .05, .12)
+    w, h, x, y = cam_crop(cam, face, 1920, 1080, 1080, 768)
+    assert abs((face.cx * 1920 - x) / w - .5) < .01
+    assert 1080 / w <= MAX_UPSCALE
+
+
+@pytest.mark.parametrize('cam', [
+    Box(.7865, .7639, .1635, .2102),  # ~314x227 px overlay (DevDay stream)
+    Box(.73, .68, .22, .29),          # ~420x313 px overlay
+])
+def test_small_webcam_with_offcenter_face_fills_the_whole_panel(cam):
+    # Regression: these were shown at MAX_UPSCALE, centered over a blurred copy.
+    face = Box(cam.x + cam.w * .62, cam.y + cam.h * .25, cam.w * .2, cam.h * .32)
+    shot = ShotLayout(0, 1000, LayoutType.SCREEN_CAM, cam_box=cam, cam_face=face, screen_box=Box(0, 0, 1, 1))
+    top_h, bottom_h = stacked_panel_heights(shot, 1080, 1920)
+    w, h, x, y = cam_crop(cam, face, 1920, 1080, 1080, bottom_h)
+    assert w / h == pytest.approx(1080 / bottom_h, rel=.02)
+    assert x >= cam.x * 1920 and y >= cam.y * 1080
+    assert x + w <= (cam.x + cam.w) * 1920 and y + h <= (cam.y + cam.h) * 1080
+    assert shot_views(shot, 0, 1920, 1080, 1080, 1920)[1] == ((x, y, w, h), (0, top_h, 1080, bottom_h))
+    graph = build_layout_graph(ClipLayoutPlan([shot], 1920, 1080), 1080, 1920)
+    assert 'gblur' not in graph.split('[bot0]')[0].rsplit('[sb0]', 1)[1]
+    assert f'[sb0]crop={w}:{h}:{x}:{y},scale=1080:{bottom_h}:flags=lanczos[bot0]' in graph
 
 
 def test_rendered_webcam_panel_contains_no_surrounding_page(tmp_path):

@@ -26,14 +26,24 @@ const queue: string[] = []
 /** Jobs whose bridge process has started and not yet exited. */
 const running = new Set<string>()
 let getSink: () => JobEventSink | null = () => null
+const listeners = new Set<(snapshot: JobSnapshot) => void>()
 
 export function initJobManager(windowGetter: () => JobEventSink | null): void {
   getSink = windowGetter
 }
 
+/** Follow every job change in the main process (the assistant waits on jobs this way). */
+export function onJobUpdate(listener: (snapshot: JobSnapshot) => void): () => void {
+  listeners.add(listener)
+  return () => listeners.delete(listener)
+}
+
 function broadcast(snapshot: JobSnapshot): void {
   const sink = getSink()
   if (sink && !sink.isDestroyed() && !sink.webContents.isDestroyed()) sink.webContents.send('jobs:update', snapshot)
+  for (const listener of listeners) {
+    try { listener(snapshot) } catch { /* a listener never stops job tracking */ }
+  }
 }
 
 function update(jobId: string, patch: Partial<Omit<JobSnapshot, 'id' | 'revision'>>): void {
@@ -177,6 +187,10 @@ export function dismissJob(jobId: string): boolean {
   if (!job || isActiveJobStatus(job.snapshot.status)) return false
   jobs.delete(jobId)
   return true
+}
+
+export function getJob(jobId: string): JobSnapshot | null {
+  return jobs.get(jobId)?.snapshot ?? null
 }
 
 export function listJobs(): JobSnapshot[] {

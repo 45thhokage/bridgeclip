@@ -493,8 +493,10 @@ function forgetBankItems(workspace: string, automationId: string, items: readonl
 export function deleteAutomation(id: unknown): Automation[] {
   const { workspace, automation } = find(id)
   if (busy.has(automation.id)) throw new Error('Wait for the current post to finish.')
+  const previous = cached
   cached = cached.filter((item) => item.id !== automation.id)
-  save(workspace)
+  // A failed save keeps the automation, so the UI and the scheduler still see it.
+  try { save(workspace) } catch (error) { cached = previous; throw error }
   forgetBankItems(workspace, automation.id, automation.content)
   rmSync(bankPath(workspace, automation.id), { recursive: true, force: true })
   return listAutomations()
@@ -702,8 +704,9 @@ export function removeAutomationContent(id: unknown, contentId: unknown): Automa
   if (item.status === 'posting' || busy.has(automation.id)) throw new Error('Wait for the current post to finish.')
   // Removing never re-queues anything. Submitted and held clips leave the
   // bank as history; their posts stay in Zernio and in Posts.
+  const previous = automation.content
   automation.content = automation.content.filter((content) => content.id !== item.id)
-  save(workspace)
+  try { save(workspace) } catch (error) { automation.content = previous; throw error }
   forgetBankItems(workspace, automation.id, [item])
   rmSync(join(bankPath(workspace, automation.id), item.fileName), { force: true })
   return listAutomations()

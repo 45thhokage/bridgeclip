@@ -3,26 +3,16 @@ import { editorCloseReady, freeEditorMedia, readEditorProgress } from './clip-ed
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
-import { ensureOutputDir, getJobHistory, getJobOutput, generateThumbnail } from './file-manager'
+import { getJobHistory, getJobOutput, generateThumbnail } from './file-manager'
 import { measureOutputStorage } from './output-storage'
 import { inspectEdits } from './edit-inspector'
-import {
-  getEnginePath,
-  getBridgeRunnerPath,
-  resolvePythonPath,
-  validatePython,
-  preflightCheck,
-  type ClipJobConfig
-} from './pipeline-runner'
-import { createRunRecord, finishRunRecord } from './run-history'
-import { cancelTrackedJob, dismissJob, enqueueJob, initJobManager, listJobs, liveJobIds } from './job-manager'
+import { getEnginePath, getBridgeRunnerPath, resolvePythonPath, validatePython } from './pipeline-runner'
+import { cancelTrackedJob, dismissJob, initJobManager, listJobs, liveJobIds } from './job-manager'
+import { startClipJobRequest } from './job-start'
 import { logger, getLogFilePath } from './logger'
 import { assertAbsolutePath, assertMediaPath, assertTrustedSender, authorizeMedia, isTrustedExternalUrl, isWebUrl, isWithinDirectory, openAuthorizedMedia } from './security'
-import { assertPublicWebUrl } from './network-policy'
-import { validateJobConfig } from './validation'
-import { getModelCatalog, resolveAdvancedModels } from './openrouter-models'
+import { getModelCatalog } from './openrouter-models'
 import { getYouTubePreview } from './youtube-preview'
-import { randomUUID } from 'crypto'
 import { resolveBinary, supportsCaptionFilter } from './tools'
 import { automationEnhancementGroups, enhanceAutomationBatch, automationContentSource, enhanceAutomationContent, resolveAutomationMetadataDraft, addAutomationContent, addLibraryClipsToAutomation, createAutomation, deleteAutomation, isAutomationMedia, listAutomations, removeAutomationContent, runAutomation, updateAutomation, updateAutomationContent, approveAutomationTikTokReview, prepareAutomationTikTokReview } from './automations'
 import { acknowledgeAutomationWarnings, retryAutomationContent, dismissAutomationMetadataError, automationLibraryClip, reorderAutomationContent, reviewAutomationContent, showAutomationContentInFolder } from './automations'
@@ -56,12 +46,8 @@ import {
   retryPost
 } from './zernio/posts'
 
-/** A passing engine check is reused briefly, so queuing several videos stays quick. */
-const ENGINE_CHECK_TTL_MS = 5 * 60 * 1000
-
 export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): void {
   const selectedOutputDirectories = new Set<string>()
-  let lastEngineCheck: { key: string; at: number } | null = null
   initJobManager(getMainWindow)
   const handle: typeof ipcMain.handle = (channel, listener) => ipcMain.handle(channel, (event, ...args) => {
     assertTrustedSender(event, getMainWindow())
@@ -167,74 +153,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     return result.filePaths[0]
   })
 
-  handle('job:start', async (_event, config: ClipJobConfig) => {
-    const window = getMainWindow()
-    if (!window) {
-      logger.warn('job.start.noWindow')
-      return { error: 'No window' }
-    }
-
-    try {
-      config = validateJobConfig(config)
-      if (config.clippingMode === 'advanced') {
-        config.plannerCapabilities = await resolveAdvancedModels(config.plannerModel!, config.transcriptionModel!)
-      }
-      if (isWebUrl(config.videoUrl)) await assertPublicWebUrl(config.videoUrl)
-      else assertMediaPath(config.videoUrl, loadSettings().outputDirectory)
-      if (config.bannerChannelUrl) await assertPublicWebUrl(config.bannerChannelUrl)
-    } catch (error) { return { error: error instanceof Error ? error.message : 'Invalid job options' } }
-    const settings = loadSettings()
-
-    if (!settings.openrouterApiKey) {
-      logger.warn('job.start.missingKey', { key: 'OPENROUTER_API_KEY' })
-      return { error: 'OpenRouter API key is required for AI clip planning. Go to Settings to add it.' }
-    }
-
-    const enginePath = getEnginePath()
-    const bridgePath = getBridgeRunnerPath()
-    const pythonPath = resolvePythonPath(enginePath, settings.pythonPath)
-
-    const preflight = preflightCheck({ pythonPath, bridgePath, enginePath })
-    if (!preflight.ok) {
-      const message = preflight.hint
-        ? `${preflight.error}\n\n${preflight.hint}`
-        : preflight.error!
-      logger.error('job.start.preflight.failed', {
-        error: preflight.error,
-        hint: preflight.hint,
-        pythonPath,
-        bridgePath,
-        enginePath
-      })
-      return { error: message }
-    }
-    const engineKey = `${pythonPath}\0${enginePath}`
-    if (!lastEngineCheck || lastEngineCheck.key !== engineKey || Date.now() - lastEngineCheck.at > ENGINE_CHECK_TTL_MS) {
-      const pythonValidation = await validatePython(pythonPath, enginePath)
-      if (!pythonValidation.ok) {
-        lastEngineCheck = null
-        return { error: 'The clipping engine is incomplete or incompatible. Open Settings → System check, then repair the BridgeClip installation before starting.' }
-      }
-      lastEngineCheck = { key: engineKey, at: Date.now() }
-    }
-    if (config.includeCaptions && !(await supportsCaptionFilter())) {
-      return { error: 'FFmpeg cannot render captions because its ass filter is missing. Install an FFmpeg build with libass, or turn captions off.' }
-    }
-
-    ensureOutputDir(settings.outputDirectory)
-
-    const jobId = randomUUID()
-    logger.info('job.start.request', { jobId, sourceType: isWebUrl(config.videoUrl) ? 'remote' : 'local', aspectRatio: config.aspectRatio })
-    try {
-      createRunRecord(settings.outputDirectory, jobId, config.videoUrl)
-    } catch {
-      try { finishRunRecord(settings.outputDirectory, jobId, 'failed', 'Could not start this run.') } catch { /* Output folder may be unavailable. */ }
-      return { error: 'Could not create the clipping run. Check the output folder and retry.' }
-    }
-    // Starts now when a slot is free; otherwise waits its turn in the queue.
-    const job = enqueueJob(jobId, config, settings.outputDirectory)
-    return { jobId, queued: job.status === 'queued', job }
-  })
+  handle('job:start', (_event, config: unknown) => startClipJobRequest(config))
 
   handle('job:cancel', (_event, jobId: unknown) => {
     if (typeof jobId !== 'string') return false
