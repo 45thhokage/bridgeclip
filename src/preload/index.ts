@@ -24,6 +24,18 @@ import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
 import type { OutputStorageUsage } from '../shared/output-storage'
 import type { YouTubePreview } from '../shared/youtube-preview'
+import type {
+  AppDataScope,
+  AssistantConversation,
+  AssistantConversationSummary,
+  AssistantEvent,
+  AssistantNavigationPage,
+  AssistantPreferences,
+  AssistantCliProviderId,
+  AssistantProviderId,
+  AssistantProviderStatus,
+  AssistantSignInState
+} from '../shared/assistant'
 
 export interface ClipSettings extends JevThresholdSettings {
   openrouterConfigured: boolean
@@ -73,6 +85,37 @@ export interface ToolStatus {
 
 export interface BridgeClipAPI {
   source: { youtubePreview: (url: string, details?: boolean) => Promise<YouTubePreview> }
+  /** Chat with the user's own Claude Code or Codex, signed in with their subscription. */
+  assistant: {
+    status: (fresh?: boolean) => Promise<AssistantProviderStatus[]>
+    onStatus: (cb: (status: AssistantProviderStatus) => void) => () => void
+    preferences: () => Promise<AssistantPreferences>
+    savePreferences: (preferences: Partial<AssistantPreferences>) => Promise<AssistantPreferences>
+    conversations: () => Promise<AssistantConversationSummary[]>
+    conversation: (id: string) => Promise<AssistantConversation | null>
+    deleteConversation: (id: string) => Promise<AssistantConversationSummary[]>
+    running: () => Promise<string[]>
+    send: (message: { conversationId: string | null; provider: AssistantProviderId; model: string; text: string }) => Promise<{ conversationId: string; messageId: string }>
+    stop: (conversationId: string) => Promise<void>
+    approve: (requestId: string, allowed: boolean) => Promise<void>
+    /** Copy the provider's install or sign-in command. */
+    copyCommand: (provider: AssistantCliProviderId, which: 'install' | 'signIn') => Promise<boolean>
+    onEvent: (cb: (event: AssistantEvent) => void) => () => void
+    signIn: {
+      start: (provider: AssistantCliProviderId) => Promise<AssistantSignInState>
+      state: (provider: AssistantCliProviderId) => Promise<AssistantSignInState>
+      submitCode: (provider: AssistantCliProviderId, code: string) => Promise<void>
+      cancel: (provider: AssistantCliProviderId) => Promise<void>
+      openPage: (provider: AssistantCliProviderId) => Promise<boolean>
+      onState: (cb: (state: AssistantSignInState) => void) => () => void
+    }
+  }
+  app: {
+    /** Main-side data changed (e.g. the assistant edited it); reload what's shown. */
+    onDataChanged: (cb: (scope: AppDataScope) => void) => () => void
+    /** The assistant asked the window to show a page. */
+    onNavigate: (cb: (target: { page: AssistantNavigationPage; runDir: string | null }) => void) => () => void
+  }
   editor: {
     open: (path: string) => Promise<EditorSession>
     save: (path: string, revision: number, edits: CandidateEdit[]) => Promise<EditorSession>
@@ -235,6 +278,33 @@ function subscribe<T>(channel: string, callback: (data: T) => void): () => void 
 
 const api: BridgeClipAPI = {
   source: { youtubePreview: (url, details = false) => ipcRenderer.invoke('source:youtubePreview', url, details) },
+  assistant: {
+    status: (fresh = false) => ipcRenderer.invoke('assistant:status', fresh),
+    onStatus: (callback) => subscribe('assistant:status', callback),
+    preferences: () => ipcRenderer.invoke('assistant:preferences'),
+    savePreferences: (preferences) => ipcRenderer.invoke('assistant:savePreferences', preferences),
+    conversations: () => ipcRenderer.invoke('assistant:conversations'),
+    conversation: (id) => ipcRenderer.invoke('assistant:conversation', id),
+    deleteConversation: (id) => ipcRenderer.invoke('assistant:deleteConversation', id),
+    running: () => ipcRenderer.invoke('assistant:running'),
+    send: (message) => ipcRenderer.invoke('assistant:send', message),
+    stop: (conversationId) => ipcRenderer.invoke('assistant:stop', conversationId),
+    approve: (requestId, allowed) => ipcRenderer.invoke('assistant:approve', requestId, allowed),
+    copyCommand: (provider, which) => ipcRenderer.invoke('assistant:copyCommand', provider, which),
+    onEvent: (callback) => subscribe('assistant:event', callback),
+    signIn: {
+      start: (provider) => ipcRenderer.invoke('assistant:signIn:start', provider),
+      state: (provider) => ipcRenderer.invoke('assistant:signIn:state', provider),
+      submitCode: (provider, code) => ipcRenderer.invoke('assistant:signIn:code', provider, code),
+      cancel: (provider) => ipcRenderer.invoke('assistant:signIn:cancel', provider),
+      openPage: (provider) => ipcRenderer.invoke('assistant:signIn:open', provider),
+      onState: (callback) => subscribe('assistant:signIn', callback)
+    }
+  },
+  app: {
+    onDataChanged: (callback) => subscribe('app:dataChanged', callback),
+    onNavigate: (callback) => subscribe('app:navigate', callback)
+  },
   editor: {
     open: (path) => ipcRenderer.invoke('editor:open', path),
     save: (path, revision, edits) => ipcRenderer.invoke('editor:save', path, revision, edits),

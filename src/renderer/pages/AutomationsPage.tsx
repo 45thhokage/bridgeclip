@@ -27,6 +27,7 @@ import { Switch } from '../components/ui/Switch'
 import { useAccountsStore } from '../store/use-accounts-store'
 import { useSettingsStore } from '../store/use-settings-store'
 import { getApi } from '../lib/ipc'
+import { useDataVersion } from '../store/use-data-version-store'
 import { cn, errorMessage, formatRelativeDate, isMac } from '../lib/utils'
 import type { Page as PageName } from '../components/Sidebar'
 
@@ -113,6 +114,7 @@ export function AutomationsPage({ onNavigate, onViewLibrary }: { onNavigate: (pa
   const closeConfirm = useCallback(() => setConfirm(null), [])
   const selected = automations.find((automation) => automation.id === selectedId) ?? null
   const aiKeysMissing = !writingConfigured
+  const automationsVersion = useDataVersion('automations')
 
   useEffect(() => {
     if (!configured) return
@@ -140,7 +142,8 @@ export function AutomationsPage({ onNavigate, onViewLibrary }: { onNavigate: (pa
     void hydrate().then(() => loadAccounts()).catch(() => {})
     const timer = setInterval(() => void refresh(), 5_000)
     return () => { active = false; clearInterval(timer) }
-  }, [configured, hydrate, loadAccounts])
+    // automationsVersion: the assistant changed automations; reload now instead of at the next poll.
+  }, [configured, hydrate, loadAccounts, automationsVersion])
 
   const connected = useMemo(() => accounts.filter((account) => account.profileId === draft?.profileId &&
     AUTOMATION_PLATFORMS.some((platform) => platform === account.platform)

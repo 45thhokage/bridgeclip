@@ -1,4 +1,4 @@
-import { ChevronRight, Film, Layers, PanelLeftClose, PanelLeftOpen, Send, Settings, UsersRound, WandSparkles, Workflow, type LucideIcon } from 'lucide-react'
+import { ChevronRight, Film, Layers, MessagesSquare, PanelLeftClose, PanelLeftOpen, Send, Settings, UsersRound, WandSparkles, Workflow, type LucideIcon } from 'lucide-react'
 import { cn, MOD_KEY, sourceLabel } from '../lib/utils'
 import { useIsWide, useSidebarExpanded, useSidebarStore } from '../store/use-sidebar-store'
 import { useActiveJobs } from '../store/use-job-store'
@@ -9,13 +9,15 @@ import { ProgressBar } from './ui/ProgressBar'
 import { StatusDot } from './ui/Badge'
 import { STAGE_LABELS } from './JobProgress'
 import { SidebarUpdateButton } from './Updates'
+import { useAssistantStore } from '../store/use-assistant-store'
 
-export type Page = 'clip' | 'library' | 'jobs' | 'accounts' | 'posts' | 'automations' | 'settings'
+export type Page = 'clip' | 'library' | 'jobs' | 'assistant' | 'accounts' | 'posts' | 'automations' | 'settings'
 
 export const NAV_ITEMS: { id: Page; label: string; icon: LucideIcon; shortcut: string; group: 'studio' | 'app' }[] = [
   { id: 'clip', label: 'Create', icon: WandSparkles, shortcut: '1', group: 'studio' },
   { id: 'library', label: 'Library', icon: Film, shortcut: '2', group: 'studio' },
   { id: 'jobs', label: 'Jobs', icon: Layers, shortcut: '3', group: 'studio' },
+  { id: 'assistant', label: 'Chat', icon: MessagesSquare, shortcut: '7', group: 'studio' },
   { id: 'accounts', label: 'Accounts', icon: UsersRound, shortcut: '4', group: 'app' },
   { id: 'posts', label: 'Posts', icon: Send, shortcut: '5', group: 'app' },
   { id: 'automations', label: 'Automations', icon: Workflow, shortcut: '6', group: 'app' },
@@ -139,13 +141,15 @@ function NavButton({ item, expanded, active, onNavigate }: {
 }): React.JSX.Element {
   const Icon = item.icon
   const liveJobs = useActiveJobs().length
-  const badge = item.id === 'jobs' && liveJobs > 0 ? liveJobs : null
+  const approvals = useAssistantStore((state) => state.approvals.length)
+  const badge = item.id === 'jobs' && liveJobs > 0 ? liveJobs : item.id === 'assistant' && approvals > 0 ? approvals : null
+  const badgeLabel = item.id === 'assistant' ? 'waiting for approval' : 'active'
   return (
     <button
       onClick={() => onNavigate(item.id)}
       aria-current={active ? 'page' : undefined}
-      aria-label={badge ? `${item.label}, ${badge} active` : item.label}
-      title={expanded ? undefined : badge ? `${item.label} · ${badge} active` : item.label}
+      aria-label={badge ? `${item.label}, ${badge} ${badgeLabel}` : item.label}
+      title={expanded ? undefined : badge ? `${item.label} · ${badge} ${badgeLabel}` : item.label}
       className={cn(
         'group relative flex w-full items-center gap-2.5 text-sm transition-[background,color,box-shadow] duration-200 ease-out',
         expanded ? 'h-8 justify-start rounded-full px-3' : 'h-9 justify-center rounded-xl',

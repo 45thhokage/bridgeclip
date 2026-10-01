@@ -83,6 +83,13 @@ Use footage you have permission to use. See the [user guide](docs/usage.md) for 
 - Draft platform-specific titles, captions and tags, then review them before applying.
 - Connect social accounts through **Zernio** to publish, schedule, reorder queues and recover held clips. Daily automations require BridgeClip to be open.
 
+### Chat with BridgeClip
+
+- Connect your **Claude** (Pro or Max, through Claude Code) or **ChatGPT** (through Codex) subscription in **Settings → Assistant**, or use any **OpenRouter** model with your OpenRouter key, then ask in **Chat** in plain words. Pick the model for each message from the model menu.
+- The assistant uses BridgeClip's own tools: it can start clipping jobs, browse and tidy the Library, export Review & edit clips, build and run automations, post or schedule clips and adjust settings.
+- It can find YouTube videos by channel or search ("clip the latest BridgeMind video"), search the web and read web pages.
+- Anything that publishes, deletes or spends OpenRouter credit on clipping shows an approval card first. The assistant has no shell or file access.
+
 ### Understand each run
 
 - Follow processing stages, candidate progress and the saved time breakdown in Jobs.
@@ -99,6 +106,7 @@ Use footage you have permission to use. See the [user guide](docs/usage.md) for 
 
 - **Bring your own accounts.** AI calls bill your OpenRouter account. Optional social publishing uses your Zernio account and uploads selected clips to its service.
 - **Choose additional analysis.** Jev review for Automatic, source web research and additional visual context are opt-in betas. Review & edit always uses Jev; these features can add provider cost.
+- **Chat uses your own account.** The assistant runs your signed-in Claude Code or Codex CLI on this computer, or calls an OpenRouter model with your key. Your messages and the tool results it reads (titles, transcripts, account names) go to Anthropic, OpenAI or OpenRouter under that account; BridgeClip never sees your Claude or ChatGPT sign-in. Chatting on OpenRouter, and its web searches, are billed to your OpenRouter key.
 - **Keep control of local data.** Keys use operating-system secure storage. Run folders retain transcripts and edit records; editor projects also retain a source copy and playback preview.
 
 Read [AI, costs and privacy](docs/ai-and-privacy.md) for provider data flows, review behavior and storage cleanup.
@@ -112,6 +120,7 @@ Read [AI, costs and privacy](docs/ai-and-privacy.md) for provider data flows, re
 | Understand AI reviews, costs and stored data | [AI and privacy](docs/ai-and-privacy.md) |
 | Choose models or understand transcription retries | [Model selection and transcription](docs/transcription.md) |
 | Prepare publishing drafts and automate posts | [Publishing and metadata](docs/automation-metadata.md) |
+| Connect Claude, ChatGPT or OpenRouter and chat with BridgeClip | [Assistant](docs/assistant.md) |
 | Build, test or package the app | [Development](docs/development.md) · [Releasing](docs/RELEASING.md) |
 
 ## Develop

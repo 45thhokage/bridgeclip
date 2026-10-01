@@ -4,6 +4,7 @@ import type { ClipJobConfig } from './pipeline-runner'
 import { isWebUrl } from './security'
 import { CLIP_REQUEST_MAX_CHARS, DURATION_IDS, isVideoSpeed } from '../shared/job-contract'
 import { isModelId } from '../shared/openrouter-models'
+import type { ClipJobRequest } from '../shared/jobs'
 
 // Trims what Python's str.strip() also treats as whitespace (\x1c-\x1f, \x85),
 // so the bridge never receives a request it considers blank.
@@ -40,5 +41,13 @@ export function validateJobConfig(value: unknown): ClipJobConfig {
   if (v.bannerChannelUrl !== null && (!isWebUrl(v.bannerChannelUrl) || v.bannerChannelUrl.length > 8192)) throw new Error('Invalid banner URL')
   // Capabilities are looked up in main after validation, never accepted from the renderer.
   const clipRequest = v.clipRequest === undefined ? undefined : trimClipRequest(v.clipRequest) || undefined
-  return { ...v, videoUrl: normalizeVideoSource(v.videoUrl), videoSpeed: v.videoSpeed ?? 1, includeTitle: v.includeTitle ?? true, clipRequest, plannerCapabilities: undefined }
+  // Only known fields continue: a misspelled option must not ride along in the job record.
+  const known = Object.fromEntries(JOB_REQUEST_FIELDS.filter((key) => v[key] !== undefined).map((key) => [key, v[key]])) as unknown as ClipJobConfig
+  return { ...known, videoUrl: normalizeVideoSource(v.videoUrl), videoSpeed: v.videoSpeed ?? 1, includeTitle: v.includeTitle ?? true, clipRequest, plannerCapabilities: undefined }
 }
+
+const JOB_REQUEST_FIELDS: readonly (keyof ClipJobRequest)[] = [
+  'workflow', 'videoUrl', 'clippingMode', 'plannerModel', 'transcriptionModel', 'clipRequest', 'maxClips', 'autoClipCount',
+  'durationRanges', 'aspectRatio', 'layoutStyle', 'layoutVision', 'pacing', 'videoSpeed', 'includeCaptions', 'captionPreset',
+  'includeTitle', 'startTimeSeconds', 'endTimeSeconds', 'bannerPlatform', 'bannerChannelUrl'
+]

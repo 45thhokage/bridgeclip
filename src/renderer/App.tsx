@@ -9,12 +9,17 @@ import { SettingsPage } from './pages/SettingsPage'
 import { AccountsPage } from './pages/AccountsPage'
 import { PostsPage } from './pages/PostsPage'
 import { AutomationsPage } from './pages/AutomationsPage'
+import { AssistantPage } from './pages/AssistantPage'
 import { BridgeClipLogo } from './components/brand/BridgeClipLogo'
 import { useSettingsStore } from './store/use-settings-store'
 import { useJobStore } from './store/use-job-store'
 import { useSidebarStore } from './store/use-sidebar-store'
 import { useUpdateStore } from './store/use-update-store'
 import { useChangelogStore } from './store/use-changelog-store'
+import { useAssistantStore } from './store/use-assistant-store'
+import { useDataVersionStore } from './store/use-data-version-store'
+import { usePostsStore } from './store/use-posts-store'
+import { requestSettingsSection } from './lib/settings-focus'
 import { ChangelogDialog } from './components/Changelog'
 import { Button } from './components/ui/Button'
 import { getApi } from './lib/ipc'
@@ -72,6 +77,34 @@ export default function App(): React.JSX.Element {
     return unsubscribe
   }, [])
 
+  // The assistant runs in the main process: mirror its events whichever page
+  // is open, refresh pages whose data it changed, and follow its navigation.
+  useEffect(() => {
+    const api = getApi()
+    const assistant = useAssistantStore.getState()
+    const unsubscribes = [
+      api.assistant.onEvent((event) => useAssistantStore.getState().apply(event)),
+      api.assistant.onStatus((status) => useAssistantStore.getState().applyStatus(status)),
+      api.assistant.signIn.onState((state) => useAssistantStore.getState().applySignIn(state)),
+      api.app.onDataChanged((scope) => {
+        useDataVersionStore.getState().bump(scope)
+        if (scope === 'settings') void useSettingsStore.getState().load().catch(() => {})
+        if (scope === 'posts') void usePostsStore.getState().load().catch(() => {})
+      }),
+      api.app.onNavigate(({ page: destination, runDir }) => {
+        if (runDir) viewLibraryRun(runDir)
+        else navigateRoot(destination)
+      })
+    ]
+    void assistant.init().catch(() => {})
+    return () => unsubscribes.forEach((unsubscribe) => unsubscribe())
+  }, [navigateRoot, viewLibraryRun])
+
+  const openAssistantSettings = useCallback((section: 'assistant' | 'keys' = 'assistant'): void => {
+    requestSettingsSection(section)
+    navigateRoot('settings')
+  }, [navigateRoot])
+
   // Update state lives in the main process, which keeps checking in the
   // background. Subscribe first, then read it, so no change is missed.
   useEffect(() => {
@@ -94,7 +127,7 @@ export default function App(): React.JSX.Element {
     useChangelogStore.getState().setOpen(true)
   }), [])
 
-  // ⌘1 Create, ⌘2 Library, ⌘3 Jobs, ⌘4 Accounts, ⌘5 Posts, ⌘6 Automations, ⌘, Settings,
+  // ⌘1 Create, ⌘2 Library, ⌘3 Jobs, ⌘4 Accounts, ⌘5 Posts, ⌘6 Automations, ⌘7 Chat, ⌘, Settings,
   // ⌘\ collapse or expand the sidebar (Ctrl on Windows/Linux).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
@@ -126,6 +159,7 @@ export default function App(): React.JSX.Element {
             {page === 'clip' && <ClipPage onNavigate={setPage} />}
             {page === 'library' && <LibraryPage onNavigate={setPage} initialRun={libraryRun?.outputDir} initialClipIndex={libraryRun?.clipIndex} />}
             {page === 'jobs' && <JobsPage onNavigate={setPage} onViewLibrary={viewLibraryRun} />}
+            {page === 'assistant' && <AssistantPage onOpenSettings={openAssistantSettings} />}
             {page === 'accounts' && <AccountsPage onNavigate={setPage} />}
             {page === 'posts' && <PostsPage onNavigate={setPage} />}
             {page === 'automations' && <AutomationsPage onNavigate={setPage} onViewLibrary={viewLibraryRun} />}

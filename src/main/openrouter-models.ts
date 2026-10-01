@@ -16,6 +16,37 @@ function number(value: unknown, positive = false): number | null {
   return Number.isFinite(n) && (positive ? n > 0 : n >= 0) ? n : null
 }
 
+function modelName(raw: Record<string, unknown>): string {
+  return typeof raw.name === 'string' ? raw.name.slice(0, 160).split('').filter((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127).join('') : String(raw.id)
+}
+
+/** Models that can run the chat assistant: text in and out, with tool calling. Others are left out; they can't act. */
+export function parseAssistantModels(value: unknown): OpenRouterModel[] {
+  const data = record(value).data
+  if (!Array.isArray(data) || data.length > 10000) throw new Error('OpenRouter returned an invalid model catalog.')
+  const models = new Map<string, OpenRouterModel>()
+  for (const entry of data) {
+    const raw = record(entry)
+    const architecture = record(raw.architecture)
+    const inputs = Array.isArray(architecture.input_modalities) ? architecture.input_modalities : []
+    const outputs = Array.isArray(architecture.output_modalities) ? architecture.output_modalities : []
+    const parameters = Array.isArray(raw.supported_parameters) ? raw.supported_parameters : []
+    if (!isModelId(raw.id) || !inputs.includes('text') || !outputs.includes('text') || !parameters.includes('tools')) continue
+    const pricing = record(raw.pricing)
+    models.set(raw.id, {
+      id: raw.id,
+      name: modelName(raw),
+      contextLength: number(raw.context_length, true),
+      maxOutputTokens: number(record(raw.top_provider).max_completion_tokens, true),
+      supportsImages: inputs.includes('image'),
+      inputPrice: number(pricing.prompt),
+      outputPrice: number(pricing.completion),
+      unavailableReason: null
+    })
+  }
+  return [...models.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
 export function parseModelCatalog(value: unknown, task: ModelTask): OpenRouterModel[] {
   const data = record(value).data
   if (!Array.isArray(data) || data.length > 10000) throw new Error('OpenRouter returned an invalid model catalog.')
@@ -38,7 +69,7 @@ export function parseModelCatalog(value: unknown, task: ModelTask): OpenRouterMo
     const pricing = record(raw.pricing)
     models.set(raw.id, {
       id: raw.id,
-      name: typeof raw.name === 'string' ? raw.name.slice(0, 160).split('').filter((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127).join('') : raw.id,
+      name: modelName(raw),
       contextLength: number(raw.context_length, true),
       maxOutputTokens: number(record(raw.top_provider).max_completion_tokens, true),
       supportsImages: inputs.includes('image'),
@@ -52,17 +83,17 @@ export function parseModelCatalog(value: unknown, task: ModelTask): OpenRouterMo
   return [...models.values()].sort((a, b) => Number(Boolean(a.unavailableReason)) - Number(Boolean(b.unavailableReason)) || a.name.localeCompare(b.name))
 }
 
-async function fetchModels(task: ModelTask): Promise<OpenRouterModel[]> {
+async function fetchCatalog<T>(modality: 'text' | 'transcription', parse: (value: unknown) => T): Promise<T> {
   try {
     // This is a public, read-only catalog. No API key or user-provided URL leaves the main process.
-    const response = await fetch(`https://openrouter.ai/api/v1/models?output_modalities=${task === 'planning' ? 'text' : 'transcription'}`, {
+    const response = await fetch(`https://openrouter.ai/api/v1/models?output_modalities=${modality}`, {
       redirect: 'error', signal: AbortSignal.timeout(15000), headers: { Accept: 'application/json' }
     })
     if (!response.ok) {
       await response.body?.cancel()
       throw new Error('Model catalog unavailable')
     }
-    return parseModelCatalog(JSON.parse(await readResponseText(response, 8 * 1024 * 1024)), task)
+    return parse(JSON.parse(await readResponseText(response, 8 * 1024 * 1024)))
   } catch {
     throw new Error('Could not load OpenRouter models. Check your connection and refresh the model list.')
   }
@@ -72,8 +103,12 @@ export async function getModelCatalog(refresh: unknown = false): Promise<OpenRou
   if (typeof refresh !== 'boolean') throw new Error('Invalid model refresh option')
   if (pending) return pending
   if (!refresh && cached && Date.now() - Date.parse(cached.fetchedAt) < CACHE_MS) return cached
-  pending = Promise.all([fetchModels('planning'), fetchModels('transcription')]).then(([planning, transcription]) => {
-    cached = { planning, transcription, fetchedAt: new Date().toISOString() }
+  pending = Promise.all([
+    // One text catalog serves clip planning and the chat assistant.
+    fetchCatalog('text', (value) => ({ planning: parseModelCatalog(value, 'planning'), assistant: parseAssistantModels(value) })),
+    fetchCatalog('transcription', (value) => parseModelCatalog(value, 'transcription'))
+  ]).then(([text, transcription]) => {
+    cached = { ...text, transcription, fetchedAt: new Date().toISOString() }
     return cached
   })
   try { return await pending } finally { pending = null }

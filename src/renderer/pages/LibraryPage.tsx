@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Bookmark, Clapperboard, FolderOpen, ListVideo, Pencil, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react'
 import { getApi } from '../lib/ipc'
+import { useDataVersion } from '../store/use-data-version-store'
 import { cn, errorMessage, formatRelativeDate, formatUsd, localFileUrl } from '../lib/utils'
 import { clipFilePath, loadThumbnail } from '../lib/thumbnails'
 import { useSettingsStore } from '../store/use-settings-store'
@@ -78,6 +79,24 @@ export function LibraryPage({ onNavigate, initialRun, initialClipIndex }: { onNa
     void load()
     return () => { requestId.current++; openRequestId.current++ }
   }, [load, outputDirectory])
+
+  // The assistant changed the Library (deleted clips, marked posted, exported): reload what's shown.
+  const libraryVersion = useDataVersion('library')
+  const seenLibraryVersion = useRef(libraryVersion)
+  const openRef = useRef(open)
+  openRef.current = open
+  useEffect(() => {
+    if (libraryVersion === seenLibraryVersion.current) return
+    seenLibraryVersion.current = libraryVersion
+    void load()
+    const current = openRef.current
+    if (!current) return
+    void getApi().history.getJob(current.entry.outputDir).then((output) => {
+      if (openRef.current?.entry.outputDir !== current.entry.outputDir) return
+      const parsed = output ? parseJobOutput(output) : null
+      setOpen(parsed ? { ...openRef.current, output: parsed } : null)
+    }).catch(() => {})
+  }, [libraryVersion, load])
 
   useEffect(() => {
     if (!configured || open) return

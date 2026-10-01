@@ -42,6 +42,7 @@ function ipcWithLibrary(library) {
     './run-history': {},
     './pipeline-runner': {},
     './job-manager': { initJobManager() {} },
+    './job-start': {},
     './logger': {},
     './security': security,
     './network-policy': {},

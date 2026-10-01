@@ -15,6 +15,7 @@ import { cancelQueuedJobsForQuit } from './job-manager'
 import { cancelZernioConnect } from './zernio/service'
 import { isAutomationMedia, startAutomationScheduler } from './automations'
 import { sweepDeletingRuns } from './library-management'
+import { registerAssistant, type AssistantRuntime } from './assistant/ipc'
 
 // Catch crashes anywhere in the main process so we get a log line instead
 // of a silent exit. Without these, an unhandled rejection in an IPC handler
@@ -27,6 +28,7 @@ process.on('unhandledRejection', (reason) => {
 })
 
 let mainWindow: BrowserWindow | null = null
+let assistant: AssistantRuntime | null = null
 
 // Development-only: isolated settings (and single-instance lock) for
 // end-to-end tests, so a test run never touches the developer's real app.
@@ -272,6 +274,7 @@ app.whenReady().then(() => {
   })
 
   registerIpcHandlers(() => mainWindow)
+  assistant = registerAssistant(() => mainWindow)
   const stopAutomations = startAutomationScheduler()
   void sweepDeletingRuns()
   app.on('before-quit', stopAutomations)
@@ -296,6 +299,7 @@ app.on('window-all-closed', () => {
 
 // Stop work only once the quit is certain: an unsaved-edits prompt can still cancel it.
 app.on('will-quit', () => {
+  void assistant?.shutdown()
   stopEditorsForQuit()
   cancelQueuedJobsForQuit()
   stopAllJobsForQuit()
