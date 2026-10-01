@@ -37,7 +37,6 @@ from clip_engine.services.layout_renderer import (
     build_layout_graph,
     caption_anchor,
     cam_crop,
-    panel_fit,
     person_crop,
     piecewise_expr,
     screen_crop,
@@ -273,8 +272,7 @@ class TestGeometry:
         assert x >= mid - 2 and x + w <= SRC_W
         # Face kept at or above ~58% of the panel even near the bottom edge.
         assert (right.cy * SRC_H - y) / h <= 0.6
-        fit_w, fit_h = panel_fit((w, h, x, y), 1080, 960) or (1080, 960)
-        assert fit_w / fit_h == pytest.approx(w / h, rel=0.02)
+        assert w / h == pytest.approx(1080 / 960, rel=0.02)
 
     def test_cam_crop_stays_inside_webcam(self):
         cam = Box(0.75, 0.72, 0.22, 0.22)
@@ -282,27 +280,29 @@ class TestGeometry:
         assert x >= cam.x * SRC_W - 2 and x + w <= (cam.x + cam.w) * SRC_W + 2
         assert y >= cam.y * SRC_H - 2 and y + h <= (cam.y + cam.h) * SRC_H + 2
 
-    def test_cam_crop_never_exceeds_max_upscale(self):
-        # A small webcam (the old estimate): filling a 1080x960 panel meant 5.3x.
+    def test_small_cam_still_fills_its_panel(self):
+        # A small webcam is enlarged past MAX_UPSCALE rather than letterboxed.
         tiny = Box(0.758, 0.764, 0.168, 0.168)
-        rect = cam_crop(tiny, CAM_FACE, SRC_W, SRC_H, 1080, 960)
-        fit = panel_fit(rect, 1080, 960)
-        assert fit is not None
-        assert fit[0] / rect[0] <= MAX_UPSCALE + 0.02 and fit[1] / rect[1] <= MAX_UPSCALE + 0.02
-        assert fit[0] <= 1080 and fit[1] <= 960
+        w, h, x, y = cam_crop(tiny, CAM_FACE, SRC_W, SRC_H, 1080, 960)
+        assert w / h == pytest.approx(1080 / 960, rel=0.02)
+        assert x >= tiny.x * SRC_W - 2 and x + w <= (tiny.x + tiny.w) * SRC_W + 2
+        assert y >= tiny.y * SRC_H - 2 and y + h <= (tiny.y + tiny.h) * SRC_H + 2
 
     def test_big_enough_cam_fills_panel(self):
         cam = Box(0.62, 0.55, 0.36, 0.43)
         rect = cam_crop(cam, None, SRC_W, SRC_H, 1080, 960)
-        assert panel_fit(rect, 1080, 960) is None
+        assert rect[0] / rect[1] == pytest.approx(1080 / 960, rel=0.02)
         assert 1080 / rect[0] <= MAX_UPSCALE
 
-    def test_small_cam_panel_is_letterboxed_over_blur(self):
+    def test_small_cam_panel_fills_without_blurred_fill(self):
         shot = ShotLayout(0, 1000, LayoutType.SCREEN_CAM, cam_box=Box(0.758, 0.764, 0.168, 0.168),
                           cam_face=CAM_FACE, screen_box=Box(0, 0, 1, 1))
+        top_h, bottom_h = stacked_panel_heights(shot, SRC_H, 1920)
         chain = shot_chain(0, shot, SRC_W, SRC_H, 1080, 1920)
-        assert "gblur" in chain and "[cbg0][cfg0]overlay=" in chain
+        assert "gblur" not in chain and "overlay=" not in chain
+        assert f"scale=1080:{bottom_h}:flags=lanczos[bot0]" in chain
         assert chain.endswith("vstack=inputs=2,setsar=1[v0]")
+        assert shot_views(shot, 500, SRC_W, SRC_H, 1080, 1920)[1][1] == (0, top_h, 1080, bottom_h)
 
     @pytest.mark.parametrize(
         ("cam", "expected_top"),
@@ -338,7 +338,7 @@ class TestGeometry:
         shot = ShotLayout(0, 1000, LayoutType.SCREEN_CAM, cam_box=cam)
         _, bottom_h = stacked_panel_heights(shot, SRC_H, 1920)
         rect = cam_crop(cam, None, SRC_W, SRC_H, 1080, bottom_h)
-        assert panel_fit(rect, 1080, bottom_h) is None
+        assert rect[0] / rect[1] == pytest.approx(1080 / bottom_h, rel=0.02)
         assert max(1080 / rect[0], bottom_h / rect[1]) <= MAX_UPSCALE * 1.02
 
     def test_screen_crop_narrows_when_it_cannot_slide(self):

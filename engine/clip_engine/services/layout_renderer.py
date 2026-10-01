@@ -31,6 +31,8 @@ TWO_SHOT_TOP_RATIO = 0.5
 SCREEN_CAM_TOP_RATIO = 0.6
 MAX_SCREEN_CAM_TOP_RATIO = 0.7
 # Never upscale a crop more than this (beyond it faces/text turn to mush).
+# The webcam panel is the exception: it always fills its panel, and the split
+# shrinks that panel for small webcams instead (stacked_panel_heights).
 MAX_UPSCALE = 2.6
 # How much of a face-box height a person crop spans (head + shoulders).
 PERSON_CROP_FACE_MULT = 3.2
@@ -169,12 +171,12 @@ def person_crop(
 
 
 def cam_crop(cam: Box, face: Optional[Box], src_w: int, src_h: int, panel_w: int, panel_h: int) -> tuple[int, int, int, int]:
-    """Crop inside the webcam overlay, centered on the face.
+    """Crop inside the webcam overlay at the panel's aspect, centered on the face.
 
-    At the panel's aspect when filling the panel stays within MAX_UPSCALE.
-    A webcam too small for that keeps as much of the overlay as fits the
-    panel at MAX_UPSCALE instead; `panel_fit` then letterboxes it over a
-    blurred fill rather than blowing the face up to mush.
+    The crop always fills the webcam panel edge to edge, so a small webcam is
+    enlarged past MAX_UPSCALE rather than shown smaller over a blurred fill.
+    stacked_panel_heights already gives a small webcam a shorter panel, which
+    limits that enlargement.
     """
     aspect = panel_w / panel_h
     # Dimensions round down, but the left/top bounds must round INWARD.
@@ -186,34 +188,24 @@ def cam_crop(cam: Box, face: Optional[Box], src_w: int, src_h: int, panel_w: int
     bottom = int((cam.y + cam.h) * src_h) // 2 * 2
     bounds = (left, top, max(2, right - left), max(2, bottom - top))
     bw, bh = bounds[2], bounds[3]
+    # The largest panel-aspect crop inside the overlay.
     if bw / bh > aspect:
         crop_h, crop_w = bh, bh * aspect
     else:
         crop_w, crop_h = bw, bw / aspect
-    if panel_w / crop_w > MAX_UPSCALE:
-        crop_w, crop_h = min(bw, panel_w / MAX_UPSCALE), min(bh, panel_h / MAX_UPSCALE)
     fx = (face.cx if face else cam.cx) * src_w
     fy = (face.cy if face else cam.cy) * src_h
     if face and cam.contains(face.cx, face.cy):
+        # Ignore small off-center poses. For larger offsets, tighten toward a
+        # crop centered on the face, but only as far as the panel still fills
+        # within MAX_UPSCALE: centering never makes a small webcam blurrier.
         centered_w = 2 * min(fx - left, right - fx)
-        centered_h = centered_w / aspect
-        # Ignore small off-center poses. For larger offsets, tighten within
-        # the real camera bounds. panel_fit still caps enlargement and adds
-        # a centered blurred fill if the resulting crop is too small.
-        if (centered_w < crop_w * .9 and centered_w >= face.w * src_w * 1.5
-                and centered_h >= face.h * src_h * 1.8):
-            crop_w, crop_h = centered_w, min(crop_h, centered_h)
+        tight_w = max(centered_w, panel_w / MAX_UPSCALE)
+        tight_h = tight_w / aspect
+        if (centered_w < crop_w * .9 and tight_w < crop_w and tight_w >= face.w * src_w * 1.5
+                and tight_h >= face.h * src_h * 1.8):
+            crop_w, crop_h = tight_w, tight_h
     return _fit_rect(fx, fy + crop_h * (0.5 - PERSON_FACE_Y), crop_w, crop_h, bounds)
-
-
-def panel_fit(rect: tuple[int, int, int, int], panel_w: int, panel_h: int) -> Optional[tuple[int, int]]:
-    """Scaled size of a crop that can't fill its panel within MAX_UPSCALE, else None."""
-    w, h = rect[0], rect[1]
-    fill = max(panel_w / w, panel_h / h)
-    if fill <= MAX_UPSCALE * 1.02 and abs(w / h - panel_w / panel_h) <= 0.02 * panel_w / panel_h:
-        return None
-    scale = min(panel_w / w, panel_h / h, MAX_UPSCALE)
-    return even(w * scale), even(h * scale)
 
 
 def stacked_panel_heights(shot: ShotLayout, src_h: int, out_h: int) -> tuple[int, int]:
@@ -221,7 +213,7 @@ def stacked_panel_heights(shot: ShotLayout, src_h: int, out_h: int) -> tuple[int
 
     A webcam's source height limits how tall its destination can be before it
     must be enlarged beyond MAX_UPSCALE. Keep at least 30% for the webcam;
-    panel_fit will letterbox overlays that are smaller still (or too narrow).
+    overlays smaller still fill that panel anyway, enlarged further.
     The same seam is used by the graph and caption placement.
     """
     if shot.layout != LayoutType.SCREEN_CAM or shot.cam_box is None:
@@ -453,27 +445,14 @@ def shot_chain(
             f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[v{i}]"
         )
     if shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None:
+        # The webcam always fills its panel edge to edge (see cam_crop).
         cam_rect = cam_crop(shot.cam_box, shot.cam_face, src_w, src_h, out_w, bottom_h)
-        fit = panel_fit(cam_rect, out_w, bottom_h)
-        if fit is None:
-            cam_panel = f"[sb{i}]{_crop(cam_rect)},scale={out_w}:{bottom_h}:{scale}[bot{i}]"
-        else:
-            # Small webcam: show it at MAX_UPSCALE over a blurred fill of itself.
-            fit_w, fit_h = fit
-            bg_w, bg_h = even(out_w // 4), even(bottom_h // 4)
-            cam_panel = (
-                f"[sb{i}]{_crop(cam_rect)},split=2[cb{i}][cf{i}];"
-                f"[cb{i}]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,crop={bg_w}:{bg_h},"
-                f"gblur=sigma=10,lutyuv=y=val-20,scale={out_w}:{bottom_h}[cbg{i}];"
-                f"[cf{i}]scale={fit_w}:{fit_h}:{scale}[cfg{i}];"
-                f"[cbg{i}][cfg{i}]overlay={(out_w - fit_w) // 2}:{(bottom_h - fit_h) // 2}[bot{i}]"
-            )
         screen_rect, _ = screen_view(shot, src_w, src_h, out_w, top_h)
         return (
             f"[t{i}]split=2[sa{i}][sb{i}];"
             f"[sa{i}]{_crop(screen_rect)},"
             f"scale={out_w}:{top_h}:{scale}[top{i}];"
-            f"{cam_panel};"
+            f"[sb{i}]{_crop(cam_rect)},scale={out_w}:{bottom_h}:{scale}[bot{i}];"
             f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[v{i}]"
         )
 
@@ -802,14 +781,9 @@ def shot_views(
     if shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None:
         screen, screen_dest = screen_view(shot, src_w, src_h, out_w, top_h)
         cam = cam_crop(shot.cam_box, shot.cam_face, src_w, src_h, out_w, bottom_h)
-        fit = panel_fit(cam, out_w, bottom_h)
-        if fit is None:
-            cam_dest = (0, top_h, out_w, bottom_h)
-        else:
-            cam_dest = ((out_w - fit[0]) // 2, top_h + (bottom_h - fit[1]) // 2, fit[0], fit[1])
         return [
             ((screen[2], screen[3], screen[0], screen[1]), screen_dest),
-            ((cam[2], cam[3], cam[0], cam[1]), cam_dest),
+            ((cam[2], cam[3], cam[0], cam[1]), (0, top_h, out_w, bottom_h)),
         ]
 
     scaled_h, overlay_y = letterbox_geometry(src_w, src_h, out_w, out_h)

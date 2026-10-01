@@ -36,6 +36,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 - Unattended posts no longer use text from the source video's description, and refuse web addresses or @handles that aren't said in the video.
 - Deleting a clip also removes its caption and YouTube text files.
 - A missing transcript shows a clear message, and research citations can be selected and copied.
+- Screen + webcam clips fill the bottom panel with the webcam, instead of showing a small webcam over a blurred copy of itself when the webcam in the source video is small.
 
 ## [0.1.19] - 2026-09-27
 

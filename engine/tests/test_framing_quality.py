@@ -23,7 +23,6 @@ from clip_engine.services.layout_renderer import (
     MAX_UPSCALE,
     cam_crop,
     fill_crop,
-    panel_fit,
     person_crop,
     screen_crop,
     stacked_panel_heights,
@@ -135,9 +134,9 @@ def test_golden_auto_framing(case: GoldenCase) -> None:
         top_h, bottom_h = stacked_panel_heights(shot, case.height, OUT_H)
         cam_rect = cam_crop(shot.cam_box, shot.cam_face, case.width, case.height, OUT_W, bottom_h)
         assert face_visible_fraction(case.faces[0], cam_rect, case.width, case.height) >= 0.95
-        fitted = panel_fit(cam_rect, OUT_W, bottom_h)
-        shown_w, shown_h = fitted or (OUT_W, bottom_h)
-        assert max(shown_w / cam_rect[0], shown_h / cam_rect[1]) <= MAX_UPSCALE * 1.02
+        # The webcam fills its whole panel; these fixtures do so within MAX_UPSCALE.
+        assert cam_rect[0] / cam_rect[1] == pytest.approx(OUT_W / bottom_h, rel=0.02)
+        assert max(OUT_W / cam_rect[0], bottom_h / cam_rect[1]) <= MAX_UPSCALE * 1.02
 
         screen_rect = screen_crop(
             shot.screen_box, shot.screen_focus, case.width, case.height, OUT_W, top_h, shot.cam_box
