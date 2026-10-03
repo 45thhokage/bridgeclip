@@ -1,4 +1,5 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS, type JevThresholdSettings } from '../shared/jev-settings'
+import { PLANNING_DEFAULTS, mergePlanningSettings, normalizePlanningSettings, type PlanningKeyName, type PlanningSettings } from '../shared/planning'
 import { TRANSCRIPTION_DEFAULTS, mergeTranscriptionSettings, normalizeTranscriptionSettings, type TranscriptionSettings } from '../shared/transcription'
 import { app, safeStorage } from 'electron'
 import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
@@ -29,15 +30,25 @@ export interface AppSettings extends JevThresholdSettings {
    * optional runtime and a downloaded model; planning still uses OpenRouter.
    */
   transcription: TranscriptionSettings
+  /** Where clip planning runs: OpenRouter, another cloud provider, or a local server. */
+  planning: PlanningSettings
+  /** OpenCode Zen and OpenCode Go share one key type; each provider keeps its own saved copy. */
+  opencodeZenApiKey: string
+  opencodeGoApiKey: string
+  /** Optional key for a custom cloud endpoint or a custom local server. */
+  planningCustomApiKey: string
+  planningLocalApiKey: string
 }
 
-export type ApiKeyName = 'openrouterApiKey' | 'zernioApiKey'
-export type PublicSettings = Pick<AppSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | 'transcription' | keyof JevThresholdSettings> & {
+export type ApiKeyName = 'openrouterApiKey' | 'zernioApiKey' | 'opencodeZenApiKey' | 'opencodeGoApiKey' | 'planningCustomApiKey' | 'planningLocalApiKey'
+export type PublicSettings = Pick<AppSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | 'transcription' | 'planning' | keyof JevThresholdSettings> & {
   openrouterConfigured: boolean
   zernioConfigured: boolean
+  /** Which planning provider keys exist, including OpenRouter. Never the key value. */
+  planningKeysConfigured: Record<PlanningKeyName | 'openrouter', boolean>
 }
 
-const SECRET_KEYS = ['openrouterApiKey', 'zernioApiKey'] as const
+const SECRET_KEYS = ['openrouterApiKey', 'zernioApiKey', 'opencodeZenApiKey', 'opencodeGoApiKey', 'planningCustomApiKey', 'planningLocalApiKey'] as const
 type SecretKey = (typeof SECRET_KEYS)[number]
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -48,10 +59,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   outputDirectory: join(app.getPath('home'), 'BridgeClip'),
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
   customVocabulary: '',
-  transcription: { ...TRANSCRIPTION_DEFAULTS }
+  transcription: { ...TRANSCRIPTION_DEFAULTS },
+  planning: { ...PLANNING_DEFAULTS },
+  opencodeZenApiKey: '',
+  opencodeGoApiKey: '',
+  planningCustomApiKey: '',
+  planningLocalApiKey: ''
 }
 
-const SETTINGS_VERSION = 13
+const SETTINGS_VERSION = 14
 /**
  * Versions 9-11 (pre-release builds of this feature) saved Jev review and web
  * research as on by default, and older versions drop the fields entirely, so a
@@ -73,6 +89,11 @@ interface PersistedSettings extends JevThresholdSettings {
   pythonPath: string
   customVocabulary?: string
   transcription?: TranscriptionSettings
+  planning?: PlanningSettings
+  opencodeZenApiKey?: PersistedSecret
+  opencodeGoApiKey?: PersistedSecret
+  planningCustomApiKey?: PersistedSecret
+  planningLocalApiKey?: PersistedSecret
 }
 
 function ensureDir(dir: string): string {
@@ -89,7 +110,7 @@ function getSettingsPath(): string {
 function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
   if (!settings || typeof settings !== 'object') throw new Error('Invalid settings')
   for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof AppSettings)[]) {
-    if (key === 'transcription') continue
+    if (key === 'transcription' || key === 'planning') continue
     if (settings[key] !== undefined && (typeof settings[key] !== 'string' || settings[key]!.length > 8192 || settings[key]!.includes('\0'))) throw new Error(`Invalid ${key}`)
   }
   const normalized: AppSettings = {
@@ -109,7 +130,12 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     outputDirectory: (settings.outputDirectory || DEFAULT_SETTINGS.outputDirectory).trim(),
     pythonPath: (settings.pythonPath || DEFAULT_SETTINGS.pythonPath).trim(),
     customVocabulary: vocabularyTerms(settings.customVocabulary ?? DEFAULT_SETTINGS.customVocabulary).join('\n'),
-    transcription: normalizeTranscriptionSettings(settings.transcription)
+    transcription: normalizeTranscriptionSettings(settings.transcription),
+    planning: normalizePlanningSettings(settings.planning),
+    opencodeZenApiKey: (settings.opencodeZenApiKey ?? '').trim(),
+    opencodeGoApiKey: (settings.opencodeGoApiKey ?? '').trim(),
+    planningCustomApiKey: (settings.planningCustomApiKey ?? '').trim(),
+    planningLocalApiKey: (settings.planningLocalApiKey ?? '').trim()
   }
   for (const key of Object.keys(JEV_DEFAULTS) as (keyof JevThresholdSettings)[]) {
     const value = probability(normalized[key])
@@ -203,7 +229,7 @@ export function loadSettings(): AppSettings {
 
   try {
     const raw = JSON.parse(readFileSync(path, 'utf-8'))
-    let needsMigration = raw.version !== SETTINGS_VERSION || Object.hasOwn(raw, 'elevenLabsApiKey') || Object.hasOwn(raw, 'typesafeApiKey') || Object.hasOwn(raw, 'transcription') === false
+    let needsMigration = raw.version !== SETTINGS_VERSION || Object.hasOwn(raw, 'elevenLabsApiKey') || Object.hasOwn(raw, 'typesafeApiKey') || Object.hasOwn(raw, 'transcription') === false || Object.hasOwn(raw, 'planning') === false
     const secrets = {} as Record<SecretKey, string>
     for (const key of SECRET_KEYS) {
       const decoded = decodeSecret(raw[key])
@@ -217,7 +243,8 @@ export function loadSettings(): AppSettings {
       outputDirectory: typeof raw.outputDirectory === 'string' ? raw.outputDirectory : DEFAULT_SETTINGS.outputDirectory,
       pythonPath: typeof raw.pythonPath === 'string' ? raw.pythonPath : DEFAULT_SETTINGS.pythonPath,
       customVocabulary: typeof raw.customVocabulary === 'string' ? raw.customVocabulary : DEFAULT_SETTINGS.customVocabulary,
-      transcription: normalizeTranscriptionSettings(raw.transcription)
+      transcription: normalizeTranscriptionSettings(raw.transcription),
+      planning: normalizePlanningSettings(raw.planning)
     })
 
     if (needsMigration && canEncrypt()) writeSettings(settings)
@@ -249,7 +276,12 @@ function writeSettings(settings: AppSettings): void {
     outputDirectory: settings.outputDirectory,
     pythonPath: settings.pythonPath,
     customVocabulary: settings.customVocabulary,
-    transcription: settings.transcription
+    transcription: settings.transcription,
+    planning: settings.planning,
+    opencodeZenApiKey: encodeSecret(settings.opencodeZenApiKey),
+    opencodeGoApiKey: encodeSecret(settings.opencodeGoApiKey),
+    planningCustomApiKey: encodeSecret(settings.planningCustomApiKey),
+    planningLocalApiKey: encodeSecret(settings.planningLocalApiKey)
   }
 
   let fd: number | undefined
@@ -290,11 +322,19 @@ export function publicSettings(settings: AppSettings): PublicSettings {
     jevEnabled: settings.jevEnabled,
     jevVisualContext: settings.jevVisualContext,
     sourceContextWebResearch: settings.sourceContextWebResearch,
-    transcription: settings.transcription
+    transcription: settings.transcription,
+    planning: settings.planning,
+    planningKeysConfigured: {
+      openrouter: Boolean(settings.openrouterApiKey),
+      'opencode-zen': Boolean(settings.opencodeZenApiKey),
+      'opencode-go': Boolean(settings.opencodeGoApiKey),
+      custom: Boolean(settings.planningCustomApiKey),
+      local: Boolean(settings.planningLocalApiKey)
+    }
   }
 }
 
-export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | 'transcription' | keyof JevThresholdSettings>): PublicSettings {
+export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | 'transcription' | 'planning' | keyof JevThresholdSettings>): PublicSettings {
   const current = loadSettings()
   return publicSettings(saveSettings({
     ...current,
@@ -311,7 +351,8 @@ export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory
     jevEnabled: update.jevEnabled ?? current.jevEnabled,
     jevVisualContext: update.jevVisualContext ?? current.jevVisualContext,
     sourceContextWebResearch: update.sourceContextWebResearch ?? current.sourceContextWebResearch,
-    transcription: mergeTranscriptionSettings(current.transcription, update.transcription)
+    transcription: mergeTranscriptionSettings(current.transcription, update.transcription),
+    planning: mergePlanningSettings(current.planning, update.planning)
   }))
 }
 
@@ -344,6 +385,12 @@ export function saveTranscriptionSettings(update: Partial<TranscriptionSettings>
   return publicSettings(saveSettings({ ...current, transcription: mergeTranscriptionSettings(current.transcription, update) }))
 }
 
+/** Save just the clip-planning choice, without touching any other setting. */
+export function savePlanningSettings(update: Partial<PlanningSettings>): PublicSettings {
+  const current = loadSettings()
+  return publicSettings(saveSettings({ ...current, planning: mergePlanningSettings(current.planning, update) }))
+}
+
 export function replaceApiKey(key: ApiKeyName, value: string): PublicSettings {
   if (!SECRET_KEYS.includes(key) || typeof value !== 'string' || value.length > 8192 || value.includes('\0')) throw new Error('Invalid API key update')
   const current = loadSettings()
@@ -351,9 +398,12 @@ export function replaceApiKey(key: ApiKeyName, value: string): PublicSettings {
 }
 
 export function getSettingsForBridge(settings: AppSettings): Record<string, string> {
+  // Extras are OpenRouter-only. Without a key they are off for this run rather
+  // than failing mid-job; the renderer disables their controls for the same reason.
+  const hasOpenRouter = Boolean(settings.openrouterApiKey)
   return {
     OPENROUTER_API_KEY: settings.openrouterApiKey,
-    SOURCE_CONTEXT_WEB_RESEARCH: settings.sourceContextWebResearch !== 'off' ? 'true' : 'false',
+    SOURCE_CONTEXT_WEB_RESEARCH: hasOpenRouter && settings.sourceContextWebResearch !== 'off' ? 'true' : 'false',
     JEV_THRESHOLD: settings.jevThreshold,
     JEV_SELF_CONTAINED_THRESHOLD: settings.jevSelfContainedThreshold,
     JEV_FAITHFUL_TO_SOURCE_THRESHOLD: settings.jevFaithfulToSourceThreshold,
@@ -361,8 +411,8 @@ export function getSettingsForBridge(settings: AppSettings): Record<string, stri
     JEV_SPONSOR_THRESHOLD: settings.jevSponsorThreshold,
     JEV_EVIDENCE_THRESHOLD: settings.jevEvidenceThreshold,
     JEV_CUT_THRESHOLD: settings.jevCutThreshold,
-    JEV_ENABLED: settings.jevEnabled === 'on' ? 'true' : 'false',
-    JEV_VISUAL_CONTEXT: settings.jevVisualContext === 'on' ? 'true' : 'false',
+    JEV_ENABLED: hasOpenRouter && settings.jevEnabled === 'on' ? 'true' : 'false',
+    JEV_VISUAL_CONTEXT: hasOpenRouter && settings.jevVisualContext === 'on' ? 'true' : 'false',
     LOCAL_MODE: 'true',
     LOCAL_OUTPUT_DIR: settings.outputDirectory
   }

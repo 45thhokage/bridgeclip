@@ -6,11 +6,23 @@ const os = require('node:os')
 const vm = require('node:vm')
 const ts = require('typescript')
 
+// ipc-handlers resolves clip planning from saved settings; these tests never
+// exercise that path, so a permissive stub keeps them focused.
+const PLANNING_STUB = {
+  resolvePlanningProvider: () => ({ provider: 'openrouter', baseUrl: null, modelId: null, key: '', contextTokens: null }),
+  planningJobOptions: () => ({ planning_source: 'cloud', planning_provider: 'openrouter' }),
+  planningKeyEnvironment: () => ({}),
+  planningUsesOpenRouter: () => true,
+  validatePlanningSettings: async () => {},
+  listPlanningModels: async () => ({ models: [], fetchedAt: null, error: null }),
+  testPlanningConnection: async () => ({ ok: false, kind: 'incomplete', message: 'not configured' })
+}
+
 function loadSource(file, mocks = {}, globals = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/main', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? require(id), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? (id === './planning' ? PLANNING_STUB : id.startsWith('../shared/') ? loadShared(id.slice('../shared/'.length) + '.ts') : require(id)), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
   return module.exports
 }
 function loadShared(file) {

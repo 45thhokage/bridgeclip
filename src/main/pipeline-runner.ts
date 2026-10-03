@@ -10,6 +10,7 @@ import { createInterface } from 'readline'
 import { Transform } from 'stream'
 import { loadSettings, getSettingsForBridge, vocabularyTerms } from './settings-store'
 import { localFailureHint, localTranscriptionJobOptions } from './local-transcription'
+import { planningJobOptions, planningKeyEnvironment } from './planning'
 import { logger } from './logger'
 import { parseJobOutput, type JobOutput } from '../shared/job-output'
 import { BRIDGE_CONTRACT_VERSION } from '../shared/job-contract'
@@ -447,6 +448,20 @@ export function startClipJob(
     return
   }
 
+  // Re-resolve the planning stage now: settings may have changed while the job
+  // waited in the queue. An unusable provider fails the job with its own message.
+  let planningOptions: Record<string, string | number>
+  let planningKeyEnv: Record<string, string>
+  try {
+    planningOptions = planningJobOptions(settings)
+    planningKeyEnv = planningKeyEnvironment(settings)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Finish the clip-planning setup in Settings.'
+    reportError({ jobId, message })
+    exitWithoutProcess()
+    return
+  }
+
   const jobConfig = JSON.stringify({
     contract_version: BRIDGE_CONTRACT_VERSION,
     job_id: jobId,
@@ -475,6 +490,7 @@ export function startClipJob(
     include_title: config.includeTitle ?? true,
     keyterms: vocabularyTerms(settings.customVocabulary),
     ...localTranscriptionJobOptions(settings),
+    ...planningOptions,
     start_time_seconds: config.startTimeSeconds,
     end_time_seconds: config.endTimeSeconds,
     banner_platform: config.bannerPlatform,
@@ -493,6 +509,8 @@ export function startClipJob(
   const spawnEnv: Record<string, string | undefined> = {
     ...runtimeEnvironment(),
     ...envVars,
+    // Provider keys travel only through the worker's environment.
+    ...planningKeyEnv,
     PYTHONPATH: enginePath,
     BRIDGECLIP_WORK_ROOT: jobWorkRoot,
     PYTHONUNBUFFERED: '1',

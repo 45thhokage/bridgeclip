@@ -156,9 +156,12 @@ test('the settings page shows a configured key as a masked, empty field rather t
   useSettingsStore.setState({ openrouterConfigured: true, zernioConfigured: true, loaded: true, outputDirectory: '/clips' })
   const html = render(React.createElement(SettingsPage))
   assert.match(html, /Saved securely\. Paste a new key to replace\./)
-  assert.doesNotMatch(html, /sk-or-|sk_SECRET|SECRET/)
+  // Key placeholders (sk-or-…) are text, never a stored value: no input may
+  // carry one, and nothing outside a placeholder may contain a key shape.
+  assert.doesNotMatch(html.replace(/placeholder="[^"]*"/g, ''), /sk-or-|sk_SECRET|SECRET/)
   const inputs = [...html.matchAll(/<input[^>]*>/g)].map((match) => match[0]).filter((input) => /type="password"/.test(input))
-  assert.equal(inputs.length, 2, 'both key inputs are password fields until the user reveals their own draft')
+  // OpenRouter, OpenCode Zen, OpenCode Go, custom endpoint, local server, Zernio.
+  assert.equal(inputs.length, 6, 'every key input is a password field until the user reveals their own draft')
   for (const input of inputs) assert.match(input, /value=""/)
   assertEscaped(html)
 })

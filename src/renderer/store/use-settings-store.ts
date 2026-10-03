@@ -1,9 +1,10 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS } from '../../shared/jev-settings'
 import { TRANSCRIPTION_DEFAULTS, mergeTranscriptionSettings, type TranscriptionOverview, type TranscriptionSettings } from '../../shared/transcription'
+import { PLANNING_DEFAULTS, mergePlanningSettings, planningStatus, type PlanningSettings } from '../../shared/planning'
 import { create } from 'zustand'
 import { errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
-import type { ClipSettings, ToolStatus } from '../../preload/index'
+import type { ApiKeyName, ClipSettings, ToolStatus } from '../../preload/index'
 
 interface SettingsState extends ClipSettings {
   loaded: boolean
@@ -15,7 +16,9 @@ interface SettingsState extends ClipSettings {
   save: (settings: Partial<ClipSettings>) => Promise<void>
   /** Save the transcription pickers through the dedicated IPC and keep the store in sync. */
   saveTranscription: (update: Partial<TranscriptionSettings>) => Promise<TranscriptionOverview>
-  replaceApiKey: (key: 'openrouterApiKey' | 'zernioApiKey', value: string) => Promise<void>
+  /** Save part of the clip-planning settings; the store is the only source of truth. */
+  savePlanning: (update: Partial<PlanningSettings>) => Promise<void>
+  replaceApiKey: (key: ApiKeyName, value: string) => Promise<void>
   checkTools: () => Promise<void>
 }
 
@@ -33,6 +36,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   pythonPath: 'python3',
   customVocabulary: '',
   transcription: { ...TRANSCRIPTION_DEFAULTS },
+  planning: { ...PLANNING_DEFAULTS },
+  planningKeysConfigured: { openrouter: false, 'opencode-zen': false, 'opencode-go': false, custom: false, local: false },
   loaded: false,
   saving: false,
   toolStatus: null,
@@ -71,6 +76,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       return overview
     })
     saveQueue = task.then(() => undefined).catch(() => {})
+    return task.finally(() => {
+      pendingSaves -= 1
+      set({ saving: pendingSaves > 0 })
+    })
+  },
+
+  savePlanning: (update) => {
+    const merged = mergePlanningSettings(get().planning, update)
+    pendingSaves += 1
+    set({ saving: true })
+    const task = saveQueue.then(async () => {
+      const saved = await getApi().planning.save(merged)
+      set({ ...pickSettings(saved), loaded: true })
+    })
+    saveQueue = task.catch(() => {})
     return task.finally(() => {
       pendingSaves -= 1
       set({ saving: pendingSaves > 0 })
@@ -124,22 +144,57 @@ function pickSettings(s: ClipSettings): ClipSettings {
     outputDirectory: s.outputDirectory,
     pythonPath: s.pythonPath,
     customVocabulary: s.customVocabulary,
-    transcription: s.transcription ?? { ...TRANSCRIPTION_DEFAULTS }
+    transcription: s.transcription ?? { ...TRANSCRIPTION_DEFAULTS },
+    planning: s.planning ?? { ...PLANNING_DEFAULTS },
+    planningKeysConfigured: s.planningKeysConfigured ?? { openrouter: false, 'opencode-zen': false, 'opencode-go': false, custom: false, local: false }
   }
 }
 
-export type SetupState = { ready: boolean; missingKeys: string[]; toolsOk: boolean | null }
+export type SetupState = {
+  ready: boolean
+  /** Missing provider keys, named with the stage that needs them. */
+  missingKeys: string[]
+  /** Everything else that blocks a job, one line per stage. */
+  reasons: string[]
+  toolsOk: boolean | null
+}
 
-/** Whether a clip job can start: the OpenRouter key is present and, once the
- *  system check has run, every required tool found. */
+/**
+ * Whether a clip job can start. Each stage is checked against its own source:
+ * a local planner needs no OpenRouter key, while cloud transcription,
+ * OpenRouter planning and Review & edit still do.
+ */
 export function useSetupState(): SetupState {
   const openrouter = useSettingsStore((s) => s.openrouterConfigured)
+  const transcription = useSettingsStore((s) => s.transcription)
+  const planning = useSettingsStore((s) => s.planning)
+  const planningKeys = useSettingsStore((s) => s.planningKeysConfigured)
   const tools = useSettingsStore((s) => s.toolStatus)
   const toolError = useSettingsStore((s) => s.toolError)
   const checkingTools = useSettingsStore((s) => s.checkingTools)
-  const missingKeys = [!openrouter && 'OpenRouter'].filter(Boolean) as string[]
+
+  const missingKeys: string[] = []
+  const reasons: string[] = []
+  if (transcription.provider === 'openrouter' && !openrouter) missingKeys.push('Transcription: add an OpenRouter key.')
+  if (planning.source === 'cloud' && planning.cloudProvider === 'openrouter' && !openrouter) {
+    missingKeys.push('Clip planning: add an OpenRouter key.')
+  }
+  const planningState = planningStatus(planning, planningKeys)
+  if (planning.source !== 'cloud' || planning.cloudProvider !== 'openrouter') {
+    if (!planningState.configured) reasons.push(`Clip planning: ${planningState.reason ?? 'finish the setup in Settings.'}`)
+  }
+  if (transcription.provider === 'local' && tools?.localTranscriptionRequested) {
+    if (!tools.localTranscriptionRuntime) reasons.push('Transcription: the local runtime is not installed.')
+    else if (!tools.localTranscriptionModel) reasons.push('Transcription: download the selected model in Settings.')
+  }
+
   const toolsOk = toolError ? false : tools
     ? tools.python && tools.pythonDeps && tools.ffmpeg && tools.ffprobe && tools.ytdlp && tools.engine && tools.bridgeRunner
     : null
-  return { ready: missingKeys.length === 0 && toolsOk === true && !checkingTools, missingKeys, toolsOk }
+  return {
+    ready: missingKeys.length === 0 && reasons.length === 0 && toolsOk === true && !checkingTools,
+    missingKeys,
+    reasons,
+    toolsOk
+  }
 }

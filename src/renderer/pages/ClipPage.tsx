@@ -6,6 +6,7 @@ import { errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
 import type { ClipJobRequest } from '../../shared/jobs'
 import { JobForm } from '../components/JobForm'
+import { PipelineSummary } from '../components/PipelineSummary'
 import { SetupCard } from '../components/SetupCard'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Page } from '../components/ui/Page'
@@ -51,9 +52,11 @@ export function ClipPage({ onNavigate }: { onNavigate: (page: PageId) => void })
     onNavigate('jobs')
   }, [onNavigate])
 
+  // Name the stage that blocks the job: each one can be on a different source.
+  const setupIssues = [...setup.missingKeys, ...setup.reasons]
   const blockedReason =
-    setup.missingKeys.length > 0
-      ? `Add your ${setup.missingKeys.join(' and ')} key${setup.missingKeys.length > 1 ? 's' : ''} above to start.`
+    setupIssues.length > 0
+      ? `${setupIssues.join(' ')} Fix it in Settings to start.`
       : setup.toolsOk === false
         ? 'Fix the missing tools in Settings to start.'
         : !setup.ready ? 'Checking required tools…' : undefined
@@ -74,7 +77,9 @@ export function ClipPage({ onNavigate }: { onNavigate: (page: PageId) => void })
         </Callout>
       )}
 
-      <JobForm className="mt-4" onSubmit={handleSubmit} onViewJob={viewJob} blockedReason={blockedReason} submitting={starting} />
+      <PipelineSummary className="mt-4" onOpenSettings={() => onNavigate('settings')} />
+
+      <JobForm className="mt-3" onSubmit={handleSubmit} onViewJob={viewJob} blockedReason={blockedReason} submitting={starting} />
     </Page>
   )
 }

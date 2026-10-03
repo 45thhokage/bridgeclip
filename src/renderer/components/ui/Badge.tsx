@@ -43,11 +43,29 @@ const DOTS: Record<DotTone, string> = {
   idle: 'bg-ink-faint'
 }
 
-export function StatusDot({ tone, pulse, className }: { tone: DotTone; pulse?: boolean; className?: string }): React.JSX.Element {
+interface StatusDotProps {
+  tone?: DotTone
+  pulse?: boolean
+  className?: string
+  /** Active mode: render a green dot only when true, with visually hidden text. */
+  active?: boolean
+  /** The visually hidden words spoken for the active dot. */
+  label?: string
+}
+
+/**
+ * A small status dot. With `active`, it is the green "in use" marker: it
+ * renders nothing when not active and carries hidden text so meaning is never
+ * color-only. Without `active`, it keeps the toned status behavior.
+ */
+export function StatusDot({ tone, pulse, className, active, label = 'In use' }: StatusDotProps): React.JSX.Element | null {
+  if (active === false) return null
+  const usedTone: DotTone = active === true ? 'success' : tone ?? 'success'
   return (
     <span className={cn('relative inline-flex h-2 w-2 shrink-0', className)}>
-      {pulse && <span className={cn('absolute inset-0 animate-ping rounded-full opacity-60', DOTS[tone])} />}
-      <span className={cn('relative inline-flex h-2 w-2 rounded-full', DOTS[tone])} />
+      {pulse && <span className={cn('absolute inset-0 animate-ping rounded-full opacity-60', DOTS[usedTone])} />}
+      <span className={cn('relative inline-flex h-2 w-2 rounded-full', DOTS[usedTone])} />
+      {active === true && <span className="sr-only">{label}</span>}
     </span>
   )
 }

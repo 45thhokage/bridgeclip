@@ -1,14 +1,14 @@
 import { JevSettings } from '../components/JevSettings'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, AudioLines, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal } from 'lucide-react'
+import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Laptop, Loader2, RefreshCw, ScrollText, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { useSettingsStore } from '../store/use-settings-store'
 import { useChangelogStore } from '../store/use-changelog-store'
-import { useApiKeyDrafts } from '../hooks/use-api-key-drafts'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage } from '../lib/utils'
-import { APP_NAME, APP_VERSION, BRIDGEMIND_URL, ISSUES_URL, LICENSE_NAME, PROVIDER_LINKS, REPO_URL } from '../config/brand'
+import { APP_NAME, APP_VERSION, BRIDGEMIND_URL, ISSUES_URL, LICENSE_NAME, REPO_URL } from '../config/brand'
 import type { ClipSettings, ToolStatus } from '../../preload/index'
-import { ApiKeyInput } from '../components/ApiKeyInput'
+import { planningStageLabel, planningStatus } from '../../shared/planning'
+import { localModel } from '../../shared/transcription'
 import { BridgeClipLogo } from '../components/brand/BridgeClipLogo'
 import { Page } from '../components/ui/Page'
 import { PageHeader } from '../components/ui/PageHeader'
@@ -20,16 +20,17 @@ import { IconTile } from '../components/ui/IconTile'
 import { Callout } from '../components/ui/Callout'
 import { UpdatesRow } from '../components/Updates'
 import { OutputStorage } from '../components/OutputStorage'
-import { TranscriptionSettings } from '../components/TranscriptionSettings'
+import { PipelineCard } from '../components/PipelineCard'
+import { CloudApiSection } from '../components/CloudApiSection'
+import { LocalSetupSection } from '../components/LocalSetupSection'
 
-type SectionId = 'keys' | 'transcription' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
+type SectionId = 'pipeline' | 'cloud' | 'local' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
 type SectionTone = 'success' | 'warning' | 'danger' | 'idle'
 
 /** `showUpdates` changes each time Help → Check for Updates… asks for the Updates row. */
-export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): React.JSX.Element {
-  const { outputDirectory, pythonPath, customVocabulary, openrouterConfigured, zernioConfigured, sourceContextWebResearch, saving, save, toolStatus, toolError, checkTools, checkingTools } =
+export function SettingsPage({ showUpdates = 0, onRunSetup }: { showUpdates?: number; onRunSetup?: () => void }): React.JSX.Element {
+  const { outputDirectory, pythonPath, customVocabulary, openrouterConfigured, zernioConfigured, transcription, planning, planningKeysConfigured, saving, save, toolStatus, toolError, checkTools, checkingTools } =
     useSettingsStore()
-  const keys = useApiKeyDrafts()
   const [isPackaged, setIsPackaged] = useState(true)
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -49,17 +50,29 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
     }
   }
 
-  const lastSaved = Math.max(savedAt ?? 0, keys.savedAt ?? 0)
-  const error = saveError ?? keys.error
+  const lastSaved = savedAt ?? 0
+  const error = saveError
   const tools = toolRows(toolStatus)
   const toolsChecked = tools.every((row) => row.ok != null)
   const toolsMissing = tools.filter((row) => !row.optional && row.ok === false).length
-  const keysMissing = Number(!openrouterConfigured)
   const vocabularyTerms = customVocabulary.split('\n').filter((line) => line.trim()).length
+  const planningState = planningStatus(planning, planningKeysConfigured)
+  const transcriptionLocal = transcription.provider === 'local'
+  const transcriptionOk = transcriptionLocal
+    ? toolStatus?.localTranscriptionRequested ? toolStatus.localTranscriptionRuntime : null
+    : openrouterConfigured
+  const transcriptionDetail = transcriptionLocal
+    ? !toolStatus
+      ? 'Not checked'
+      : toolStatus.localTranscriptionRuntime
+        ? `Local - ${transcription.localModelId ? localModel(transcription.localModelId).label : 'no model selected'}`
+        : 'Local runtime not installed'
+    : openrouterConfigured ? 'Cloud - OpenRouter' : 'Needs an OpenRouter key'
 
   const sections: { id: SectionId; label: string; icon: ReactNode; tone: SectionTone }[] = [
-    { id: 'keys', label: 'API keys', icon: <KeyRound />, tone: keysMissing ? 'warning' : 'success' },
-    { id: 'transcription', label: 'Transcription', icon: <AudioLines />, tone: 'idle' },
+    { id: 'pipeline', label: 'Pipeline', icon: <Sparkles />, tone: 'idle' },
+    { id: 'cloud', label: 'Cloud API', icon: <KeyRound />, tone: openrouterConfigured ? 'success' : 'warning' },
+    { id: 'local', label: 'Local setup', icon: <Laptop />, tone: 'idle' },
     { id: 'jev', label: 'TypeSafe Jev', icon: <SlidersHorizontal />, tone: 'idle' },
     { id: 'vocabulary', label: 'Vocabulary', icon: <BookA />, tone: 'idle' },
     { id: 'output', label: 'Output', icon: <FolderOpen />, tone: 'idle' },
@@ -76,9 +89,11 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
   }, [showUpdates])
 
   const checks: { label: string; ok: boolean | null; detail: string; section: SectionId; optional?: boolean; tone?: 'danger' }[] = [
-    { label: 'OpenRouter', ok: openrouterConfigured, detail: openrouterConfigured ? 'Key saved' : 'Needed to transcribe and pick clips', section: 'keys' },
+    { label: 'Transcription', ok: transcriptionOk, detail: transcriptionDetail, section: transcriptionLocal ? 'local' : 'cloud' },
+    { label: 'Clip planning', ok: planningState.configured, detail: planningState.configured ? planningStageLabel(planning) : planningState.reason ?? 'Set up clip planning', section: planning.source === 'local' ? 'local' : 'cloud' },
+    { label: 'Extras', ok: openrouterConfigured, detail: openrouterConfigured ? 'OpenRouter key ready' : 'Needs an OpenRouter key', section: 'cloud', optional: true },
     { label: 'Tools', ok: toolsChecked ? toolsMissing === 0 : null, detail: !toolsChecked ? (checkingTools ? 'Checking…' : 'Not checked') : toolsMissing ? `${toolsMissing} missing` : 'All installed', section: 'system', tone: 'danger' },
-    { label: 'Zernio', ok: zernioConfigured, detail: zernioConfigured ? 'Posting on' : 'Optional, for posting', section: 'keys', optional: true }
+    { label: 'Zernio', ok: zernioConfigured, detail: zernioConfigured ? 'Posting on' : 'Optional, for posting', section: 'cloud', optional: true }
   ]
   const blocking = checks.filter((check) => !check.optional && check.ok === false).length
 
@@ -118,9 +133,12 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
                 <IconTile tone={blocking ? 'warning' : 'success'} size="lg">{blocking ? <KeyRound /> : <Check strokeWidth={3} />}</IconTile>
                 <div>
                   <h2 className="text-sm font-semibold text-ink">{blocking ? `${blocking} thing${blocking === 1 ? '' : 's'} to set up before clipping` : 'Ready to clip'}</h2>
-                  <p className="mt-0.5 text-xs text-ink-muted">{APP_NAME} runs on this computer. One OpenRouter key covers transcription and clip selection.</p>
+                  <p className="mt-0.5 text-xs text-ink-muted">{APP_NAME} runs on this computer. Each stage can use the cloud or this computer.</p>
                 </div>
               </div>
+              {onRunSetup && (
+                <Button size="sm" variant="secondary" onClick={onRunSetup}>Run setup again</Button>
+              )}
             </div>
             <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
               {checks.map((check) => (
@@ -140,52 +158,16 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
             </div>
           </Panel>
 
-          <Section id="keys">
-            <PanelHeader
-              icon={<IconTile tone="accent"><KeyRound /></IconTile>}
-              title="API keys"
-              description="Encrypted with your system keychain. BridgeClip has no account and no server of its own."
-            />
-            <div className="mt-4 space-y-2">
-              <KeyRow>
-                <ApiKeyInput
-                  label="OpenRouter"
-                  value={keys.drafts.openrouterApiKey}
-                  configured={openrouterConfigured}
-                  onChange={(v) => keys.setDraft('openrouterApiKey', v)}
-                  onRemove={() => void keys.remove('openrouterApiKey')}
-                  onBlur={() => void keys.persist()}
-                  placeholder="sk-or-…"
-                  description="Transcribes with MAI Transcribe 2 and picks the moments worth clipping."
-                  getKeyUrl={PROVIDER_LINKS.openrouter}
-                />
-              </KeyRow>
-              <label className="flex items-start gap-3 px-3 py-2 text-sm text-ink-muted">
-                <input type="checkbox" className="mt-1" checked={sourceContextWebResearch === 'on'}
-                  onChange={(e) => commit({ sourceContextWebResearch: e.target.checked ? 'on' : 'off' })} />
-                <span>Research the source before clipping <Badge tone="warning" className="ml-1 align-middle">Beta</Badge>
-                  <span className="mt-1 block text-xs text-ink-subtle">Off by default. When on, the video’s title, description and channel go to OpenRouter web search (up to two searches) and Gemini builds a channel and video overview before transcription. Uses extra OpenRouter credit and adds time. Only YouTube and Twitch sources are researched; local files never are. View the brief and sources in the transcript inspector.</span>
-                </span>
-              </label>
-              <p className="eyebrow px-1 pt-2">Optional</p>
-              <KeyRow>
-                <ApiKeyInput
-                  label="Zernio (optional)"
-                  value={keys.drafts.zernioApiKey}
-                  configured={zernioConfigured}
-                  onChange={(v) => keys.setDraft('zernioApiKey', v)}
-                  onRemove={() => void keys.remove('zernioApiKey')}
-                  onBlur={() => void keys.persist()}
-                  placeholder="sk_…"
-                  description="Connects your social accounts so you can post and schedule clips. Manage them under Accounts."
-                  getKeyUrl={PROVIDER_LINKS.zernio}
-                />
-              </KeyRow>
-            </div>
+          <Section id="pipeline">
+            <PipelineCard />
           </Section>
 
-          <Section id="transcription">
-            <TranscriptionSettings />
+          <Section id="cloud">
+            <CloudApiSection />
+          </Section>
+
+          <Section id="local">
+            <LocalSetupSection />
           </Section>
 
           <JevSettings />
@@ -350,10 +332,6 @@ function useActiveSection(ids: SectionId[]): [SectionId, (id: SectionId) => void
     document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
   return [active, jump]
-}
-
-function KeyRow({ children }: { children: ReactNode }): React.JSX.Element {
-  return <div className="glass-tile rounded-2xl px-3 py-2.5">{children}</div>
 }
 
 function SaveIndicator({ saving, savedAt, error }: { saving: boolean; savedAt: number | null; error: string | null }): React.JSX.Element | null {

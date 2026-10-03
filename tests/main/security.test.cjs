@@ -7,11 +7,23 @@ const vm = require('node:vm')
 const ts = require('typescript')
 const { fileLinksAvailable, directoryLinkType } = require('../support/symlinks.cjs')
 
+// pipeline-runner and ipc-handlers resolve clip planning from saved settings;
+// these tests never exercise that path, so a permissive stub keeps them focused.
+const PLANNING_STUB = {
+  resolvePlanningProvider: () => ({ provider: 'openrouter', baseUrl: null, modelId: null, key: '', contextTokens: null }),
+  planningJobOptions: () => ({ planning_source: 'cloud', planning_provider: 'openrouter' }),
+  planningKeyEnvironment: () => ({}),
+  planningUsesOpenRouter: () => true,
+  validatePlanningSettings: async () => {},
+  listPlanningModels: async () => ({ models: [], fetchedAt: null, error: null }),
+  testPlanningConnection: async () => ({ ok: false, kind: 'incomplete', message: 'not configured' })
+}
+
 function loadSource(file, mocks = {}, globals = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/main', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? (id.startsWith('../shared/') ? loadShared(id.slice('../shared/'.length) + '.ts') : require(id)), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? (id === './planning' ? PLANNING_STUB : id.startsWith('../shared/') ? loadShared(id.slice('../shared/'.length) + '.ts') : require(id)), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
   return module.exports
 }
 function loadShared(file) {
@@ -868,7 +880,7 @@ test('Jev migration drops the separate TypeSafe key without decrypting it', () =
     assert.equal(loaded.jevEnabled, 'off')
     assert.equal(loaded.jevVisualContext, 'on')
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
-    assert.equal(saved.version, 13)
+    assert.equal(saved.version, 14)
     assert.equal(Object.hasOwn(saved, 'typesafeApiKey'), false)
     assert.equal(Object.hasOwn(saved, 'typesafeVisualContext'), false)
     assert.equal(Object.hasOwn(loaded, 'typesafeApiKey'), false)
@@ -892,7 +904,7 @@ test('Jev thresholds migrate, validate atomically, persist, and reach the worker
     const defaults = [.75, .70, .65, .70, .80, .50, .95]
     const initial = store.publicSettings(store.loadSettings())
     keys.forEach((key, i) => assert.equal(Number(initial[key]), defaults[i]))
-    assert.equal(JSON.parse(fs.readFileSync(file)).version, 13)
+    assert.equal(JSON.parse(fs.readFileSync(file)).version, 14)
     const values = ['0', '1', '0.61', '0.72', '0.83', '0.54', '0.96']
     const saved = store.savePublicSettings({ ...initial, ...Object.fromEntries(keys.map((key, i) => [key, values[i]])) })
     const worker = store.getSettingsForBridge(store.loadSettings())
@@ -945,7 +957,7 @@ test('Jev review and web research stay opt-in across upgrades, downgrades and mi
       assert.equal(loaded.openrouterApiKey, 'kept-openrouter')
       assert.equal(loaded.jevEnabled, 'off', `v${version} loads Jev off`)
       assert.equal(loaded.sourceContextWebResearch, 'off', `v${version} loads research off`)
-      assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 13)
+      assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 14)
     }
     // An explicit opt-in on the current version survives a reload.
     store.savePublicSettings({ ...store.publicSettings(store.loadSettings()), jevEnabled: 'on', sourceContextWebResearch: 'on' })

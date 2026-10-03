@@ -25,6 +25,12 @@ import type { UpdateState } from '../shared/updates'
 import type { OutputStorageUsage } from '../shared/output-storage'
 import type { YouTubePreview } from '../shared/youtube-preview'
 import type { LocalModelId, LocalModelStatus, ModelDownloadState, TranscriptionOverview, TranscriptionSettings } from '../shared/transcription'
+import type { PlanningModelsResult, PlanningProviderId, PlanningSettings, PlanningTestResult } from '../shared/planning'
+
+export type PlanningKeyName = 'opencode-zen' | 'opencode-go' | 'custom' | 'local' | 'openrouter'
+
+/** Every API key the renderer may replace; values are never read back. */
+export type ApiKeyName = 'openrouterApiKey' | 'zernioApiKey' | 'opencodeZenApiKey' | 'opencodeGoApiKey' | 'planningCustomApiKey' | 'planningLocalApiKey'
 
 export interface ClipSettings extends JevThresholdSettings {
   openrouterConfigured: boolean
@@ -35,8 +41,12 @@ export interface ClipSettings extends JevThresholdSettings {
   outputDirectory: string
   pythonPath: string
   customVocabulary: string
-  /** OpenRouter (default) or local; local planning still uses OpenRouter. */
+  /** Where transcription runs: OpenRouter or this computer. */
   transcription: TranscriptionSettings
+  /** Where clip planning runs. Extras always use OpenRouter. */
+  planning: PlanningSettings
+  /** Which provider keys exist (never the key value), including OpenRouter. */
+  planningKeysConfigured: Record<PlanningKeyName, boolean>
 }
 
 export type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
@@ -137,8 +147,16 @@ export interface BridgeClipAPI {
     /** Pass true to count again instead of reusing a result from the last few seconds. */
     storageUsage: (fresh?: boolean) => Promise<OutputStorageUsage>
     save: (settings: ClipSettings) => Promise<ClipSettings>
-    replaceApiKey: (key: 'openrouterApiKey' | 'zernioApiKey', value: string) => Promise<ClipSettings>
+    replaceApiKey: (key: ApiKeyName, value: string) => Promise<ClipSettings>
     selectOutputDir: () => Promise<string | null>
+  }
+  planning: {
+    /** Save part of the planning settings; omitted fields keep their saved values. */
+    save: (update: Partial<PlanningSettings>) => Promise<ClipSettings>
+    /** GET /models from the chosen provider. A failed refresh keeps the previous list. */
+    models: (refresh?: boolean, target?: PlanningProviderId) => Promise<PlanningModelsResult>
+    /** One tiny request with the selected model, classified for the UI. */
+    testConnection: (target?: PlanningProviderId) => Promise<PlanningTestResult>
   }
   zernio: {
     checkStatus: () => Promise<ZernioStatusCheck>
@@ -307,6 +325,11 @@ const api: BridgeClipAPI = {
     save: (settings) => ipcRenderer.invoke('settings:save', settings),
     replaceApiKey: (key, value) => ipcRenderer.invoke('settings:replaceApiKey', key, value),
     selectOutputDir: () => ipcRenderer.invoke('settings:selectOutputDir')
+  },
+  planning: {
+    save: (update) => ipcRenderer.invoke('planning:save', update),
+    models: (refresh = false, target) => ipcRenderer.invoke('planning:models', refresh, target),
+    testConnection: (target) => ipcRenderer.invoke('planning:testConnection', target)
   },
   zernio: {
     checkStatus: () => ipcRenderer.invoke('zernio:checkStatus'),

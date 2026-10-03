@@ -294,6 +294,51 @@ test('Jev custom thresholds survive unrelated queued settings saves and failed w
   assert.equal(useSettingsStore.getState().saving, false)
 })
 
+test('a stage set to the other source is inert while the other blocks stay interactive', () => {
+  const React = require('react')
+  const { renderToStaticMarkup } = require('react-dom/server')
+  const code = buildSync({
+    stdin: {
+      contents: `export { CloudApiSection } from './src/renderer/components/CloudApiSection';
+        export { useSettingsStore } from './src/renderer/store/use-settings-store';`,
+      resolveDir: path.resolve(__dirname, '..'), loader: 'ts'
+    },
+    bundle: true, platform: 'node', format: 'cjs', packages: 'external', loader: { '.css': 'empty' }, jsx: 'automatic', write: false,
+    define: { __APP_VERSION__: '"0.0.0-test"' }
+  }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require, window: { bridgeclip: { settings: { load: async () => settings } } } })
+  const { CloudApiSection, useSettingsStore } = mod.exports
+  // Transcription = Local, Clip planning = Cloud: only the cloud transcription
+  // block dims, and the keys block never dims because Extras need them anyway.
+  // Server rendering reads the store's initial state.
+  const initial = useSettingsStore.getInitialState()
+  initial.loaded = true
+  initial.openrouterConfigured = false
+  initial.transcription = { provider: 'local', gpuFamily: 'unsure', vram: '4to7', localModelId: null }
+  initial.planning = {
+    source: 'cloud', cloudProvider: 'openrouter',
+    cloudModels: { openrouter: '', 'opencode-zen': '', 'opencode-go': '', custom: '' },
+    cloudBaseUrl: '', local: { preset: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', modelId: '', contextTokens: 8192 }
+  }
+  initial.planningKeysConfigured = { openrouter: false, 'opencode-zen': false, 'opencode-go': false, custom: false, local: false }
+  const html = renderToStaticMarkup(React.createElement(CloudApiSection))
+  const transcription = html.slice(html.indexOf('aria-label="Cloud transcription"'), html.indexOf('aria-label="Cloud clip planning"'))
+  const planning = html.slice(html.indexOf('aria-label="Cloud clip planning"'), html.indexOf('aria-label="API keys"'))
+  const keys = html.slice(html.indexOf('aria-label="API keys"'))
+  // The locked block is dimmed, unfocusable and unclickable; its flip button stays usable.
+  assert.match(transcription, /aria-disabled="true"/)
+  assert.match(transcription, /<div inert[^>]*>[\s\S]*Audio is transcribed in the cloud/)
+  assert.match(transcription, /Transcription is set to Local\. Switch it to Cloud API to edit this\./)
+  assert.match(transcription, /Use Cloud API/)
+  // The opposite-source block and the keys block stay interactive.
+  assert.doesNotMatch(planning, /inert|aria-disabled/)
+  assert.match(planning, /role="radiogroup" aria-label="Cloud clip planning provider"/)
+  assert.doesNotMatch(keys, /inert|aria-disabled/)
+  // Flipping the stage's own toggle is what unlocks the block.
+  assert.match(transcription, /Use Cloud API/)
+})
+
 test('Jev review and web research show as opt-in betas, with thresholds editable while Jev is off', async () => {
   const React = require('react')
   const { renderToStaticMarkup } = require('react-dom/server')

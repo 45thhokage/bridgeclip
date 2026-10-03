@@ -1,0 +1,285 @@
+// Clip-planning settings: legacy files migrate to cloud + OpenRouter, existing
+// users skip the first-run card, and each stage resolves its own source for
+// every mixed combination. No network, no live providers.
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const os = require('node:os')
+const vm = require('node:vm')
+const ts = require('typescript')
+
+function loadShared(file) {
+  const source = fs.readFileSync(path.join(__dirname, '../../src/shared', file), 'utf8')
+  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const module = { exports: {} }
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => id.startsWith('./') ? loadShared(`${id.slice(2)}.ts`) : require(id), URL })
+  return module.exports
+}
+
+/** src/main/planning.ts with the settings store, network policy and fetch stubbed. */
+function loadPlanning() {
+  const source = fs.readFileSync(path.join(__dirname, '../../src/main/planning.ts'), 'utf8')
+  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const module = { exports: {} }
+  vm.runInNewContext(js, {
+    module,
+    exports: module.exports,
+    require: (id) => {
+      if (id === '../shared/planning') return loadShared('planning.ts')
+      if (id === './http-response') return { readResponseText: async () => '' }
+      if (id === './network-policy') return { assertPublicWebUrl: async () => {} }
+      if (id === './settings-store') return { loadSettings: () => { throw new Error('save settings must be passed explicitly in tests') } }
+      return require(id)
+    },
+    URL, AbortSignal, fetch: async () => { throw new Error('live calls are not allowed in tests') },
+    process, Buffer, console, setTimeout, clearTimeout
+  })
+  return module.exports
+}
+
+/** settings-store with its own userData directory and a working fake keychain. */
+function loadStore(userDataDir) {
+  const source = fs.readFileSync(path.join(__dirname, '../../src/main/settings-store.ts'), 'utf8')
+  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const module = { exports: {} }
+  vm.runInNewContext(js, {
+    module,
+    exports: module.exports,
+    require: (id) => {
+      if (id === 'electron') {
+        return {
+          app: { getPath: (name) => name === 'home' ? path.join(userDataDir, 'home') : userDataDir, isReady: () => true },
+          safeStorage: {
+            isEncryptionAvailable: () => true,
+            getSelectedStorageBackend: () => 'keychain',
+            encryptString: (value) => Buffer.from(`safe:${value}`),
+            decryptString: (buffer) => Buffer.from(buffer).toString('utf8').replace(/^safe:/, '')
+          }
+        }
+      }
+      if (id === '../shared/jev-settings') return loadShared('jev-settings.ts')
+      if (id === '../shared/transcription') return loadShared('transcription.ts')
+      if (id === '../shared/planning') return loadShared('planning.ts')
+      return require(id)
+    },
+    URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main')
+  })
+  return module.exports
+}
+
+function baseSettings(patch = {}) {
+  return {
+    openrouterApiKey: '',
+    zernioApiKey: '',
+    jevEnabled: 'off',
+    jevVisualContext: 'off',
+    sourceContextWebResearch: 'off',
+    outputDirectory: '/clips',
+    pythonPath: 'python3',
+    customVocabulary: '',
+    transcription: { provider: 'openrouter', gpuFamily: 'unsure', vram: '4to7', localModelId: null },
+    planning: {
+      source: 'cloud',
+      cloudProvider: 'openrouter',
+      cloudModels: { openrouter: '', 'opencode-zen': '', 'opencode-go': '', custom: '' },
+      cloudBaseUrl: '',
+      local: { preset: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', modelId: '', contextTokens: 8192 }
+    },
+    opencodeZenApiKey: '',
+    opencodeGoApiKey: '',
+    planningCustomApiKey: '',
+    planningLocalApiKey: '',
+    ...patch
+  }
+}
+
+const LOCAL_PLANNING = {
+  source: 'local',
+  cloudProvider: 'openrouter',
+  cloudModels: { openrouter: '', 'opencode-zen': '', 'opencode-go': '', custom: '' },
+  cloudBaseUrl: '',
+  local: { preset: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', modelId: 'llama3.1:8b', contextTokens: 8192 }
+}
+
+test('cloud planning with OpenRouter keeps the existing job-option path', () => {
+  const planning = loadPlanning()
+  const cloud = baseSettings({ openrouterApiKey: 'sk-or-test' })
+  assert.equal(planning.planningUsesOpenRouter(cloud), true)
+  const options = planning.planningJobOptions(cloud)
+  assert.equal(options.planning_source, 'cloud')
+  assert.equal(options.planning_provider, 'openrouter')
+  assert.equal(options.planning_model_id, undefined)
+  assert.equal(planning.planningKeyEnvironment(cloud).PLANNING_API_KEY, 'sk-or-test')
+})
+
+test('local transcription does not change how clip planning resolves', () => {
+  const planning = loadPlanning()
+  const localAudio = baseSettings({
+    openrouterApiKey: 'sk-or-test',
+    transcription: { provider: 'local', gpuFamily: 'nvidia_pascal', vram: '8plus', localModelId: 'small.en' }
+  })
+  const options = planning.planningJobOptions(localAudio)
+  assert.equal(options.planning_source, 'cloud')
+  assert.equal(options.planning_provider, 'openrouter')
+})
+
+test('OpenCode Zen planning resolves for cloud and local transcription alike', () => {
+  const planning = loadPlanning()
+  const zen = {
+    openrouterApiKey: 'sk-or-test',
+    opencodeZenApiKey: 'sk-zen-test',
+    planning: {
+      source: 'cloud',
+      cloudProvider: 'opencode-zen',
+      cloudModels: { openrouter: '', 'opencode-zen': 'gpt-5.2', 'opencode-go': '', custom: '' },
+      cloudBaseUrl: '',
+      local: LOCAL_PLANNING.local
+    }
+  }
+  for (const transcription of [
+    { provider: 'openrouter', gpuFamily: 'unsure', vram: '4to7', localModelId: null },
+    { provider: 'local', gpuFamily: 'nvidia_pascal', vram: '8plus', localModelId: 'small.en' }
+  ]) {
+    const settings = baseSettings({ ...zen, transcription })
+    const options = planning.planningJobOptions(settings)
+    assert.equal(options.planning_source, 'cloud')
+    assert.equal(options.planning_provider, 'opencode-zen')
+    assert.equal(options.planning_model_id, 'gpt-5.2')
+    assert.equal(options.planning_base_url, 'https://opencode.ai/zen/v1')
+    assert.equal(planning.planningUsesOpenRouter(settings), false)
+    assert.equal(planning.planningKeyEnvironment(settings).PLANNING_API_KEY, 'sk-zen-test')
+  }
+})
+
+test('local planning resolves the host, port and context for either transcription source', () => {
+  const planning = loadPlanning()
+  for (const transcription of [
+    { provider: 'openrouter', gpuFamily: 'unsure', vram: '4to7', localModelId: null },
+    { provider: 'local', gpuFamily: 'nvidia_pascal', vram: '8plus', localModelId: 'small.en' }
+  ]) {
+    const settings = baseSettings({ transcription, planning: LOCAL_PLANNING })
+    const options = planning.planningJobOptions(settings)
+    assert.equal(options.planning_source, 'local')
+    assert.equal(options.planning_provider, 'local')
+    assert.equal(options.planning_model_id, 'llama3.1:8b')
+    assert.equal(options.planning_base_url, 'http://127.0.0.1:11434/v1')
+    assert.equal(options.planning_local_host, '127.0.0.1')
+    assert.equal(options.planning_local_port, 11434)
+    assert.equal(options.planning_context_tokens, 8192)
+    assert.equal(planning.planningUsesOpenRouter(settings), false)
+    assert.equal(planning.planningKeyEnvironment(settings).PLANNING_API_KEY, undefined)
+  }
+})
+
+test('an unusable local or cloud planning target fails before a job is queued', () => {
+  const planning = loadPlanning()
+  const remote = baseSettings({ planning: { ...LOCAL_PLANNING, local: { ...LOCAL_PLANNING.local, baseUrl: 'http://192.168.1.10:11434/v1' } } })
+  assert.throws(() => planning.planningJobOptions(remote), /this computer/)
+  const noModel = baseSettings({ planning: { ...LOCAL_PLANNING, local: { ...LOCAL_PLANNING.local, modelId: '' } } })
+  assert.throws(() => planning.planningJobOptions(noModel), /model/)
+  const zenNoKey = baseSettings({
+    planning: {
+      source: 'cloud',
+      cloudProvider: 'opencode-zen',
+      cloudModels: { openrouter: '', 'opencode-zen': 'gpt-5.2', 'opencode-go': '', custom: '' },
+      cloudBaseUrl: '',
+      local: LOCAL_PLANNING.local
+    }
+  })
+  assert.throws(() => planning.planningJobOptions(zenNoKey), /OpenCode Zen key/)
+})
+
+test('a custom endpoint requires https and its own model id', () => {
+  const planning = loadPlanning()
+  const custom = {
+    source: 'cloud',
+    cloudProvider: 'custom',
+    cloudModels: { openrouter: '', 'opencode-zen': '', 'opencode-go': '', custom: 'my-model' },
+    cloudBaseUrl: 'https://planner.example.com/v1',
+    local: LOCAL_PLANNING.local
+  }
+  const options = planning.planningJobOptions(baseSettings({ planning: custom }))
+  assert.equal(options.planning_provider, 'custom')
+  assert.equal(options.planning_base_url, 'https://planner.example.com/v1')
+  assert.equal(options.planning_model_id, 'my-model')
+  assert.throws(
+    () => planning.planningJobOptions(baseSettings({ planning: { ...custom, cloudBaseUrl: 'http://planner.example.com/v1' } })),
+    /https/
+  )
+})
+
+test('a legacy settings file migrates to cloud + OpenRouter and skips the setup card', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-planning-migration-'))
+  try {
+    fs.mkdirSync(path.join(root, 'home'), { recursive: true })
+    // Version 13 (no `planning` key): an existing user with a saved OpenRouter key.
+    fs.writeFileSync(path.join(root, 'settings.json'), JSON.stringify({
+      version: 13,
+      openrouterApiKey: { scheme: 'safeStorage', value: Buffer.from('safe:sk-or-legacy').toString('base64') },
+      outputDirectory: path.join(root, 'clips'),
+      pythonPath: 'python',
+      transcription: { provider: 'openrouter', gpuFamily: 'nvidia_pascal', vram: '8plus', localModelId: null }
+    }))
+    const store = loadStore(root)
+    const settings = store.loadSettings()
+    assert.equal(settings.planning.source, 'cloud')
+    assert.equal(settings.planning.cloudProvider, 'openrouter')
+    assert.equal(settings.planning.local.contextTokens, 8192)
+    // The GPU picker from Job 1 keeps its saved value through this migration too.
+    assert.equal(settings.transcription.gpuFamily, 'nvidia_pascal')
+    const publicSettings = store.publicSettings(settings)
+    const setup = loadShared('setup.ts')
+    assert.equal(setup.needsFirstRunSetup({
+      openrouterConfigured: publicSettings.openrouterConfigured,
+      planningKeysConfigured: publicSettings.planningKeysConfigured,
+      transcription: settings.transcription,
+      planning: settings.planning
+    }), false)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a fresh install gets defaults and shows the setup card until something is configured', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-planning-fresh-'))
+  try {
+    const store = loadStore(root)
+    const settings = store.loadSettings()
+    assert.equal(settings.planning.source, 'cloud')
+    assert.equal(settings.planning.cloudProvider, 'openrouter')
+    const setup = loadShared('setup.ts')
+    assert.equal(setup.needsFirstRunSetup({
+      openrouterConfigured: false,
+      planningKeysConfigured: store.publicSettings(settings).planningKeysConfigured,
+      transcription: settings.transcription,
+      planning: settings.planning
+    }), true)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a fully local setup also skips the first-run card', () => {
+  const setup = loadShared('setup.ts')
+  const localOnly = {
+    openrouterConfigured: false,
+    planningKeysConfigured: { openrouter: false, 'opencode-zen': false, 'opencode-go': false, custom: false, local: false },
+    transcription: { localModelId: 'small.en' },
+    planning: { local: { modelId: 'llama3.1:8b' } }
+  }
+  assert.equal(setup.needsFirstRunSetup(localOnly), false)
+})
+
+test('saving one planning field keeps the rest of the saved planning settings', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-planning-merge-'))
+  try {
+    const store = loadStore(root)
+    store.savePlanningSettings({ source: 'local' })
+    const saved = store.loadSettings().planning
+    assert.equal(saved.source, 'local')
+    assert.equal(saved.cloudProvider, 'openrouter')
+    assert.equal(saved.local.baseUrl, 'http://127.0.0.1:11434/v1')
+    store.savePlanningSettings({ cloudModels: { 'opencode-zen': 'gpt-5.2' } })
+    const merged = store.loadSettings().planning
+    assert.equal(merged.source, 'local')
+    assert.equal(merged.cloudModels['opencode-zen'], 'gpt-5.2')
+    assert.equal(merged.cloudModels.openrouter, '')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

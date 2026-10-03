@@ -216,13 +216,16 @@ function ActiveJobsCard({ expanded, onOpen }: { expanded: boolean; onOpen: () =>
 }
 
 function SetupStatus({ expanded, onOpenSettings }: { expanded: boolean; onOpenSettings: () => void }): React.JSX.Element {
-  const { ready, missingKeys, toolsOk } = useSetupState()
+  const { ready, missingKeys, reasons, toolsOk } = useSetupState()
 
   let tone: 'success' | 'warning' | 'danger' | 'idle' = 'success'
   let label = 'Ready to clip'
   if (missingKeys.length > 0) {
     tone = 'warning'
-    label = missingKeys.length === 2 ? 'Add API keys' : `Add ${missingKeys[0]} key`
+    label = missingKeys.length === 1 ? missingKeys[0] : 'Add API keys'
+  } else if (reasons.length > 0) {
+    tone = 'warning'
+    label = reasons[0]
   } else if (toolsOk === false) {
     tone = 'danger'
     label = 'System check failed'

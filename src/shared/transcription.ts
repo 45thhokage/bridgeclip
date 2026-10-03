@@ -160,6 +160,14 @@ export function isTranscriptionProvider(value: unknown): value is TranscriptionP
   return value === 'openrouter' || value === 'local'
 }
 
+/** The Transcription stage as the Settings and Create screens show it. */
+export function transcriptionStageLabel(settings: TranscriptionSettings): string {
+  if (settings.provider === 'local') {
+    return settings.localModelId ? `Local - ${localModel(settings.localModelId).label}` : 'Local - choose a model'
+  }
+  return 'Cloud - OpenRouter'
+}
+
 export function isGpuFamily(value: unknown): value is GpuFamily {
   return typeof value === 'string' && GPU_FAMILY_OPTIONS.some((option) => option.id === value)
 }

@@ -2,7 +2,9 @@ import { openEditor, saveEditor, runEditor, cancelEditor, replaceEditorSource } 
 import { editorCloseReady, freeEditorMedia, readEditorProgress } from './clip-editor'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
-import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, saveTranscriptionSettings, type ApiKeyName, type PublicSettings } from './settings-store'
+import { loadSettings, publicSettings, replaceApiKey, savePlanningSettings, savePublicSettings, saveTranscriptionSettings, type ApiKeyName, type PublicSettings } from './settings-store'
+import { listPlanningModels, planningUsesOpenRouter, testPlanningConnection, validatePlanningSettings } from './planning'
+import { isPlanningProviderId, mergePlanningSettings } from '../shared/planning'
 import { cancelModelDownload, checkLocalRuntime, deleteModel, listLocalModels, localRuntimeInstallCommand, localTranscriptionJobOptions, localTranscriptionOverview, selectedModelDownloaded, startModelDownload } from './local-transcription'
 import { normalizeTranscriptionSettings } from '../shared/transcription'
 import { ensureOutputDir, getJobHistory, getJobOutput, generateThumbnail } from './file-manager'
@@ -60,6 +62,8 @@ import {
 
 /** A passing engine check is reused briefly, so queuing several videos stays quick. */
 const ENGINE_CHECK_TTL_MS = 5 * 60 * 1000
+
+
 
 export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): void {
   const selectedOutputDirectories = new Set<string>()
@@ -188,9 +192,20 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     } catch (error) { return { error: error instanceof Error ? error.message : 'Invalid job options' } }
     const settings = loadSettings()
 
-    if (!settings.openrouterApiKey) {
-      logger.warn('job.start.missingKey', { key: 'OPENROUTER_API_KEY' })
-      return { error: 'OpenRouter API key is required for AI clip planning. Go to Settings to add it.' }
+    // Resolve each stage from saved settings before queuing. The renderer never
+    // sends a planning URL, model or key with the job.
+    try {
+      await validatePlanningSettings(settings)
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'Finish the clip-planning setup in Settings.' }
+    }
+    if (planningUsesOpenRouter(settings) && !settings.openrouterApiKey) {
+      logger.warn('job.start.missingKey', { key: 'OPENROUTER_API_KEY', stage: 'planning' })
+      return { error: 'Clip planning is set to OpenRouter, so it needs an OpenRouter API key. Add one in Settings, or switch clip planning to a local server.' }
+    }
+    // Review & edit always reviews candidates with Jev through OpenRouter.
+    if (config.workflow === 'review' && !settings.openrouterApiKey) {
+      return { error: 'Review & edit needs Jev, which uses an OpenRouter API key. Add one in Settings, or choose the Automatic workflow.' }
     }
 
     // Local transcription only runs with a catalog model that is downloaded;
@@ -406,6 +421,15 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
     return { success: count > 0, count, failedCount: clips.length - count, destDir }
   })
+
+  handle('planning:save', (_event, update: unknown) => {
+    if (!update || typeof update !== 'object') throw new Error('Invalid planning settings')
+    return savePlanningSettings(mergePlanningSettings(loadSettings().planning, update))
+  })
+  handle('planning:models', (_event, refresh: unknown, target: unknown) =>
+    listPlanningModels(refresh === true, isPlanningProviderId(target) ? target : undefined))
+  handle('planning:testConnection', (_event, target: unknown) =>
+    testPlanningConnection(isPlanningProviderId(target) ? target : undefined))
 
   handle('transcription:overview', () => localTranscriptionOverview())
   handle('transcription:models', () => listLocalModels(loadSettings()))

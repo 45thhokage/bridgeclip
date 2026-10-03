@@ -39,6 +39,7 @@ function loadStore(userDataDir) {
       }
       if (id === '../shared/jev-settings') return loadShared('jev-settings.ts')
       if (id === '../shared/transcription') return loadShared('transcription.ts')
+      if (id === '../shared/planning') return loadShared('planning.ts')
       return require(id)
     },
     URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main')
