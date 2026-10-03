@@ -12,6 +12,7 @@ import { AutomationsPage } from './pages/AutomationsPage'
 import { BridgeClipLogo } from './components/brand/BridgeClipLogo'
 import { useSettingsStore } from './store/use-settings-store'
 import { useJobStore } from './store/use-job-store'
+import { useSetupStore } from './store/use-setup-store'
 import { useSidebarStore } from './store/use-sidebar-store'
 import { useUpdateStore } from './store/use-update-store'
 import { useChangelogStore } from './store/use-changelog-store'
@@ -30,6 +31,7 @@ export default function App(): React.JSX.Element {
 
   const loadSettings = useSettingsStore((s) => s.load)
   const checkTools = useSettingsStore((s) => s.checkTools)
+  const openSetup = useSetupStore((s) => s.openSetup)
   const settingsLoaded = useSettingsStore((s) => s.loaded)
   const changelogOpen = useChangelogStore((s) => s.open)
   const closeChangelog = useCallback(() => useChangelogStore.getState().setOpen(false), [])
@@ -129,7 +131,17 @@ export default function App(): React.JSX.Element {
             {page === 'accounts' && <AccountsPage onNavigate={setPage} />}
             {page === 'posts' && <PostsPage onNavigate={setPage} />}
             {page === 'automations' && <AutomationsPage onNavigate={setPage} onViewLibrary={viewLibraryRun} />}
-            {page === 'settings' && <SettingsPage showUpdates={showUpdates} />}
+            {page === 'settings' && (
+              <SettingsPage
+                showUpdates={showUpdates}
+                // "Run setup again": open the card on Create, where it lives.
+                onRunSetup={() => {
+                  openSetup()
+                  setPage('clip')
+                  setPageVisit((visit) => visit + 1)
+                }}
+              />
+            )}
           </Fragment>
         </Layout>
       ) : (
