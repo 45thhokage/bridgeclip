@@ -1,0 +1,244 @@
+name: Fork release
+
+# Unsigned packages for this fork: Windows x64 (installer and portable ZIP),
+# Linux x64 (AppImage and DEB) and macOS arm64/x64 (DMG and ZIP). Everything is
+# built here, so a release needs no local runtime staging. See
+# docs/RELEASING.md, "Fork releases (unsigned)".
+#
+# Runs on a v* tag push, or on demand for a tag that already exists (the
+# workflow itself may be newer than the tag).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build (for example v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    # macOS x64 needs an Intel runner, which is a paid larger runner on GitHub
+    # plans that do not include it. Skipping that entry still publishes the rest.
+    continue-on-error: ${{ matrix.optional == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+            builder: win
+            arch: x64
+          - target: linux-x64
+            runner: ubuntu-latest
+            builder: linux
+            arch: x64
+          - target: mac-arm64
+            runner: macos-latest
+            builder: mac
+            arch: arm64
+          - target: mac-x64
+            runner: ${{ vars.MAC_X64_RUNNER || 'macos-26-intel' }}
+            builder: mac
+            arch: x64
+            optional: true
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install the media build tools (Linux)
+        if: matrix.builder == 'linux'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y patchelf fakeroot
+
+      - name: Set up Python for runtime staging
+        if: matrix.builder != 'mac'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Stage the pinned Python, FFmpeg and yt-dlp runtime
+        if: matrix.builder != 'mac'
+        run: python scripts/release/stage-runtime.py
+
+      - name: Install the Homebrew build dependencies (macOS)
+        if: matrix.builder == 'mac'
+        run: brew install pkg-config libass nasm
+
+      - name: Prepare the macOS runtime and bundled FFmpeg
+        if: matrix.builder == 'mac'
+        shell: bash
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+          bash scripts/prepare-resources.sh ${{ matrix.arch }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the app
+        run: npm run build
+
+      # electron-builder.yml names BridgeMind as the update feed and signs with
+      # their certificates. Rewrite the disposable checkout's config so this
+      # build is unsigned and updates from this fork's releases instead.
+      - name: Write the unsigned fork packaging config
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs')
+          const yaml = require('js-yaml')
+          const config = yaml.load(fs.readFileSync('electron-builder.yml', 'utf8'))
+          delete config.forceCodeSigning
+          config.publish = { provider: 'github', owner: '45thhokage', repo: 'bridgeclip' }
+          config.win = {
+            ...config.win,
+            // An unsigned installer cannot pass publisher verification, so
+            // updates are trusted through HTTPS and the feed checksums instead.
+            verifyUpdateCodeSignature: false,
+            target: [
+              { target: 'nsis', arch: ['x64'] },
+              // Portable: unzip anywhere and run BridgeClip.exe.
+              { target: 'zip', arch: ['x64'] }
+            ]
+          }
+          config.mac = { ...config.mac, identity: null, notarize: false }
+          fs.writeFileSync('electron-builder.yml', yaml.dump(config, { noRefs: true, lineWidth: 200 }))
+          NODE
+
+      - name: Package
+        shell: bash
+        run: npx electron-builder --${{ matrix.builder }} --${{ matrix.arch }} --publish never
+
+      - name: Keep the packages for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.blockmap
+            dist/latest.yml
+            dist/latest-linux.yml
+            dist/latest-mac.yml
+
+  publish:
+    name: Publish the release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 1
+
+      - name: Collect the packages
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+
+      # Squirrel.Mac reads one latest-mac.yml for both architectures, so the
+      # two builds' feeds are merged (and their hashes checked) before upload.
+      - name: Merge the macOS update feed and flatten the assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d assets/mac-arm64 ] && [ -d assets/mac-x64 ]; then
+            node scripts/merge-update-metadata.cjs assets
+          elif [ -d assets/mac-arm64 ]; then
+            cp assets/mac-arm64/latest-mac.yml assets/latest-mac.yml
+            echo "::warning::Only mac-arm64 was built; latest-mac.yml describes that architecture alone."
+          elif [ -d assets/mac-x64 ]; then
+            cp assets/mac-x64/latest-mac.yml assets/latest-mac.yml
+            echo "::warning::Only mac-x64 was built; latest-mac.yml describes that architecture alone."
+          fi
+          for dir in assets/*/; do
+            find "$dir" -maxdepth 1 -type f ! -name latest-mac.yml -exec cp -t assets {} +
+          done
+          rm -rf assets/*/
+
+      - name: Check the asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          packages=0
+          for asset in assets/BridgeClip-*; do
+            [ -e "$asset" ] || continue
+            case "$(basename "$asset")" in
+              *-"$version"-*) packages=$((packages + 1)) ;;
+              *) echo "::error::$asset does not carry version $version"; exit 1 ;;
+            esac
+          done
+          if [ "$packages" -eq 0 ]; then
+            echo "::error::No packages were built for $version"
+            exit 1
+          fi
+          for platform in win-x64 linux-x64 mac-arm64 mac-x64; do
+            ls assets/BridgeClip-"$version"-"$platform".* >/dev/null 2>&1 || echo "::warning::No package for $platform"
+          done
+
+      - name: Write the checksum file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
+
+      - name: Write the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          awk -v v="$version" 'BEGIN{keep=0} /^## \[/{ if (index($0, "[" v "]") > 0) { keep=1; next } else if (keep) exit } keep { print }' CHANGELOG.md > section.md
+          [ -s section.md ] || echo "::warning::CHANGELOG.md has no section for $version"
+          {
+            echo "Unsigned build of BridgeClip $version from this fork, packaged by GitHub Actions."
+            echo
+            echo "- **Windows:** SmartScreen warns until you pick **More info -> Run anyway**. The ZIP is portable: unzip and run \`BridgeClip.exe\`."
+            echo "- **macOS:** right-click the app and choose **Open** the first time. Auto-update stays off for unsigned builds."
+            echo "- **Linux:** the AppImage is portable; the DEB installs for the current user."
+            echo "- Verify every download against \`SHA256SUMS.txt\`."
+            echo "- FFmpeg corresponding source (LGPL): https://github.com/45thhokage/bridgeclip/releases/tag/sources-ffmpeg-8.1.3"
+            echo
+            cat section.md
+          } > release-notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          version=$(node -p "require('./package.json').version")
+          title="BridgeClip $version (unsigned fork build)"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file release-notes.md --latest
+          else
+            gh release create "$tag" --title "$title" --notes-file release-notes.md --latest
+          fi
+          gh release upload "$tag" assets/* --clobber

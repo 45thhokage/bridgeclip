@@ -31,6 +31,8 @@
 
 Get BridgeClip from **[bridgeclip.ai](https://www.bridgeclip.ai)** or [GitHub Releases](https://github.com/bridge-mind/bridgeclip/releases).
 
+**This fork adds local transcription and clip planning** and publishes its own unsigned builds under [this fork's Releases](https://github.com/45thhokage/bridgeclip/releases): Windows installer and portable ZIP, Linux AppImage and DEB, macOS DMG and ZIP. They are not signed or notarized — expect a SmartScreen warning on Windows and a right-click **Open** on macOS — and every download is listed with its SHA-256 in `SHA256SUMS.txt`. The upstream links above stay the official, signed builds without the local stages.
+
 | Platform | Architecture | Install |
 | --- | --- | --- |
 | macOS | Apple silicon, Intel | Open the matching DMG and drag BridgeClip to Applications. |

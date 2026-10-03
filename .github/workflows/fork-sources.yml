@@ -1,0 +1,64 @@
+name: Mirror FFmpeg corresponding source
+
+# The Windows and Linux packages ship FFmpeg binaries, so LGPL compliance needs
+# the matching source available. The archives are pinned to one FFmpeg version
+# and never change, so mirror them once instead of adding 3.4 GB to every
+# release. App releases link this release's tag.
+#
+# Requires the upstream archives and their checksum manifest to exist on
+# bridge-mind/bridgeclip (they do for v0.1.18 and later). See docs/RELEASING.md.
+on:
+  workflow_dispatch:
+    inputs:
+      source_release:
+        description: Upstream release that carries the archives
+        required: true
+        default: v0.1.19
+      target_release:
+        description: Release in this fork that holds the mirror
+        required: true
+        default: sources-ffmpeg-8.1.3
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the archives and the published manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p source
+          gh release download "${{ inputs.source_release }}" -R bridge-mind/bridgeclip \
+            --pattern 'ffmpeg-corresponding-source-*.tar.xz' --pattern 'SHA256SUMS.txt' \
+            --dir source
+
+      - name: Verify every archive against the upstream manifest
+        run: |
+          set -euo pipefail
+          cd source
+          grep ffmpeg-corresponding-source SHA256SUMS.txt > upstream-files.txt
+          sha256sum --check upstream-files.txt
+          ls -l ffmpeg-corresponding-source-*.tar.xz
+
+      - name: Upload the mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="${{ inputs.target_release }}"
+          if ! gh release view "$release" >/dev/null 2>&1; then
+            gh release create "$release" --latest=false \
+              --title "FFmpeg corresponding source (mirror)" \
+              --notes "Version-pinned FFmpeg corresponding source, mirrored unmodified from bridge-mind/bridgeclip \${{ inputs.source_release }} for LGPL compliance. This is not an app release; ignore it when looking for installers."
+          fi
+          cd source
+          mv upstream-files.txt UPSTREAM-MANIFEST.txt
+          rm -f SHA256SUMS.txt
+          sha256sum ffmpeg-corresponding-source-*.tar.xz > SHA256SUMS.txt
+          gh release upload "$release" \
+            ffmpeg-corresponding-source-*.tar.xz SHA256SUMS.txt UPSTREAM-MANIFEST.txt \
+            --clobber

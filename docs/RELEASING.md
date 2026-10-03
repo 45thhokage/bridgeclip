@@ -4,6 +4,32 @@ BridgeClip source and official downloads live in `bridge-mind/bridgeclip`. Tests
 
 The primary maintainers set the project's direction and review contributions under [CONTRIBUTING.md](../CONTRIBUTING.md). Main requires a pull request and the configured checks; release tags cannot be moved or deleted. Anyone can open a pull request from a fork; only the maintainer can push branches or merge. Public source can still be forked under the MIT license. Administrators can change access policy, so review collaborators and automation access before each release.
 
+## Fork releases (unsigned)
+
+This fork (`45thhokage/bridgeclip`) ships its own unsigned packages so the local transcription and clip-planning work can be used without building from source. They are **not** official BridgeMind releases: no Apple Developer ID, no Authenticode certificate, no notarization, and no upstream support. Upstream keeps public Actions disabled; this fork enables Actions for these builds only.
+
+[`.github/workflows/fork-release.yml`](../.github/workflows/fork-release.yml) packages every platform on a `v*` tag push, or on demand (**Actions → Fork release → Run workflow**) for a tag that already exists — which is how a release is built from a tag that predates the workflow file.
+
+| Target | Artifacts |
+| --- | --- |
+| Windows x64 | `BridgeClip-<version>-win-x64.exe` (NSIS) and `BridgeClip-<version>-win-x64.zip` (portable: unzip and run `BridgeClip.exe`) |
+| Linux x64 | `BridgeClip-<version>-linux-x64.AppImage` (portable) and `BridgeClip-<version>-linux-x64.deb` |
+| macOS arm64 / x64 | `BridgeClip-<version>-mac-<arch>.dmg` and `.zip` (the ZIP is the portable form) |
+
+Each job stages the pinned Python, FFmpeg and yt-dlp runtimes from `scripts/release/runtime-lock.json` (`scripts/release/stage-runtime.py` on Windows and Linux, `scripts/prepare-resources.sh` on macOS), runs `npm run build`, then packages with `electron-builder.yml` after the workflow rewrites that file in the disposable checkout. The publish job merges the two macOS updater feeds (`scripts/merge-update-metadata.cjs`), writes `SHA256SUMS.txt`, reuses the version's `CHANGELOG.md` section as the release body, marks the release latest, and attaches the packages plus `latest.yml`, `latest-linux.yml` and `latest-mac.yml`.
+
+macOS x64 needs an Intel runner (`macos-26-intel` by default, a paid larger runner on some plans). Set the `MAC_X64_RUNNER` repository variable to another Intel label, or let that matrix entry fail: the other three targets still publish, and the mac feed then describes one architecture (`merge-update-metadata.cjs` verifies every byte it lists either way).
+
+Fork packaging deliberately differs from upstream:
+
+- **Unsigned.** Windows shows a SmartScreen warning; macOS blocks the first launch until the user right-clicks the app and chooses **Open**.
+- **Auto-updates come from this fork's releases.** The workflow replaces `publish.owner`/`publish.repo` with this repository, so a fork build never follows upstream's feed. Unsigned Windows installers cannot pass publisher verification, so fork builds set `win.verifyUpdateCodeSignature: false`; macOS keeps auto-update off because the app is not signed by team `9CBJCDR3J2`; Linux updates normally.
+- **No bundled models or local runtime.** Packages carry the cloud engine runtime (`engine/requirements.lock`) only. Local transcription needs the documented locked install ([Local transcription](../README.md#local-transcription)), and transcription models are always downloaded in the app from **Settings → Local setup**. Local clip planning connects to a server the user already runs and downloads no model.
+- **FFmpeg corresponding source is mirrored once.** Run **Mirror FFmpeg corresponding source** (`.github/workflows/fork-sources.yml`) to copy the version-pinned archives from an upstream release into a `sources-ffmpeg-<version>` release here. App releases link it instead of adding 3.4 GB per version. The mirror is only valid while `engine-bin`'s FFmpeg matches `scripts/release/runtime-lock.json`; re-mirror after an FFmpeg bump.
+- **No detached signature, SBOM or artifact manifest.** `SHA256SUMS.txt` is generated from the uploaded bytes instead of the signed upstream manifest.
+
+Fork releases live only on `https://github.com/45thhokage/bridgeclip/releases`. Never label them official, never publish into `bridge-mind/bridgeclip`, and keep the upstream process below for official releases.
+
 ## Packages
 
 | System | Architecture | Download | Verification |
