@@ -95,9 +95,9 @@ Use footage you have permission to use. See the [user guide](docs/usage.md) for 
 
 ## AI, costs and privacy
 
-**Rendering is local; AI processing uses cloud providers.** By default, audio and transcripts go to OpenRouter; with [local transcription](#local-transcription), audio never leaves this computer and only transcript text goes to OpenRouter for planning. Visual-only planning and enabled AI framing checks can send sampled frames. Your videos and keys do not pass through a BridgeMind server.
+**Rendering is local; AI processing uses cloud providers or your own machine.** Each stage picks its own source in **Settings → Pipeline**. By default, audio and transcripts go to OpenRouter; transcription can run on this computer, and clip planning can use OpenRouter, OpenCode Zen, OpenCode Go, a custom https endpoint, or a local server you already run. Extras (Jev review, framing checks, source research, metadata) always use OpenRouter. Visual-only planning and enabled AI framing checks can send sampled frames. Your videos and keys do not pass through a BridgeMind server.
 
-- **Bring your own accounts.** AI calls bill your OpenRouter account. Optional social publishing uses your Zernio account and uploads selected clips to its service.
+- **Bring your own accounts.** Cloud AI calls bill the account you choose: OpenRouter by default, or OpenCode for OpenCode Zen/Go models. Optional social publishing uses your Zernio account and uploads selected clips to its service.
 - **Choose additional analysis.** Jev review for Automatic, source web research and additional visual context are opt-in betas. Review & edit always uses Jev; these features can add provider cost.
 - **Keep control of local data.** Keys use operating-system secure storage. Run folders retain transcripts and edit records; editor projects also retain a source copy and playback preview.
 
@@ -105,7 +105,7 @@ Read [AI, costs and privacy](docs/ai-and-privacy.md) for provider data flows, re
 
 ## Local transcription
 
-**Settings → Transcription** can transcribe on this computer instead of sending audio to OpenRouter. Choose **Local**, pick the GPU that matches your computer, download a model, then use that model for new jobs. Audio, and the models themselves, stay on this computer; transcript text still goes to OpenRouter for clip planning, so an OpenRouter key is still required. Local transcription costs nothing per audio minute.
+**Settings → Local setup** can transcribe on this computer instead of sending audio to OpenRouter. Choose **Local**, pick the GPU that matches your computer, download a model, then use that model for new jobs. Audio, and the models themselves, stay on this computer. Clip planning then uses whatever source **Settings → Pipeline** selects: OpenRouter by default, or a cloud or local planner of its own. Local transcription costs nothing per audio minute.
 
 BridgeClip never installs the local runtime by itself. The settings page and System check show the exact command for your installation when it is missing; the locked dependencies are also:
 
@@ -124,6 +124,14 @@ engine\.venv\Scripts\python.exe -m pip install --require-hashes -r engine\requir
 REM NVIDIA GPUs also install the CUDA libraries (cuBLAS 12 + cuDNN 9):
 engine\.venv\Scripts\python.exe -m pip install --require-hashes -r engine\requirements-local-cuda.lock
 ```
+
+## Clip planning
+
+Clip planning (choosing the moments) is independent of transcription. **Settings → Cloud API** offers OpenRouter (the default), **OpenCode Zen** (`https://opencode.ai/zen/v1`) and **OpenCode Go** (`https://opencode.ai/zen/go/v1`), plus an optional custom https endpoint. OpenCode keys come from [opencode.ai/auth](https://opencode.ai/auth); one key works for both, they are stored per provider, and Zen also lists free models that may be rate-limited or rejected for third-party apps. Pick a model from the fetched list (nothing is hardcoded) and use **Test connection** to check the key and model before a run.
+
+**Settings → Local setup** can instead connect to an OpenAI-compatible server you already run: Ollama, LM Studio, llama.cpp server, or a typed address. Only loopback addresses (`127.0.0.1`, `::1`, `localhost`) are allowed, the bridge network guard permits plain http only for the exact saved host and port while clip planning is set to Local, and every other private or link-local range stays blocked. Set the server's context window in the app (default 8192 tokens); a transcript that does not fit is refused before any request instead of being truncated.
+
+Planning works with any mix: cloud transcription with a local planner, local transcription with cloud planning, or both on this computer. Cloud planning cost is shown as **not reported by provider** when the provider does not return usage prices; local planning costs $0. Extras stay OpenRouter-only. With OpenCode, transcript text and prompts go to opencode.ai and the model provider it routes to; retention depends on their terms.
 
 ## Documentation
 

@@ -2,21 +2,26 @@
 
 [Overview](../README.md) · [User guide](usage.md) · [Editor](editor.md)
 
-BridgeClip renders on your computer and calls providers directly with your keys. It has no BridgeMind account or backend. AI planning and optional review use paid OpenRouter services, and transcription uses OpenRouter unless you switch it to this computer; social publishing uses Zernio. Provider accounts, charges, retention and data policies are governed by those services.
+BridgeClip renders on your computer and calls providers directly with your keys. It has no BridgeMind account or backend. Transcription and clip planning each choose their own source: OpenRouter by default, OpenCode Zen, OpenCode Go, a custom endpoint, or a server on this computer. Extras (Jev review, framing checks, source research, metadata) always use OpenRouter. Social publishing uses Zernio. Provider accounts, charges, retention and data policies are governed by those services.
 
 ## What leaves your computer
 
 | Action | Data sent | Destination |
 | --- | --- | --- |
 | Transcription and planning (default) | Source audio and transcript text | OpenRouter |
-| Local transcription (Settings → Transcription) | Nothing from your video: audio stays on this computer; transcript text still goes to OpenRouter for planning | This computer |
+| Clip planning with OpenCode Zen or Go (Settings → Cloud API) | Transcript text and prompts | opencode.ai, and the model provider it routes to |
+| Clip planning with a custom endpoint | Transcript text and prompts | The https endpoint you type |
+| Local transcription (Settings → Local setup) | Nothing from your video: audio stays on this computer; transcript text goes to the clip-planning source you chose | This computer |
+| Local clip planning (Settings → Local setup) | Transcript text and prompts, sent only to the saved loopback address | This computer |
 | Model download (Settings → Transcription) | A request for the pinned public model repository; Hugging Face sees your network address like any download | Hugging Face |
 | Visual-only planning or enabled AI framing checks | Sampled source frames | OpenRouter |
 | Jev review | Bounded transcript excerpts, titles and diagnostic text | TypeSafe Jev through OpenRouter |
 | Optional source research | Public video title, description and channel | OpenRouter web search and brief generation |
 | Social publishing | Selected clip, caption, accounts and publishing options | Zernio and the selected platforms |
 
-For a link, the app downloads the source using your network connection. Audio for MAI Transcribe 2 (Quality), Whisper Turbo (Economy), or your selected transcription model (Advanced) goes to OpenRouter. With **Settings → Transcription** set to **On this computer**, a downloaded model transcribes the audio here instead: the audio never leaves the computer, only the transcript text goes to OpenRouter for planning, downloads contact Hugging Face once, and the local model then runs offline. Local transcription reports no per-minute charge. Quality and Economy retry temporary transcription failures and use fallback models when needed; Economy tries Whisper Large V3 before MAI. Advanced retries only your chosen model. Transcript text for clip planning also goes to OpenRouter.
+For a link, the app downloads the source using your network connection. Audio for MAI Transcribe 2 (Quality), Whisper Turbo (Economy), or your selected transcription model (Advanced) goes to OpenRouter. With **Settings → Local setup** set to **Local** transcription, a downloaded model transcribes the audio here instead: the audio never leaves the computer, downloads contact Hugging Face once, and the local model then runs offline. Local transcription reports no per-minute charge. Quality and Economy retry temporary transcription failures and use fallback models when needed; Economy tries Whisper Large V3 before MAI. Advanced retries only your chosen model.
+
+Clip planning sends transcript text and prompts to the source selected under **Settings → Pipeline**: OpenRouter, OpenCode Zen or Go (opencode.ai and the model provider it routes to; retention depends on their terms), a custom https endpoint you configure, or a local server where only the transcript and prompts go to the saved loopback address. A local planner is never installed or started by BridgeClip. With OpenCode, free models can be rate-limited or rejected for third-party apps; the app says so instead of retrying silently.
 
 If the video has no audio or no speech, BridgeClip samples video frames and sends those images to OpenRouter for visual-only planning. In Advanced, the selected planner must support image input for this fallback.
 
@@ -63,7 +68,7 @@ The brief accompanies discovery and boundary repairs; Jev never receives it. The
 
 The pipeline transcribes the **entire source**, even when you select a preferred range. That range and the selected clip durations guide discovery; they are not hard cut boundaries. The planner proposes complete ideas, and editorial repairs can extend boundaries to include setup, qualifications and payoff when Jev review is enabled. Model presets and fallback behavior are documented in the [transcription guide](transcription.md). This can increase transcription cost compared with transcribing only a selected range.
 
-OpenRouter billing is authoritative. In-app totals can be partial when providers omit usage or a request times out. See [model selection and transcription](transcription.md) for current presets, compatibility, retries and fallbacks, and [job diagnostics](usage.md#progress-and-cost) for per-stage usage.
+OpenRouter billing is authoritative. In-app totals can be partial when providers omit usage or a request times out, and clip planning on a provider that does not report prices is labeled **cost not reported by provider** rather than guessed; local planning costs $0. See [model selection and transcription](transcription.md) for current presets, compatibility, retries and fallbacks, and [job diagnostics](usage.md#progress-and-cost) for per-stage usage.
 
 ## Local storage and cleanup
 
