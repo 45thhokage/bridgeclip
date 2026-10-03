@@ -1,10 +1,22 @@
-import { readFileSync, readdirSync, statSync } from 'fs'
+import { readFileSync, readdirSync, realpathSync, statSync } from 'fs'
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import type { Plugin } from 'vite'
 
-const { version } = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8')) as { version: string }
+// Resolve the real on-disk path and run from there. When the repo is opened
+// through a symlink or junction (e.g. a Pinokio api folder linked elsewhere),
+// Vite's dep optimizer crashes with "Cannot read properties of undefined
+// (reading 'imports')" because esbuild reports real paths while Vite looks
+// them up under the symlinked cwd (vitejs/vite#9327). Normalizing once here
+// keeps root, cacheDir, ids and process.cwd() consistent. The launcher must
+// NOT `cd` across drives instead: Pinokio tracks the shell by its prompt,
+// loses the session on a drive change ("Detached from Shell") and terminates
+// the whole app tree.
+const ROOT = realpathSync.native(__dirname)
+process.chdir(ROOT)
+
+const { version } = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8')) as { version: string }
 
 /** Renderer dependencies are bundled from devDependencies, outside npm's runtime inventory. */
 function bundledLicenseNotices(): Plugin {
@@ -40,7 +52,7 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/main/index.ts')
+          index: resolve(ROOT, 'src/main/index.ts')
         }
       }
     }
@@ -50,17 +62,17 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/preload/index.ts')
+          index: resolve(ROOT, 'src/preload/index.ts')
         }
       }
     }
   },
   renderer: {
-    root: resolve(__dirname, 'src/renderer'),
+    root: resolve(ROOT, 'src/renderer'),
     build: {
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/renderer/index.html')
+          index: resolve(ROOT, 'src/renderer/index.html')
         }
       }
     },
@@ -84,7 +96,7 @@ export default defineConfig({
     },
     resolve: {
       alias: {
-        '@': resolve(__dirname, 'src/renderer')
+        '@': resolve(ROOT, 'src/renderer')
       }
     }
   }

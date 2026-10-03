@@ -17,6 +17,7 @@ import { SettingRow } from './ui/SettingRow'
 import { onRadioKeyDown } from './ui/Segmented'
 import { CLIP_REQUEST_MAX_CHARS, DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
 import { isModelId } from '../../shared/openrouter-models'
+import { localModel } from '../../shared/transcription'
 import { useModelStore } from '../store/use-model-store'
 import { useSettingsStore } from '../store/use-settings-store'
 import { ModelPicker } from './ModelPicker'
@@ -410,6 +411,9 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
 
 export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
   const jevEnabled = useSettingsStore((s) => s.jevEnabled === 'on')
+  const transcription = useSettingsStore((s) => s.transcription)
+  const localId = transcription.provider === 'local' ? transcription.localModelId : null
+  const transcriptionHint = localId ? `Local (${localModel(localId).label})` : 'MAI Transcribe 2'
   const toggleDuration = (id: string): void => {
     update({ durations: draft.durations.includes(id) ? draft.durations.filter((d) => d !== id) : [...draft.durations, id] })
   }
@@ -430,8 +434,8 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
       <Group label="Clipping mode">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Clipping mode">
           {([
-            { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · MAI Transcribe 2` },
-            { id: 'economy', label: 'Economy', hint: 'GLM 5.3 Flash planning · Whisper Turbo' },
+            { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · ${transcriptionHint}` },
+            { id: 'economy', label: 'Economy', hint: `GLM 5.3 Flash planning · ${transcriptionHint}` },
             { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' }
           ] as const).map((mode) => {
             const selected = draft.clippingMode === mode.id
@@ -444,7 +448,9 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
           })}
         </div>
         {draft.clippingMode === 'advanced' ? <AdvancedModels draft={draft} update={update} /> :
-          <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
+          transcription.provider === 'local' ?
+            <p className="mt-2 text-2xs text-ink-subtle">Transcription runs on this computer with {localId ? localModel(localId).label : 'the selected local model'}, so the audio never leaves it. Clip planning still uses OpenRouter.</p> :
+            <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
       </Group>
       <Group label="Clip length" aside={draft.durations.length === 0 ? 'Any length' : `${draft.durations.length} selected`}>
         <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-7" role="group" aria-label="Clip length options">
@@ -546,6 +552,9 @@ function ReviewStep({ draft, trim, onEdit }: {
   onEdit: (step: WizardStep) => void
 }): React.JSX.Element {
   const active = useActiveJobs()
+  const transcription = useSettingsStore((s) => s.transcription)
+  const localId = transcription.provider === 'local' ? transcription.localModelId : null
+  const transcriptionLabel = localId ? `Local (${localModel(localId).label})` : 'OpenRouter'
   const runningCount = active.filter((job) => job.status !== 'queued').length
   const lengths = draft.durations.length === 0
     ? 'Any length'
@@ -564,6 +573,7 @@ function ReviewStep({ draft, trim, onEdit }: {
     { step: 'format', label: 'Pacing', value: draft.workflow === 'review' ? 'Manual · choose your own cuts in the editor' : draft.pacing === 'tight' ? 'Cut dead air' : 'Keep pauses' },
     { step: 'format', label: 'Speed', value: `${draft.videoSpeed ?? 1}×${(draft.videoSpeed ?? 1) === 1 ? ' · Normal' : ' · All exported clips'}` },
     { step: 'clips', label: 'Mode', value: draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
+    { step: 'clips', label: 'Transcription', value: transcriptionLabel },
     { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? 'AI decides how many' : `Up to ${draft.maxClips}`}` },
     { step: 'clips', label: 'What to clip', value: draft.clipRequest?.trim() || 'The best moments' },
     { step: 'captions', label: 'Captions', value: draft.includeCaptions ? CAPTION_PRESET_NAMES[draft.captionPreset] ?? draft.captionPreset : 'Off' }

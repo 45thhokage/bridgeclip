@@ -186,6 +186,7 @@ test('the native picker authorizes media and shell opening rejects aliased appli
       './edit-inspector': { inspectEdits: async () => ({}) },
       './run-history': runHistory,
       './pipeline-runner': {},
+      './local-transcription': {},
       './job-manager': { initJobManager() {} },
       './logger': {},
       './security': security,
@@ -395,6 +396,7 @@ test('engine checks distinguish missing modules, models, contracts and timeouts 
   const runner = loadSource('pipeline-runner.ts', {
     electron: { app }, child_process: { execFile },
     './settings-store': {}, './logger': {}, '../shared/job-output': {},
+    './local-transcription': { localTranscriptionJobOptions: () => ({}), localFailureHint: () => null },
     '../shared/job-contract': jobContract, './run-history': {}, './tools': {}
   })
   const check = () => runner.validatePython('/project with spaces/.venv/bin/python', '/project with spaces/engine')
@@ -459,6 +461,7 @@ test('Windows resolves the saved legacy Python default without replacing an inst
       if (!python3Runnable) throw new Error('Python is unavailable')
     } },
     './settings-store': {}, './logger': {}, '../shared/job-output': {},
+    './local-transcription': { localTranscriptionJobOptions: () => ({}), localFailureHint: () => null },
     '../shared/job-contract': {}, './run-history': {}, './tools': {}
   }, { process: winProcess })
 
@@ -637,6 +640,7 @@ test('pipeline preserves split JSON messages and protects the job identity', asy
     } },
     './settings-store': { loadSettings: () => settings, getSettingsForBridge: () => ({}), vocabularyTerms: () => [] },
     './logger': { logger: { info() {}, error() {}, warn() {} } },
+    './local-transcription': { localTranscriptionJobOptions: () => ({}), localFailureHint: () => null },
     '../shared/job-output': jobOutput,
     './run-history': runHistory,
     '../shared/job-contract': jobContract,
@@ -688,6 +692,7 @@ test('pipeline rejects a mismatched result identity and a failed process exit', 
       child_process: { execFile: require('node:child_process').execFile, spawn: () => child },
       './settings-store': { loadSettings: () => settings, getSettingsForBridge: () => ({}), vocabularyTerms: () => [] },
       './logger': { logger: { info() {}, error() {}, warn() {} } },
+      './local-transcription': { localTranscriptionJobOptions: () => ({}), localFailureHint: () => null },
       '../shared/job-output': jobOutput,
       './run-history': runHistory,
       '../shared/job-contract': jobContract,
@@ -723,6 +728,7 @@ test('a bridge failure is saved in run history before the UI receives it', async
     child_process: { execFile: require('node:child_process').execFile, spawn: () => child },
     './settings-store': { loadSettings: () => settings, getSettingsForBridge: () => ({}), vocabularyTerms: () => [] },
     './logger': { logger: { info() {}, error(event, context) { logs.push({ event, context }) }, warn() {} } },
+    './local-transcription': { localTranscriptionJobOptions: () => ({}), localFailureHint: () => null },
     './run-history': runHistory,
     '../shared/job-output': jobOutput,
     '../shared/job-contract': jobContract,
@@ -784,6 +790,7 @@ test('cancellation retains a live process group after the leader closes and forc
     child_process: { execFile: require('node:child_process').execFile, spawn: () => child },
     './settings-store': { loadSettings: () => settings, getSettingsForBridge: () => ({}), vocabularyTerms: () => [] },
     './logger': { logger: { info() {}, error() {}, warn() {} } },
+    './local-transcription': { localTranscriptionJobOptions: () => ({}), localFailureHint: () => null },
     '../shared/job-output': jobOutput,
     './run-history': runHistory,
     '../shared/job-contract': jobContract,
@@ -861,7 +868,7 @@ test('Jev migration drops the separate TypeSafe key without decrypting it', () =
     assert.equal(loaded.jevEnabled, 'off')
     assert.equal(loaded.jevVisualContext, 'on')
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
-    assert.equal(saved.version, 12)
+    assert.equal(saved.version, 13)
     assert.equal(Object.hasOwn(saved, 'typesafeApiKey'), false)
     assert.equal(Object.hasOwn(saved, 'typesafeVisualContext'), false)
     assert.equal(Object.hasOwn(loaded, 'typesafeApiKey'), false)
@@ -885,7 +892,7 @@ test('Jev thresholds migrate, validate atomically, persist, and reach the worker
     const defaults = [.75, .70, .65, .70, .80, .50, .95]
     const initial = store.publicSettings(store.loadSettings())
     keys.forEach((key, i) => assert.equal(Number(initial[key]), defaults[i]))
-    assert.equal(JSON.parse(fs.readFileSync(file)).version, 12)
+    assert.equal(JSON.parse(fs.readFileSync(file)).version, 13)
     const values = ['0', '1', '0.61', '0.72', '0.83', '0.54', '0.96']
     const saved = store.savePublicSettings({ ...initial, ...Object.fromEntries(keys.map((key, i) => [key, values[i]])) })
     const worker = store.getSettingsForBridge(store.loadSettings())
@@ -938,7 +945,7 @@ test('Jev review and web research stay opt-in across upgrades, downgrades and mi
       assert.equal(loaded.openrouterApiKey, 'kept-openrouter')
       assert.equal(loaded.jevEnabled, 'off', `v${version} loads Jev off`)
       assert.equal(loaded.sourceContextWebResearch, 'off', `v${version} loads research off`)
-      assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 12)
+      assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 13)
     }
     // An explicit opt-in on the current version survives a reload.
     store.savePublicSettings({ ...store.publicSettings(store.loadSettings()), jevEnabled: 'on', sourceContextWebResearch: 'on' })

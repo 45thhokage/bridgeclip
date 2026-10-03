@@ -1,4 +1,5 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS } from '../../shared/jev-settings'
+import { TRANSCRIPTION_DEFAULTS } from '../../shared/transcription'
 import { create } from 'zustand'
 import { errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
@@ -29,6 +30,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   outputDirectory: '',
   pythonPath: 'python3',
   customVocabulary: '',
+  transcription: { ...TRANSCRIPTION_DEFAULTS },
   loaded: false,
   saving: false,
   toolStatus: null,
@@ -102,7 +104,8 @@ function pickSettings(s: ClipSettings): ClipSettings {
     zernioConfigured: s.zernioConfigured,
     outputDirectory: s.outputDirectory,
     pythonPath: s.pythonPath,
-    customVocabulary: s.customVocabulary
+    customVocabulary: s.customVocabulary,
+    transcription: s.transcription ?? { ...TRANSCRIPTION_DEFAULTS }
   }
 }
 

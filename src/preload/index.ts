@@ -24,6 +24,7 @@ import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
 import type { OutputStorageUsage } from '../shared/output-storage'
 import type { YouTubePreview } from '../shared/youtube-preview'
+import type { LocalModelId, LocalModelStatus, ModelDownloadState, TranscriptionOverview, TranscriptionSettings } from '../shared/transcription'
 
 export interface ClipSettings extends JevThresholdSettings {
   openrouterConfigured: boolean
@@ -34,6 +35,8 @@ export interface ClipSettings extends JevThresholdSettings {
   outputDirectory: string
   pythonPath: string
   customVocabulary: string
+  /** OpenRouter (default) or local; local planning still uses OpenRouter. */
+  transcription: TranscriptionSettings
 }
 
 export type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
@@ -69,6 +72,12 @@ export interface ToolStatus {
   enginePath: string
   bridgeRunner: boolean
   bridgePath: string
+  /** Local transcription rows; the runtime and model checks only run when it is selected. */
+  localTranscriptionRequested: boolean
+  localTranscriptionRuntime: boolean | null
+  localTranscriptionModel: boolean | null
+  localTranscriptionModelId: LocalModelId | null
+  localTranscriptionInstallCommand: string
 }
 
 export interface BridgeClipAPI {
@@ -88,6 +97,16 @@ export interface BridgeClipAPI {
   }
   edits: { inspect: (outputDir: string) => Promise<EditAudit> }
   models: { list: (refresh?: boolean) => Promise<OpenRouterCatalog> }
+  transcription: {
+    overview: () => Promise<TranscriptionOverview>
+    models: () => Promise<LocalModelStatus[]>
+    save: (settings: TranscriptionSettings) => Promise<TranscriptionOverview>
+    download: (modelId: LocalModelId) => Promise<{ ok: boolean; error?: string }>
+    cancelDownload: () => Promise<boolean>
+    deleteModel: (modelId: LocalModelId) => Promise<LocalModelStatus[]>
+    /** One event per progress change while a model downloads. */
+    onDownloadProgress: (callback: (state: ModelDownloadState) => void) => () => void
+  }
   automations: {
     reviewContent: (id: string, contentId: string, returnToQueue: boolean) => Promise<AutomationReviewResult>
     acknowledgeWarnings: (id: string | null, contentId?: string) => Promise<Automation[]>
@@ -248,6 +267,15 @@ const api: BridgeClipAPI = {
   },
   edits: { inspect: (outputDir) => ipcRenderer.invoke('edits:inspect', outputDir) },
   models: { list: (refresh = false) => ipcRenderer.invoke('models:list', refresh) },
+  transcription: {
+    overview: () => ipcRenderer.invoke('transcription:overview'),
+    models: () => ipcRenderer.invoke('transcription:models'),
+    save: (settings) => ipcRenderer.invoke('transcription:save', settings),
+    download: (modelId) => ipcRenderer.invoke('transcription:download', modelId),
+    cancelDownload: () => ipcRenderer.invoke('transcription:cancelDownload'),
+    deleteModel: (modelId) => ipcRenderer.invoke('transcription:deleteModel', modelId),
+    onDownloadProgress: (callback) => subscribe('transcription:downloadProgress', callback)
+  },
   automations: {
     reviewContent: (id, contentId, returnToQueue) => ipcRenderer.invoke('automations:reviewContent', id, contentId, returnToQueue),
     acknowledgeWarnings: (id, contentId) => ipcRenderer.invoke('automations:acknowledgeWarnings', id, contentId),

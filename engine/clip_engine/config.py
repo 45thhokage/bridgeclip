@@ -683,6 +683,16 @@ class Settings(BaseSettings):
     planner_output_price: Optional[float] = None
     transcription_diarize: bool = True
 
+    # Local transcription (desktop only). Settings chooses the provider; the
+    # bridge sets model, device and compute type per run. OpenRouter stays the
+    # default, and the local runtime is never installed automatically.
+    transcription_provider: Literal["openrouter", "local"] = "openrouter"
+    local_transcription_model_id: str = ""
+    local_transcription_model_dir: str = ""
+    local_transcription_backend: str = "faster-whisper"
+    local_transcription_device: Literal["cuda", "cpu"] = "cpu"
+    local_transcription_compute_type: Literal["float16", "int8"] = "int8"
+
     @field_validator("planner_reasoning_effort", "layout_vision_reasoning_effort")
     @classmethod
     def _validate_reasoning_effort(cls, value: str, info) -> str:
@@ -813,10 +823,6 @@ class Settings(BaseSettings):
         return 21600  # 6 hours max (credit-guarded in API)
 
     # Transcription uses the same OpenRouter key as planning.
-    @property
-    def transcription_provider(self) -> str:
-        return "openrouter"
-
     @property
     def transcription_model(self) -> str:
         if self.clipping_mode == "advanced":

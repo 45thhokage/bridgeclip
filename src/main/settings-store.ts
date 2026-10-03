@@ -1,4 +1,5 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS, type JevThresholdSettings } from '../shared/jev-settings'
+import { TRANSCRIPTION_DEFAULTS, normalizeTranscriptionSettings, type TranscriptionSettings } from '../shared/transcription'
 import { app, safeStorage } from 'electron'
 import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join } from 'path'
@@ -23,10 +24,15 @@ export interface AppSettings extends JevThresholdSettings {
   pythonPath: string
   /** Names and jargon the speech-to-text should spell correctly, one per line. */
   customVocabulary: string
+  /**
+   * OpenRouter (the default) or this computer. Local transcription needs the
+   * optional runtime and a downloaded model; planning still uses OpenRouter.
+   */
+  transcription: TranscriptionSettings
 }
 
 export type ApiKeyName = 'openrouterApiKey' | 'zernioApiKey'
-export type PublicSettings = Pick<AppSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | keyof JevThresholdSettings> & {
+export type PublicSettings = Pick<AppSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | 'transcription' | keyof JevThresholdSettings> & {
   openrouterConfigured: boolean
   zernioConfigured: boolean
 }
@@ -41,10 +47,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   zernioApiKey: '',
   outputDirectory: join(app.getPath('home'), 'BridgeClip'),
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
-  customVocabulary: ''
+  customVocabulary: '',
+  transcription: { ...TRANSCRIPTION_DEFAULTS }
 }
 
-const SETTINGS_VERSION = 12
+const SETTINGS_VERSION = 13
 /**
  * Versions 9-11 (pre-release builds of this feature) saved Jev review and web
  * research as on by default, and older versions drop the fields entirely, so a
@@ -65,6 +72,7 @@ interface PersistedSettings extends JevThresholdSettings {
   outputDirectory: string
   pythonPath: string
   customVocabulary?: string
+  transcription?: TranscriptionSettings
 }
 
 function ensureDir(dir: string): string {
@@ -81,6 +89,7 @@ function getSettingsPath(): string {
 function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
   if (!settings || typeof settings !== 'object') throw new Error('Invalid settings')
   for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof AppSettings)[]) {
+    if (key === 'transcription') continue
     if (settings[key] !== undefined && (typeof settings[key] !== 'string' || settings[key]!.length > 8192 || settings[key]!.includes('\0'))) throw new Error(`Invalid ${key}`)
   }
   const normalized: AppSettings = {
@@ -99,7 +108,8 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     sourceContextWebResearch: settings.sourceContextWebResearch ?? DEFAULT_SETTINGS.sourceContextWebResearch,
     outputDirectory: (settings.outputDirectory || DEFAULT_SETTINGS.outputDirectory).trim(),
     pythonPath: (settings.pythonPath || DEFAULT_SETTINGS.pythonPath).trim(),
-    customVocabulary: vocabularyTerms(settings.customVocabulary ?? DEFAULT_SETTINGS.customVocabulary).join('\n')
+    customVocabulary: vocabularyTerms(settings.customVocabulary ?? DEFAULT_SETTINGS.customVocabulary).join('\n'),
+    transcription: normalizeTranscriptionSettings(settings.transcription)
   }
   for (const key of Object.keys(JEV_DEFAULTS) as (keyof JevThresholdSettings)[]) {
     const value = probability(normalized[key])
@@ -193,7 +203,7 @@ export function loadSettings(): AppSettings {
 
   try {
     const raw = JSON.parse(readFileSync(path, 'utf-8'))
-    let needsMigration = raw.version !== SETTINGS_VERSION || Object.hasOwn(raw, 'elevenLabsApiKey') || Object.hasOwn(raw, 'typesafeApiKey')
+    let needsMigration = raw.version !== SETTINGS_VERSION || Object.hasOwn(raw, 'elevenLabsApiKey') || Object.hasOwn(raw, 'typesafeApiKey') || Object.hasOwn(raw, 'transcription') === false
     const secrets = {} as Record<SecretKey, string>
     for (const key of SECRET_KEYS) {
       const decoded = decodeSecret(raw[key])
@@ -206,7 +216,8 @@ export function loadSettings(): AppSettings {
       ...savedJevSettings(raw),
       outputDirectory: typeof raw.outputDirectory === 'string' ? raw.outputDirectory : DEFAULT_SETTINGS.outputDirectory,
       pythonPath: typeof raw.pythonPath === 'string' ? raw.pythonPath : DEFAULT_SETTINGS.pythonPath,
-      customVocabulary: typeof raw.customVocabulary === 'string' ? raw.customVocabulary : DEFAULT_SETTINGS.customVocabulary
+      customVocabulary: typeof raw.customVocabulary === 'string' ? raw.customVocabulary : DEFAULT_SETTINGS.customVocabulary,
+      transcription: normalizeTranscriptionSettings(raw.transcription)
     })
 
     if (needsMigration && canEncrypt()) writeSettings(settings)
@@ -237,7 +248,8 @@ function writeSettings(settings: AppSettings): void {
     sourceContextWebResearch: settings.sourceContextWebResearch,
     outputDirectory: settings.outputDirectory,
     pythonPath: settings.pythonPath,
-    customVocabulary: settings.customVocabulary
+    customVocabulary: settings.customVocabulary,
+    transcription: settings.transcription
   }
 
   let fd: number | undefined
@@ -277,11 +289,12 @@ export function publicSettings(settings: AppSettings): PublicSettings {
     zernioConfigured: Boolean(settings.zernioApiKey),
     jevEnabled: settings.jevEnabled,
     jevVisualContext: settings.jevVisualContext,
-    sourceContextWebResearch: settings.sourceContextWebResearch
+    sourceContextWebResearch: settings.sourceContextWebResearch,
+    transcription: settings.transcription
   }
 }
 
-export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | keyof JevThresholdSettings>): PublicSettings {
+export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary' | 'jevEnabled' | 'jevVisualContext' | 'sourceContextWebResearch' | 'transcription' | keyof JevThresholdSettings>): PublicSettings {
   const current = loadSettings()
   return publicSettings(saveSettings({
     ...current,
@@ -297,7 +310,8 @@ export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory
     customVocabulary: update.customVocabulary,
     jevEnabled: update.jevEnabled ?? current.jevEnabled,
     jevVisualContext: update.jevVisualContext ?? current.jevVisualContext,
-    sourceContextWebResearch: update.sourceContextWebResearch ?? current.sourceContextWebResearch
+    sourceContextWebResearch: update.sourceContextWebResearch ?? current.sourceContextWebResearch,
+    transcription: normalizeTranscriptionSettings(update.transcription ?? current.transcription)
   }))
 }
 
@@ -319,6 +333,15 @@ export function vocabularyTerms(value: string): string[] {
     if (terms.length >= 200) break
   }
   return terms
+}
+
+/**
+ * Save just the transcription choice. Used by Settings and by deleting the
+ * selected model, without touching the other settings.
+ */
+export function saveTranscriptionSettings(update: TranscriptionSettings): PublicSettings {
+  const current = loadSettings()
+  return publicSettings(saveSettings({ ...current, transcription: normalizeTranscriptionSettings(update) }))
 }
 
 export function replaceApiKey(key: ApiKeyName, value: string): PublicSettings {

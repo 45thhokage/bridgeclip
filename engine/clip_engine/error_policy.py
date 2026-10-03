@@ -76,6 +76,11 @@ def safe_processing_error(error: Exception) -> str:
             "audio_chunk_failed": "Transcription audio preparation failed",
             "audio_chunk_too_large": "Transcription audio chunk exceeded the size limit",
             "missing_word_timestamps": "Transcription response lacked word timestamps",
+            "local_model_missing": "Local transcription model is not downloaded",
+            "local_runtime_missing": "Local transcription runtime is not installed",
+            "local_model_invalid": "Local transcription model could not be loaded",
+            "local_gpu_unavailable": "Local GPU failed to load",
+            "local_transcription_failed": "Local transcription failed",
         }.get(getattr(error, "reason", None), "Transcription failed")
     if type(error).__name__ == "RenderingError":
         message = str(error).lower()
@@ -102,7 +107,8 @@ def safe_failure_code(error: Exception) -> str:
             "response_too_large", "source_missing", "audio_extraction_failed",
             "audio_extraction_empty", "audio_missing", "translation_unsupported",
             "audio_duration_unknown", "audio_chunk_failed", "audio_chunk_too_large",
-            "missing_word_timestamps",
+            "missing_word_timestamps", "local_model_missing", "local_runtime_missing",
+            "local_model_invalid", "local_gpu_unavailable", "local_transcription_failed",
         }:
             return f"transcription.{reason}"
         return "transcription.unknown"
@@ -135,6 +141,9 @@ def safe_job_error_text(error: str | None) -> str | None:
         "Audio duration could not be determined", "Transcription audio preparation failed",
         "Transcription audio chunk exceeded the size limit",
         "Transcription response lacked word timestamps",
+        "Local transcription model is not downloaded", "Local transcription runtime is not installed",
+        "Local transcription model could not be loaded", "Local GPU failed to load",
+        "Local transcription failed",
         "Video render failed",
     }:
         return error

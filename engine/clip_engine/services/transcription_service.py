@@ -4,8 +4,11 @@ Transcription Service - Word-timed audio transcription with OpenRouter model rec
 
 import asyncio
 import base64
+import glob
 import json
 import math
+import site
+import sys
 import tempfile
 import logging
 import os
@@ -427,8 +430,277 @@ def find_sentence_start_boundary(
     return timestamp_ms
 
 
+class TranscriptionProvider:
+    """One speech-to-text backend behind the shared chunking and offset logic.
+
+    OpenRouter keeps its existing retry and fallback behavior. The local
+    provider runs the speech-to-text model on this computer and never calls a
+    provider for audio.
+    """
+
+    name = "provider"
+
+    def __init__(self, service: "TranscriptionService"):
+        self.service = service
+
+    @property
+    def settings(self):
+        return self.service.settings
+
+    def _progress(self, message: str) -> None:
+        self.service._progress(message)
+
+    async def transcribe_chunk(
+        self, path: str, language: Optional[str], keyterms: Optional[list[str]],
+        duration: float, models: list[str], costs: TranscriptionApiCosts,
+    ) -> TranscriptionResult:
+        raise NotImplementedError
+
+
+class OpenRouterTranscriptionProvider(TranscriptionProvider):
+    """The existing OpenRouter path, unchanged, as a provider."""
+
+    name = "openrouter"
+
+    async def transcribe_chunk(
+        self, path: str, language: Optional[str], keyterms: Optional[list[str]],
+        duration: float, models: list[str], costs: TranscriptionApiCosts,
+    ) -> TranscriptionResult:
+        return await self.service._transcribe_chunk(path, language, keyterms, duration, models, costs)
+
+
+# Shown when CUDA or cuDNN cannot load. The GPU dropdown is the only source of
+# truth about the hardware, so the fix is a settings change, not a retry.
+GPU_LOAD_ERROR = "GPU failed to load. Choose 'AMD, Intel, or no dedicated GPU' in Settings to run on CPU."
+
+LOCAL_MODEL_LABELS = {
+    "distil-large-v3.5": "Distil Large v3.5",
+    "large-v3-turbo": "Large v3 Turbo",
+    "distil-large-v3": "Distil Large v3",
+    "small.en": "Small English",
+    "parakeet-tdt-0.6b-v2": "Parakeet TDT 0.6B v2",
+}
+
+
+def add_cuda_dll_directories() -> None:
+    """On Windows, expose the venv's NVIDIA cuBLAS/cuDNN DLLs to ctranslate2.
+
+    pip installs those libraries inside `site-packages/nvidia/*/bin`, which is
+    not on the default DLL search path. Adding the folders here lets CUDA load
+    before ctranslate2 is imported. Other platforms need nothing.
+    """
+    if sys.platform != "win32" or not hasattr(os, "add_dll_directory"):
+        return
+    roots: list[str] = []
+    try:
+        roots.extend(site.getsitepackages())
+        user_site = getattr(site, "getusersitepackages", None)
+        if callable(user_site):
+            roots.append(user_site())
+    except Exception:
+        pass
+    roots.extend((
+        os.path.join(sys.prefix, "Lib", "site-packages"),
+        os.path.join(sys.prefix, "lib", "site-packages"),
+    ))
+    for root in dict.fromkeys(roots):
+        for path in glob.glob(os.path.join(root, "nvidia", "*", "bin")):
+            try:
+                os.add_dll_directory(path)
+            except OSError:
+                pass
+
+
+def _looks_like_cuda_failure(error: BaseException) -> bool:
+    text = str(error).lower()
+    return any(marker in text for marker in (
+        "cuda", "cudnn", "cublas", "nvidia", "dll", "shared library",
+        # CTranslate2 rejects a compute type the card cannot do, for example
+        # float16 on a Pascal GTX 10 series: "Requested float16 compute type,
+        # but the target device or backend do not support efficient float16
+        # computation." That is a GPU mismatch, so the fix is the same.
+        "compute type", "float16", "target device or backend",
+    ))
+
+
+def load_faster_whisper_model(settings):
+    """Load a faster-whisper model, mapping setup failures to safe errors."""
+    model_dir = getattr(settings, "local_transcription_model_dir", "") or ""
+    if not model_dir or not os.path.isdir(model_dir):
+        raise TranscriptionError("The local transcription model is not downloaded", reason="local_model_missing")
+    device = getattr(settings, "local_transcription_device", "cpu") or "cpu"
+    compute_type = getattr(settings, "local_transcription_compute_type", "int8") or "int8"
+    if device == "cuda":
+        add_cuda_dll_directories()
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        raise TranscriptionError("The local transcription runtime is not installed", reason="local_runtime_missing") from None
+    try:
+        return WhisperModel(model_dir, device=device, compute_type=compute_type)
+    except Exception as error:
+        if device == "cuda" and _looks_like_cuda_failure(error):
+            raise TranscriptionError(GPU_LOAD_ERROR, reason="local_gpu_unavailable") from None
+        raise TranscriptionError("The local transcription model could not be loaded", reason="local_model_invalid") from None
+
+
+def _segments_from_local_words(words: list[TranscriptWord]) -> list[TranscriptSegment]:
+    """The same segment structure the OpenRouter parser returns, without speakers."""
+    segments: list[TranscriptSegment] = []
+    current: list[TranscriptWord] = []
+
+    def flush() -> None:
+        if current:
+            segments.append(TranscriptSegment(current[0].start_time_ms, current[-1].end_time_ms,
+                                              " ".join(word.word for word in current), None, list(current)))
+            current.clear()
+
+    previous_end: Optional[int] = None
+    for word in words:
+        if current and previous_end is not None and word.start_time_ms - previous_end > 2000:
+            flush()
+        current.append(word)
+        previous_end = word.end_time_ms
+        if word.word[-1] in SENTENCE_END_PUNCTUATION:
+            flush()
+    flush()
+    return segments
+
+
+class LocalTranscriptionProvider(TranscriptionProvider):
+    """Local speech-to-text with real word timings. It has no diarization."""
+
+    name = "local"
+
+    def __init__(self, service: "TranscriptionService"):
+        super().__init__(service)
+        self._model = None
+        self._model_id = getattr(service.settings, "local_transcription_model_id", "") or "local"
+
+    def _label(self) -> str:
+        return LOCAL_MODEL_LABELS.get(self._model_id, self._model_id)
+
+    async def transcribe_chunk(
+        self, path: str, language: Optional[str], keyterms: Optional[list[str]],
+        duration: float, models: list[str], costs: TranscriptionApiCosts,
+    ) -> TranscriptionResult:
+        costs.attempts += 1
+        costs.audio_duration_seconds += duration
+        costs.model = self._model_id
+        costs.provider = "local"
+        self._progress(f"Transcribing on this computer with {self._label()}...")
+        prepared, temporary = await asyncio.to_thread(self._prepare_audio, path)
+        try:
+            return await asyncio.to_thread(self._run, prepared, keyterms, duration)
+        finally:
+            if temporary:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+
+    def _prepare_audio(self, path: str) -> tuple[str, Optional[str]]:
+        """Local models want 16 kHz mono; the pipeline already extracts that.
+
+        Anything else is converted with the bundled FFmpeg first. Returns the
+        path to use and, for a conversion, the temporary file to delete.
+        """
+        options = WAV_INPUT_OPTIONS if path.lower().endswith(".wav") else ["-protocol_whitelist", "file,pipe,fd"]
+        try:
+            result = run_media(
+                ["ffprobe", "-v", "error", *options, "-select_streams", "a:0",
+                 "-show_entries", "stream=sample_rate,channels", "-of", "csv=p=0", path],
+                timeout=10, check=True,
+            )
+            # run_media returns raw bytes; decode before comparing (probe output
+            # is ASCII digits, so a decode failure just means "convert it").
+            probe = result.stdout.decode("ascii", "ignore") if isinstance(result.stdout, (bytes, bytearray)) else str(result.stdout)
+            if [value.strip() for value in probe.strip().split(",")][:2] == ["16000", "1"]:
+                return path, None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        target = f"{path}.local-16k.wav"
+        try:
+            run_media(
+                ["ffmpeg", "-v", "error", "-nostdin", "-y", *options, "-i", path, "-vn",
+                 "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1", target],
+                timeout=300, check=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise TranscriptionError("Could not prepare audio for local transcription", reason="audio_chunk_failed") from None
+        if not os.path.exists(target):
+            raise TranscriptionError("Could not prepare audio for local transcription", reason="audio_chunk_failed")
+        return target, target
+
+    def _load_model(self):
+        if self._model is not None:
+            return self._model
+        if getattr(self.settings, "local_transcription_backend", "faster-whisper") == "onnx-parakeet":
+            from clip_engine.services.local_parakeet import load_parakeet_model
+            self._model = load_parakeet_model(self.settings)
+        else:
+            self._model = load_faster_whisper_model(self.settings)
+        return self._model
+
+    def _run(self, path: str, keyterms: Optional[list[str]], duration: float) -> TranscriptionResult:
+        model = self._load_model()
+        backend = getattr(self.settings, "local_transcription_backend", "faster-whisper")
+        if backend == "onnx-parakeet":
+            from clip_engine.services.local_parakeet import transcribe_with_parakeet
+            words, language = transcribe_with_parakeet(model, path, duration)
+        else:
+            words, language = self._run_faster_whisper(model, path, keyterms, duration)
+        segments = _segments_from_local_words(words)
+        return TranscriptionResult(
+            segments=segments,
+            full_text=" ".join(word.word for segment in segments for word in segment.words).strip(),
+            language=language,
+            duration_seconds=duration,
+            provider="local",
+            model=self._model_id,
+        )
+
+    def _run_faster_whisper(self, model, path: str, keyterms: Optional[list[str]], duration: float):
+        phrases = normalize_keyterms(keyterms)
+        options = {"initial_prompt": "Expected vocabulary: " + ", ".join(phrases)} if phrases else {}
+        try:
+            generated, info = model.transcribe(
+                path, language="en", word_timestamps=True, vad_filter=True,
+                condition_on_previous_text=False, **options,
+            )
+            raw_segments = list(generated)
+        except TranscriptionError:
+            raise
+        except Exception:
+            raise TranscriptionError("Local transcription failed", reason="local_transcription_failed") from None
+        words: list[TranscriptWord] = []
+        saw_text = False
+        for segment in raw_segments:
+            if str(getattr(segment, "text", "") or "").strip():
+                saw_text = True
+            for word in getattr(segment, "words", None) or []:
+                text = " ".join(str(getattr(word, "word", "") or "").split())
+                # faster-whisper reports numpy.float64 times, which an exact
+                # `type(x) in (int, float)` test rejects; coerce to plain float.
+                start, end = _real_number(getattr(word, "start", None)), _real_number(getattr(word, "end", None))
+                if (not text or start is None or end is None
+                        or end < start or end > duration + 1):
+                    raise TranscriptionProviderError("invalid_response")
+                words.append(TranscriptWord(text, round(start * 1000), round(end * 1000)))
+        if saw_text and not words:
+            raise TranscriptionError("Local transcription did not include word timestamps", reason="missing_word_timestamps")
+        language = getattr(info, "language", None)
+        return words, language if isinstance(language, str) and language else "en"
+
+
 class TranscriptionService:
-    """OpenRouter speech recognition with word timing for captions."""
+    """Speech recognition with word timing for captions, via OpenRouter or locally."""
+
+    def get_provider(self) -> TranscriptionProvider:
+        """The provider selected in Settings. OpenRouter stays the default."""
+        if getattr(self.settings, "transcription_provider", "openrouter") == "local":
+            return LocalTranscriptionProvider(self)
+        return OpenRouterTranscriptionProvider(self)
 
     def __init__(self):
         self.settings = get_settings()
@@ -570,7 +842,8 @@ class TranscriptionService:
         """
         if not os.path.isfile(audio_path):
             raise TranscriptionError("Audio file not found", reason="audio_missing")
-        if not self.settings.openrouter_api_key:
+        provider = self.get_provider()
+        if provider.name == "openrouter" and not self.settings.openrouter_api_key:
             raise TranscriptionProviderError("auth")
         if translate_to_english:
             raise TranscriptionError("Audio translation is not supported", reason="translation_unsupported")
@@ -578,12 +851,15 @@ class TranscriptionService:
         segments: list[TranscriptSegment] = []
         costs = TranscriptionApiCosts(model="")
         detected_language = None
-        primary = self.settings.transcription_model
-        # Keep the recovered model for the rest of this run. Retrying an
-        # unavailable model for each chunk causes repeated failures and costs.
-        models = list(dict.fromkeys((primary, BUDGET_FALLBACK_MODEL, TRANSCRIPTION_MODEL, BUDGET_TRANSCRIPTION_MODEL)))
-        if getattr(self.settings, "clipping_mode", "quality") == "advanced":
-            models = [primary]
+        if provider.name == "openrouter":
+            primary = self.settings.transcription_model
+            # Keep the recovered model for the rest of this run. Retrying an
+            # unavailable model for each chunk causes repeated failures and costs.
+            models = list(dict.fromkeys((primary, BUDGET_FALLBACK_MODEL, TRANSCRIPTION_MODEL, BUDGET_TRANSCRIPTION_MODEL)))
+            if getattr(self.settings, "clipping_mode", "quality") == "advanced":
+                models = [primary]
+        else:
+            models = []
         chunk_count = max(1, math.ceil(duration / TRANSCRIPTION_CHUNK_SECONDS))
         with tempfile.TemporaryDirectory(prefix="clip-transcribe-", dir=os.path.dirname(audio_path)) as work:
             for index in range(chunk_count):
@@ -597,10 +873,13 @@ class TranscriptionService:
                 if chunk_count > 1:
                     chunk_path = os.path.join(work, "chunk.wav")
                     await asyncio.to_thread(self._extract_chunk, audio_path, chunk_path, start, end - start)
-                self._progress(f"Transcribing audio, part {index + 1} of {chunk_count}...")
+                if provider.name == "openrouter":
+                    self._progress(f"Transcribing audio, part {index + 1} of {chunk_count}...")
+                else:
+                    self._progress(f"Transcribing on this computer, part {index + 1} of {chunk_count}...")
                 if getattr(self, 'detail_callback', None):
                     self.detail_callback(index, chunk_count)
-                parsed = await self._transcribe_chunk(chunk_path, language, keyterms, end - start, models, costs)
+                parsed = await provider.transcribe_chunk(chunk_path, language, keyterms, end - start, models, costs)
                 detected_language = detected_language or parsed.language
                 for segment in parsed.segments:
                     words = []
@@ -621,6 +900,7 @@ class TranscriptionService:
         return TranscriptionResult(
             segments=segments, full_text=" ".join(segment.text for segment in segments),
             language=detected_language, duration_seconds=duration,
+            provider="local" if provider.name == "local" else "openrouter",
             model=costs.model,
             api_costs=costs,
         )
@@ -827,6 +1107,21 @@ class TranscriptionService:
 
 def _nonnegative_number(value: object) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _real_number(value: object) -> Optional[float]:
+    """A finite nonnegative number as a plain float, or None.
+
+    Accepts numpy scalars, which faster-whisper returns for word times; a bare
+    exact-type check would reject every real local transcription.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 

@@ -147,6 +147,67 @@ class BridgeTests(unittest.TestCase):
             "PLANNER_FALLBACK_MODELS": "", "LAYOUT_VISION_ENABLED": "false",
         }])
 
+    def test_local_transcription_settings_are_applied_before_engine_load(self):
+        observed = []
+        keys = ("TRANSCRIPTION_PROVIDER", "LOCAL_TRANSCRIPTION_MODEL_ID", "LOCAL_TRANSCRIPTION_MODEL_DIR",
+                "LOCAL_TRANSCRIPTION_BACKEND", "LOCAL_TRANSCRIPTION_DEVICE", "LOCAL_TRANSCRIPTION_COMPUTE_TYPE",
+                "HF_HUB_OFFLINE")
+        def get_settings():
+            observed.append({key: os.environ.get(key) for key in keys})
+            return types.SimpleNamespace(openrouter_api_key=None)
+        modules = {
+            "clip_engine.config": types.SimpleNamespace(get_settings=get_settings, get_caption_preset=lambda name: None),
+            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3),
+            "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None),
+            "clip_engine.services.ai_clipping_pipeline": types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=None, JobStatus=None),
+        }
+        config = self.config(transcription_provider="local", local_transcription_model_id="distil-large-v3.5",
+                             local_transcription_model_dir=os.path.abspath(os.path.join("models", "distil-large-v3.5")),
+                             local_transcription_backend="faster-whisper", local_transcription_device="cuda",
+                             local_transcription_compute_type="float16")
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+            self.assertFalse(asyncio.run(bridge.run(config)))
+        self.assertEqual(observed, [dict(zip(keys, [
+            "local", "distil-large-v3.5", os.path.abspath(os.path.join("models", "distil-large-v3.5")),
+            "faster-whisper", "cuda", "float16", "1",
+        ]))])
+
+    def test_local_transcription_config_is_validated(self):
+        config = self.config(transcription_provider="local", local_transcription_model_id="small.en",
+                             local_transcription_model_dir=os.path.abspath(os.path.join("models", "small.en")),
+                             local_transcription_backend="faster-whisper", local_transcription_device="cpu",
+                             local_transcription_compute_type="int8")
+        self.assertEqual(bridge.validate_config(config), config)
+        for patch_values in [{"transcription_provider": "cloud"}, {"local_transcription_model_id": "../../escape"},
+                             {"local_transcription_model_id": ""}, {"local_transcription_model_dir": "relative/path"},
+                             {"local_transcription_model_dir": ""}, {"local_transcription_backend": "unknown"},
+                             {"local_transcription_device": "tpu"}, {"local_transcription_compute_type": "float32"}]:
+            with self.subTest(patch=patch_values), self.assertRaises(ValueError):
+                bridge.validate_config({**config, **patch_values})
+
+    def test_model_download_is_validated_and_needs_the_runtime(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = {"command": "download_model", "model_id": "small.en",
+                      "repo": "Systran/faster-whisper-small.en",
+                      "revision": "d1d751a5f8271d482d14ca55d9e2deeebbae577f",
+                      "model_dir": os.path.join(root, "models", "small.en"), "approx_size_mb": 486}
+            self.assertEqual(bridge.validate_download_config(config), config)
+            for patch_values in [{"model_id": "../../escape"}, {"repo": "https://example.com/model"},
+                                 {"repo": "owner/repo/extra"}, {"revision": "main"}, {"revision": "A" * 40},
+                                 {"model_dir": "relative/path"}, {"approx_size_mb": 0}, {"command": "run"}]:
+                with self.subTest(patch=patch_values), self.assertRaises(ValueError):
+                    bridge.validate_download_config({**config, **patch_values})
+            modules = {
+                "network_guard": types.SimpleNamespace(install=lambda: None),
+                "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None),
+            }
+            with patch.dict(sys.modules, modules), patch.dict(sys.modules, {"huggingface_hub": None}), redirect_stdout(io.StringIO()) as output:
+                self.assertFalse(asyncio.run(bridge.run_model_download(config)))
+            self.assertIn("local transcription runtime is not installed", output.getvalue().lower())
+            with patch.dict(sys.modules, modules), patch.object(bridge.shutil, "disk_usage", lambda path: types.SimpleNamespace(free=1024)), redirect_stdout(io.StringIO()) as output:
+                self.assertFalse(asyncio.run(bridge.run_model_download(config)))
+            self.assertIn("disk space", output.getvalue().lower())
+
     def test_malformed_json_has_structured_error_and_failure_exit(self):
         output = io.StringIO()
         with patch.object(sys, "argv", ["bridge_runner.py", "[]"]), redirect_stdout(output):

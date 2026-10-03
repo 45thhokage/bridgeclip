@@ -2,19 +2,21 @@
 
 [Overview](../README.md) · [User guide](usage.md) · [Editor](editor.md)
 
-BridgeClip renders on your computer and calls providers directly with your keys. It has no BridgeMind account or backend. AI transcription, planning and optional review use paid OpenRouter services; social publishing uses Zernio. Provider accounts, charges, retention and data policies are governed by those services.
+BridgeClip renders on your computer and calls providers directly with your keys. It has no BridgeMind account or backend. AI planning and optional review use paid OpenRouter services, and transcription uses OpenRouter unless you switch it to this computer; social publishing uses Zernio. Provider accounts, charges, retention and data policies are governed by those services.
 
 ## What leaves your computer
 
 | Action | Data sent | Destination |
 | --- | --- | --- |
-| Transcription and planning | Source audio and transcript text | OpenRouter |
+| Transcription and planning (default) | Source audio and transcript text | OpenRouter |
+| Local transcription (Settings → Transcription) | Nothing from your video: audio stays on this computer; transcript text still goes to OpenRouter for planning | This computer |
+| Model download (Settings → Transcription) | A request for the pinned public model repository; Hugging Face sees your network address like any download | Hugging Face |
 | Visual-only planning or enabled AI framing checks | Sampled source frames | OpenRouter |
 | Jev review | Bounded transcript excerpts, titles and diagnostic text | TypeSafe Jev through OpenRouter |
 | Optional source research | Public video title, description and channel | OpenRouter web search and brief generation |
 | Social publishing | Selected clip, caption, accounts and publishing options | Zernio and the selected platforms |
 
-For a link, the app downloads the source using your network connection. Audio for MAI Transcribe 2 (Quality), Whisper Turbo (Economy), or your selected transcription model (Advanced) goes to OpenRouter. Quality and Economy retry temporary transcription failures and use fallback models when needed; Economy tries Whisper Large V3 before MAI. Advanced retries only your chosen model. Transcript text for clip planning also goes to OpenRouter.
+For a link, the app downloads the source using your network connection. Audio for MAI Transcribe 2 (Quality), Whisper Turbo (Economy), or your selected transcription model (Advanced) goes to OpenRouter. With **Settings → Transcription** set to **On this computer**, a downloaded model transcribes the audio here instead: the audio never leaves the computer, only the transcript text goes to OpenRouter for planning, downloads contact Hugging Face once, and the local model then runs offline. Local transcription reports no per-minute charge. Quality and Economy retry temporary transcription failures and use fallback models when needed; Economy tries Whisper Large V3 before MAI. Advanced retries only your chosen model. Transcript text for clip planning also goes to OpenRouter.
 
 If the video has no audio or no speech, BridgeClip samples video frames and sends those images to OpenRouter for visual-only planning. In Advanced, the selected planner must support image input for this fallback.
 

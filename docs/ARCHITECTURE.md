@@ -6,8 +6,10 @@ flowchart LR
   Preload --> Main[Electron main process]
   Main -->|JSON on stdin| Bridge[Python bridge]
   Bridge --> Engine[In-repo clipping engine]
-  Engine -->|audio for MAI Transcribe 2| OpenRouter
+  Engine -->|audio for MAI Transcribe 2 (default)| OpenRouter
   Engine -->|transcript or sampled frames| OpenRouter
+  Engine -->|local transcription, optional| LocalModels[Models in app data]
+  Main -->|download_model worker, progress| LocalModels
   Engine -->|clips, transcript, plan| Library[Local output folder]
   Main -->|optional account, media and post API| Zernio[Zernio]
 ```
@@ -27,6 +29,14 @@ Webcam regions are refined against nearby continuous image edges using up to thr
 The planned supported release builds are macOS Apple silicon and Intel. Windows source builds are experimental. The Python engine and its assets live in `engine/` in this repository; release builds package that source directly. No separate engine repository is needed.
 
 Framing is reviewed and adjusted in the clip editor, using its retained source and playback preview. The desktop does not expose a framing-capture option or a separate framing inspector. Internal Python trace helpers remain available for engine tests and editorial evidence; existing artifacts in older runs are preserved.
+
+## Transcription providers and local models
+
+Transcription sits behind a small provider interface in the engine. The default `openrouter` provider keeps the existing request, retry and fallback chain, chunking, speaker-label scoping and cost behavior for MAI Transcribe 2 and the Whisper alternatives. The optional `local` provider runs faster-whisper (CTranslate2) offline, on the GPU family the user picked in Settings or on the CPU, and returns exactly the same word-timing structure, so caption timing, cut timing, speaker-free planner prompts and the visual-only fallback are unchanged. Local jobs report `provider: "local"` and $0 transcription cost. A CUDA load failure fails the job with a fixed message asking the user to choose the CPU family in Settings; it never retries on CPU automatically.
+
+Main derives provider, model, device and compute type from a pure recommendation function in `src/shared/transcription.ts` that only reads the user's GPU dropdown. The renderer never sends them, and the bridge validates them again against the job contract. The fixed model catalog lives in the same shared module with pinned Hugging Face revisions and sizes; main never accepts a repository, URL or path from the renderer.
+
+Model downloads run as their own short-lived bridge process (`download_model`) through `huggingface_hub.snapshot_download`, so they never take one of the two clipping slots. Progress is emitted as JSON lines on the protocol channel; the download fills a temporary folder next to its target and is renamed into `<app data>/models/<model id>` on success. Deleting a model removes only that folder, and every path resolves inside the models root. Once a model is installed, the local provider runs with `HF_HUB_OFFLINE=1`. Nothing is installed automatically: Settings and a failed job show the hash-pinned `engine/requirements-local.lock` (plus `engine/requirements-local-cuda.lock` for NVIDIA) command for the actual interpreter, and packagers do not change `engine/requirements.lock`.
 
 ## Transcript planning and coherence review
 

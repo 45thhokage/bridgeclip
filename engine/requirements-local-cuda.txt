@@ -1,0 +1,6 @@
+# CUDA libraries for local transcription on NVIDIA GPUs (cuBLAS 12 + cuDNN 9).
+# Install together with the local runtime lock:
+#   <python> -m ensurepip
+#   <python> -m pip install --require-hashes -r requirements-local.lock -r requirements-local-cuda.lock
+nvidia-cublas-cu12>=12
+nvidia-cudnn-cu12>=9,<10

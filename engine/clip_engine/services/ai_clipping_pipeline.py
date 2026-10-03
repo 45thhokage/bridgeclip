@@ -415,6 +415,9 @@ class AIClippingPipeline:
                 aspect_ratio=request.aspect_ratio,
                 jev_enabled=jev_enabled,
                 clip_request=request.clip_request,
+                # Local transcription has no diarization; the prompt then never
+                # mentions or expects speaker labels.
+                speaker_labels=any(segment.speaker_label for segment in transcription_result.segments),
             )
             clip_plan = await self.intelligence_planner.plan_clips(**planning_args)
             edit_audit['planner'] = getattr(self.intelligence_planner, 'audit', {'requests': []})
@@ -957,6 +960,7 @@ class AIClippingPipeline:
                 "requested_settings": {
                     "clipping_mode": self.settings.clipping_mode,
                     "planner_model": self.settings.planner_model,
+                    "transcription_provider": transcription_result.provider,
                     "transcription_model": self.settings.transcription_model,
                     "aspect_ratio": request.aspect_ratio,
                     "layout_style": request.layout_style,

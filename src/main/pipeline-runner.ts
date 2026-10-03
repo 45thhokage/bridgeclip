@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile)
 import { createInterface } from 'readline'
 import { Transform } from 'stream'
 import { loadSettings, getSettingsForBridge, vocabularyTerms } from './settings-store'
+import { localFailureHint, localTranscriptionJobOptions } from './local-transcription'
 import { logger } from './logger'
 import { parseJobOutput, type JobOutput } from '../shared/job-output'
 import { BRIDGE_CONTRACT_VERSION } from '../shared/job-contract'
@@ -404,7 +405,10 @@ export function startClipJob(
         httpStatus: payload.httpStatus ?? null
       })
     } catch { logger.warn('job.history.writeFailed', { jobId }) }
-    send('job:error', payload)
+    // A local transcription failure carries the exact fix (install command or
+    // model download step), which the engine cannot know without local paths.
+    const localHint = localFailureHint(payload.failureCode)
+    send('job:error', localHint ? { ...payload, message: `${payload.message}\n\n${localHint}` } : payload)
   }
   const envVars = getSettingsForBridge({ ...settings, jevEnabled: config.workflow === 'review' ? 'on' : settings.jevEnabled })
   const enginePath = getEnginePath()
@@ -470,6 +474,7 @@ export function startClipJob(
     caption_preset: config.captionPreset,
     include_title: config.includeTitle ?? true,
     keyterms: vocabularyTerms(settings.customVocabulary),
+    ...localTranscriptionJobOptions(settings),
     start_time_seconds: config.startTimeSeconds,
     end_time_seconds: config.endTimeSeconds,
     banner_platform: config.bannerPlatform,

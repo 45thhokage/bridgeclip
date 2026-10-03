@@ -38,9 +38,11 @@ function ipcWithLibrary(library) {
       dialog: {}
     },
     './settings-store': { loadSettings: () => ({ outputDirectory: library }) },
+    '../shared/transcription': loadShared('transcription.ts'),
     './file-manager': {},
     './run-history': {},
     './pipeline-runner': {},
+    './local-transcription': {},
     './job-manager': { initJobManager() {} },
     './logger': {},
     './security': security,

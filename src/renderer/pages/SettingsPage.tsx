@@ -1,6 +1,6 @@
 import { JevSettings } from '../components/JevSettings'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowUpRight, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal } from 'lucide-react'
+import { ArrowUpRight, AudioLines, BookA, Check, ChevronDown, Cpu, FolderOpen, Github, History, Info, KeyRound, Loader2, RefreshCw, ScrollText, SlidersHorizontal } from 'lucide-react'
 import { useSettingsStore } from '../store/use-settings-store'
 import { useChangelogStore } from '../store/use-changelog-store'
 import { useApiKeyDrafts } from '../hooks/use-api-key-drafts'
@@ -20,8 +20,9 @@ import { IconTile } from '../components/ui/IconTile'
 import { Callout } from '../components/ui/Callout'
 import { UpdatesRow } from '../components/Updates'
 import { OutputStorage } from '../components/OutputStorage'
+import { TranscriptionSettings } from '../components/TranscriptionSettings'
 
-type SectionId = 'keys' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
+type SectionId = 'keys' | 'transcription' | 'jev' | 'vocabulary' | 'output' | 'system' | 'about'
 type SectionTone = 'success' | 'warning' | 'danger' | 'idle'
 
 /** `showUpdates` changes each time Help → Check for Updates… asks for the Updates row. */
@@ -58,6 +59,7 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
 
   const sections: { id: SectionId; label: string; icon: ReactNode; tone: SectionTone }[] = [
     { id: 'keys', label: 'API keys', icon: <KeyRound />, tone: keysMissing ? 'warning' : 'success' },
+    { id: 'transcription', label: 'Transcription', icon: <AudioLines />, tone: 'idle' },
     { id: 'jev', label: 'TypeSafe Jev', icon: <SlidersHorizontal />, tone: 'idle' },
     { id: 'vocabulary', label: 'Vocabulary', icon: <BookA />, tone: 'idle' },
     { id: 'output', label: 'Output', icon: <FolderOpen />, tone: 'idle' },
@@ -180,6 +182,10 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
                 />
               </KeyRow>
             </div>
+          </Section>
+
+          <Section id="transcription">
+            <TranscriptionSettings />
           </Section>
 
           <JevSettings />
@@ -493,7 +499,23 @@ function toolRows(status: ToolStatus | null): ToolRow[] {
     { name: 'FFprobe', ok: status?.ffprobe ?? null },
     { name: 'yt-dlp', ok: status?.ytdlp ?? null, detail: 'Downloads YouTube videos and Twitch VODs' },
     { name: 'BridgeClip clipping engine', ok: status?.engine ?? null, detail: status?.enginePath },
-    { name: 'Bridge runner', ok: status?.bridgeRunner ?? null, detail: status?.bridgePath }
+    { name: 'Bridge runner', ok: status?.bridgeRunner ?? null, detail: status?.bridgePath },
+    // Only shown when Settings is set to transcribe on this computer.
+    ...(status?.localTranscriptionRequested ? [
+      {
+        name: 'Local transcription runtime',
+        ok: status.localTranscriptionRuntime,
+        detail: status.localTranscriptionRuntime ? 'Installed' : 'Not installed - the optional local runtime is a separate install',
+        repairCommand: status.localTranscriptionRuntime ? null : status.localTranscriptionInstallCommand,
+        failureLabel: 'Needs attention'
+      },
+      {
+        name: 'Selected local model',
+        ok: status.localTranscriptionModel,
+        detail: status.localTranscriptionModel ? 'Downloaded' : 'Not downloaded - choose a model under Settings -> Transcription',
+        failureLabel: 'Needs attention'
+      }
+    ] satisfies ToolRow[] : [])
   ]
 }
 

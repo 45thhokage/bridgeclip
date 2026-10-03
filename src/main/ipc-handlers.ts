@@ -2,7 +2,9 @@ import { openEditor, saveEditor, runEditor, cancelEditor, replaceEditorSource } 
 import { editorCloseReady, freeEditorMedia, readEditorProgress } from './clip-editor'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
-import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
+import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, saveTranscriptionSettings, type ApiKeyName, type PublicSettings } from './settings-store'
+import { cancelModelDownload, checkLocalRuntime, deleteModel, listLocalModels, localRuntimeInstallCommand, localTranscriptionJobOptions, localTranscriptionOverview, selectedModelDownloaded, startModelDownload } from './local-transcription'
+import { normalizeTranscriptionSettings } from '../shared/transcription'
 import { ensureOutputDir, getJobHistory, getJobOutput, generateThumbnail } from './file-manager'
 import { measureOutputStorage } from './output-storage'
 import { inspectEdits } from './edit-inspector'
@@ -78,6 +80,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     const current = loadSettings()
     if (!settings || typeof settings !== 'object') throw new Error('Invalid settings')
     if (typeof settings.outputDirectory !== 'string' || typeof settings.pythonPath !== 'string' || typeof settings.customVocabulary !== 'string') throw new Error('Invalid settings')
+    if (settings.transcription !== undefined && (typeof settings.transcription !== 'object' || settings.transcription === null)) throw new Error('Invalid settings')
     if (settings.outputDirectory !== current.outputDirectory && !selectedOutputDirectories.has(settings.outputDirectory)) throw new Error('Choose the output folder with the folder picker')
     if (app.isPackaged && settings.pythonPath !== current.pythonPath) throw new Error('Runtime paths cannot be changed in packaged builds')
     return savePublicSettings(settings)
@@ -188,6 +191,14 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     if (!settings.openrouterApiKey) {
       logger.warn('job.start.missingKey', { key: 'OPENROUTER_API_KEY' })
       return { error: 'OpenRouter API key is required for AI clip planning. Go to Settings to add it.' }
+    }
+
+    // Local transcription only runs with a catalog model that is downloaded;
+    // the engine repeats this check, but failing before queuing is clearer.
+    try {
+      localTranscriptionJobOptions(settings)
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'Check the local transcription setup in Settings.' }
     }
 
     const enginePath = getEnginePath()
@@ -396,6 +407,27 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     return { success: count > 0, count, failedCount: clips.length - count, destDir }
   })
 
+  handle('transcription:overview', () => localTranscriptionOverview())
+  handle('transcription:models', () => listLocalModels(loadSettings()))
+  handle('transcription:save', (_event, update: unknown) => {
+    if (!update || typeof update !== 'object') throw new Error('Invalid transcription settings')
+    saveTranscriptionSettings(normalizeTranscriptionSettings(update))
+    return localTranscriptionOverview()
+  })
+  handle('transcription:download', (event, modelId: unknown) => startModelDownload(modelId, (state) => {
+    if (!event.sender.isDestroyed()) event.sender.send('transcription:downloadProgress', state)
+  }))
+  handle('transcription:cancelDownload', () => cancelModelDownload())
+  handle('transcription:deleteModel', (_event, modelId: unknown) => {
+    const deleted = deleteModel(modelId)
+    // Deleting the model in use clears the selection so the next job asks for one.
+    const settings = loadSettings()
+    if (settings.transcription.localModelId === deleted) {
+      saveTranscriptionSettings({ ...settings.transcription, localModelId: null })
+    }
+    return listLocalModels(loadSettings())
+  })
+
   handle('system:isPackaged', () => {
     return app.isPackaged
   })
@@ -421,13 +453,15 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       }
     }
 
-    const [pythonValidation, python, ffmpeg, ffmpegCaptions, ffprobe, ytdlp] = await Promise.all([
+    const localRequested = settings.transcription.provider === 'local'
+    const [pythonValidation, python, ffmpeg, ffmpegCaptions, ffprobe, ytdlp, localRuntime] = await Promise.all([
       validatePython(resolvedPython, enginePath),
       check(resolvedPython),
       check(resolveBinary('ffmpeg'), '-version'),
       supportsCaptionFilter(),
       check(resolveBinary('ffprobe'), '-version'),
-      check(resolveBinary('yt-dlp'))
+      check(resolveBinary('yt-dlp')),
+      localRequested ? checkLocalRuntime(settings) : Promise.resolve<boolean | null>(null)
     ])
 
     const result = {
@@ -444,7 +478,12 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       engine: existsSync(join(enginePath, 'clip_engine', 'bridge_contract.py')),
       enginePath,
       bridgeRunner: existsSync(bridgePath),
-      bridgePath
+      bridgePath,
+      localTranscriptionRequested: localRequested,
+      localTranscriptionRuntime: localRuntime,
+      localTranscriptionModel: localRequested ? selectedModelDownloaded(settings) : null,
+      localTranscriptionModelId: settings.transcription.localModelId,
+      localTranscriptionInstallCommand: localRuntimeInstallCommand(settings)
     }
     logger.info('system.checkTools', result)
     return result

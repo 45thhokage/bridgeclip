@@ -95,13 +95,35 @@ Use footage you have permission to use. See the [user guide](docs/usage.md) for 
 
 ## AI, costs and privacy
 
-**Rendering is local; AI processing uses cloud providers.** Audio and transcripts go to OpenRouter. Visual-only planning and enabled AI framing checks can send sampled frames. Your videos and keys do not pass through a BridgeMind server.
+**Rendering is local; AI processing uses cloud providers.** By default, audio and transcripts go to OpenRouter; with [local transcription](#local-transcription), audio never leaves this computer and only transcript text goes to OpenRouter for planning. Visual-only planning and enabled AI framing checks can send sampled frames. Your videos and keys do not pass through a BridgeMind server.
 
 - **Bring your own accounts.** AI calls bill your OpenRouter account. Optional social publishing uses your Zernio account and uploads selected clips to its service.
 - **Choose additional analysis.** Jev review for Automatic, source web research and additional visual context are opt-in betas. Review & edit always uses Jev; these features can add provider cost.
 - **Keep control of local data.** Keys use operating-system secure storage. Run folders retain transcripts and edit records; editor projects also retain a source copy and playback preview.
 
 Read [AI, costs and privacy](docs/ai-and-privacy.md) for provider data flows, review behavior and storage cleanup.
+
+## Local transcription
+
+**Settings → Transcription** can transcribe on this computer instead of sending audio to OpenRouter. Choose **Local**, pick the GPU that matches your computer, download a model, then use that model for new jobs. Audio, and the models themselves, stay on this computer; transcript text still goes to OpenRouter for clip planning, so an OpenRouter key is still required. Local transcription costs nothing per audio minute.
+
+BridgeClip never installs the local runtime by itself. The settings page and System check show the exact command for your installation when it is missing; the locked dependencies are also:
+
+```bash
+# macOS and Linux. The ensurepip line bootstraps pip in uv-created virtual environments.
+engine/.venv/bin/python -m ensurepip
+engine/.venv/bin/python -m pip install --require-hashes -r engine/requirements-local.lock
+# NVIDIA GPUs also install the CUDA libraries (cuBLAS 12 + cuDNN 9):
+engine/.venv/bin/python -m pip install --require-hashes -r engine/requirements-local-cuda.lock
+```
+
+```bat
+REM Windows. The ensurepip line bootstraps pip in uv-created virtual environments.
+engine\.venv\Scripts\python.exe -m ensurepip
+engine\.venv\Scripts\python.exe -m pip install --require-hashes -r engine\requirements-local.lock
+REM NVIDIA GPUs also install the CUDA libraries (cuBLAS 12 + cuDNN 9):
+engine\.venv\Scripts\python.exe -m pip install --require-hashes -r engine\requirements-local-cuda.lock
+```
 
 ## Documentation
 

@@ -109,6 +109,10 @@ MOMENT_SCHEMA = {'type': 'object', 'properties': {
     'required': ['topic', 'topic_start_segment', 'topic_end_segment', 'setup_segment', 'payoff_segment', 'requires_visual_context'],
     'additionalProperties': False}
 
+# Only shown when the transcript carries speaker labels (not with local transcription).
+SPEAKER_LABEL_RULE = ('Speaker labels distinguish voices within a transcription chunk; do not invent identities '
+                      'or merge quoted claims with the host. ')
+
 # Jev review mode: anchors construct each candidate, and a moment may carry
 # one boundary alternative that Jev resolves (see _finalize_clips).
 MOMENT_DISCOVERY_RULE = (
@@ -120,7 +124,7 @@ MOMENT_DISCOVERY_RULE = (
     'include the actual example and its setup, not just the later explanation of why it matters. '
     'The payoff must complete this specific idea, not merely be the last available line. '
     'Mark requires_visual_context when the point depends on something shown rather than described. '
-    'Speaker labels distinguish voices within a transcription chunk; do not invent identities or merge quoted claims with the host. '
+    f'{SPEAKER_LABEL_RULE}'
     'A moment may have one overlapping alternative boundary during discovery; it does not count toward the clip limit, '
     'and selection happens after coherence review. '
     'Return an empty clips array if there is no complete supported moment.')
@@ -429,6 +433,7 @@ class IntelligencePlannerService:
         source_context: Optional[dict] = None,
         jev_enabled: bool = False,
         clip_request: Optional[str] = None,
+        speaker_labels: Optional[bool] = None,
     ) -> ClipPlanResponse:
         """
         Plan viral clips from video content.
@@ -456,6 +461,9 @@ class IntelligencePlannerService:
                 confined to the selected range.
             clip_request: The user's description of the moments to clip. Only
                 matching moments are selected, so fewer than N (or none) may return.
+            speaker_labels: Whether the transcript carries speaker labels. None
+                derives it from the segments. A local transcript has none, so the
+                prompt must not mention or expect speakers.
 
         Returns:
             ClipPlanResponse with identified clips
@@ -471,6 +479,10 @@ class IntelligencePlannerService:
         self._start_time_seconds = start_time_seconds
         self._end_time_seconds = end_time_seconds
         self._jev_enabled = jev_enabled
+        self._speaker_labels = (
+            bool(speaker_labels) if speaker_labels is not None
+            else any(getattr(segment, "speaker_label", None) for segment in transcript)
+        )
         clip_request = (clip_request or '').strip()[:MAX_CLIP_REQUEST_CHARS] or None
         self._clip_request = clip_request
         if discovery_feedback is None:
@@ -603,7 +615,7 @@ class IntelligencePlannerService:
         if clip_request:
             system_prompt += CLIP_REQUEST_RULE
         if transcript:
-            system_prompt += MOMENT_DISCOVERY_RULE if jev_enabled else MOMENT_HINT_RULE
+            system_prompt += self._moment_discovery_rule() if jev_enabled else MOMENT_HINT_RULE
         if discovery_feedback is not None:
             system_prompt += ('\nSECOND AND FINAL DISCOVERY PASS: Search the listed underexplored intervals for different moments. '
                 'The previous candidates have already been reviewed. Do not repeat or overlap them by more than 5 seconds. '
@@ -751,6 +763,35 @@ class IntelligencePlannerService:
             )
             return result
 
+    def _short_transcript_format(self) -> str:
+        """The short-form transcript format block, with speaker guidance only
+        when the transcript actually carries speaker labels."""
+        events = ('- Audio events such as (laughter) or (applause) are real reactions captured in the audio. '
+                  'They are strong evidence that a moment landed; weigh them heavily, and make sure the clip '
+                  'includes the setup that caused the reaction.')
+        if getattr(self, "_speaker_labels", True):
+            return ("Each transcript line is `[start - end] (speaker) text (audio events)`, with times in seconds.\n"
+                    "- Speaker labels (S1, S2, ...) mark who is talking. Back-and-forth exchanges, pushback, and one "
+                    "person reacting to another are strong clip material — but a clip must still make sense without "
+                    f"knowing who the speakers are.\n{events}")
+        return ("Each transcript line is `[start - end] text (audio events)`, with times in seconds.\n"
+                f"{events}")
+
+    def _moment_discovery_rule(self) -> str:
+        """The anchor rule without speaker-label guidance when no labels exist."""
+        if getattr(self, "_speaker_labels", True):
+            return MOMENT_DISCOVERY_RULE
+        return MOMENT_DISCOVERY_RULE.replace(SPEAKER_LABEL_RULE, '')
+
+    def _longform_transcript_format(self) -> str:
+        """The longform transcript format block, with speaker guidance only
+        when the transcript actually carries speaker labels."""
+        tail = ('Audio events such as (laughter) or (applause) are real reactions and mark moments that landed.')
+        if getattr(self, "_speaker_labels", True):
+            return ("Each transcript line is `[start - end] (speaker) text (audio events)`, with times in seconds. "
+                    "Speaker labels (S1, S2, ...) mark turns. " + tail)
+        return f"Each transcript line is `[start - end] text (audio events)`, with times in seconds. {tail}"
+
     def _build_system_prompt(
         self,
         clip_count: int,
@@ -849,9 +890,7 @@ Include your content type classification in the "insights" field.
 
 ## TRANSCRIPT FORMAT
 
-Each transcript line is `[start - end] (speaker) text (audio events)`, with times in seconds.
-- Speaker labels (S1, S2, ...) mark who is talking. Back-and-forth exchanges, pushback, and one person reacting to another are strong clip material — but a clip must still make sense without knowing who the speakers are.
-- Audio events such as (laughter) or (applause) are real reactions captured in the audio. They are strong evidence that a moment landed; weigh them heavily, and make sure the clip includes the setup that caused the reaction.
+{self._short_transcript_format()}
 
 ## EVALUATION RUBRIC
 
@@ -951,7 +990,7 @@ Classify the source first (podcast/interview, tutorial, talk, vlog, debate, stre
 
 ## TRANSCRIPT FORMAT
 
-Each transcript line is `[start - end] (speaker) text (audio events)`, with times in seconds. Speaker labels (S1, S2, ...) mark turns. Audio events such as (laughter) or (applause) are real reactions and mark moments that landed.
+{self._longform_transcript_format()}
 
 ## WHAT MAKES A GOOD EPISODE
 

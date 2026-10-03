@@ -1,6 +1,7 @@
 node_modules/
 out/
 dist/
+.pinokio-temp/
 .env
 .env.local
 .env.*

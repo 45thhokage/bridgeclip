@@ -1,0 +1,14 @@
+# Optional local transcription runtime. Install with:
+#   <python> -m ensurepip
+#   <python> -m pip install --require-hashes -r requirements-local.lock
+# NVIDIA users also install requirements-local-cuda.lock.
+#
+# faster-whisper is the default local backend. onnx-asr adds the experimental
+# Parakeet backend; onnxruntime already arrives through faster-whisper's VAD.
+faster-whisper>=1.2.0
+onnx-asr[cpu,hub]>=0.12.0
+
+# faster-whisper 1.2.1 decodes with av.open(metadata_errors="ignore"), which
+# PyAV 19 removed. Pin the last compatible line so the lock cannot resolve to
+# a PyAV that breaks every local transcription.
+av<19

@@ -51,6 +51,7 @@ function startRunner({ child, env = process.env, onSpawn = () => {} }) {
     child_process: { execFile: require('node:child_process').execFile, spawn: (command, args, options) => { onSpawn(command, args, options); return child } },
     './settings-store': { loadSettings: () => settings, getSettingsForBridge: () => ({ OPENROUTER_API_KEY: SECRET, LOCAL_MODE: 'true', LOCAL_OUTPUT_DIR: WORK_HOME }), vocabularyTerms: () => [] },
     './logger': { logger: { info() {}, error() {}, warn() {} } },
+    './local-transcription': { localTranscriptionJobOptions: () => ({}), localFailureHint: () => null },
     '../shared/job-output': jobOutput,
     '../shared/run-diagnostics': loadShared('run-diagnostics.ts'),
     '../shared/job-progress': loadShared('job-progress.ts'),

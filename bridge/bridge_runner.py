@@ -14,9 +14,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import sys
+import threading
 import time
 import re
+import uuid
 from urllib.parse import urlsplit
 
 logging.basicConfig(
@@ -28,6 +31,9 @@ logger = logging.getLogger("bridge_runner")
 
 # Protocol stream set by reserve_stdout_for_protocol(); tests use sys.stdout.
 _protocol = None
+
+# Aggregated download progress is updated from huggingface_hub's tqdm bars.
+_progress_lock = threading.Lock()
 
 # Mirrors DURATION_OPTIONS in src/shared/job-contract.ts.
 DURATION_RANGE_IDS = ("xshort", "short", "medium", "long", "xlong", "extended", "feature")
@@ -183,6 +189,134 @@ def progress_callback(progress) -> None:
     })
 
 
+def validate_download_config(config: object) -> dict:
+    """Reject malformed model downloads before importing anything or writing files.
+
+    The catalog lives in the app, so the bridge requires a fully specified
+    request: model id, repository, pinned revision and absolute target folder.
+    """
+    if not isinstance(config, dict) or config.get("command") != "download_model":
+        raise ValueError("Unsupported bridge command")
+    model_id = config.get("model_id")
+    if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", model_id):
+        raise ValueError("Invalid model id")
+    repo = config.get("repo")
+    if not isinstance(repo, str) or len(repo) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", repo):
+        raise ValueError("Invalid model repository")
+    revision = config.get("revision")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Invalid model revision")
+    model_dir = config.get("model_dir")
+    if not isinstance(model_dir, str) or not os.path.isabs(model_dir) or "\0" in model_dir or len(model_dir) > 1024:
+        raise ValueError("Invalid model directory")
+    approx = config.get("approx_size_mb")
+    if type(approx) is not int or not 1 <= approx <= 200000:
+        raise ValueError("Invalid model size")
+    return config
+
+
+def _aggregate_tqdm(total_bytes: int):
+    """One percentage from huggingface_hub's per-file tqdm bars."""
+    from tqdm.auto import tqdm as _tqdm
+
+    class AggregateTqdm(_tqdm):
+        _done = 0.0
+        _reported = -1
+
+        def update(self, n=1):
+            before = float(getattr(self, "n", 0) or 0)
+            result = super().update(n)
+            after = float(getattr(self, "n", 0) or 0)
+            delta = max(0.0, after - before)
+            if delta <= 0 or total_bytes <= 0:
+                return result
+            with _progress_lock:
+                AggregateTqdm._done += delta
+                percent = min(99, int(AggregateTqdm._done / total_bytes * 100))
+                if percent > AggregateTqdm._reported:
+                    AggregateTqdm._reported = percent
+                    emit({"type": "progress", "status": "downloading", "percent": percent,
+                          "bytes_done": int(AggregateTqdm._done), "bytes_total": total_bytes,
+                          "step": "Downloading model files..."})
+            return result
+
+    return AggregateTqdm
+
+
+def _download_total_bytes(repo: str, revision: str) -> int:
+    """Total snapshot size from the Hub, or 0 when it cannot be read."""
+    try:
+        from huggingface_hub import HfApi
+        info = HfApi().model_info(repo, revision=revision, files_metadata=True)
+        return sum(int(getattr(sibling, "size", 0) or 0) for sibling in (info.siblings or []))
+    except Exception:
+        return 0
+
+
+async def run_model_download(config: dict) -> bool:
+    """Download one catalog model into a temp sibling folder, then rename it.
+
+    This is its own short-lived bridge process: it never touches the clipping
+    queue, and cancelling kills it exactly like a job cancel does.
+    """
+    config = validate_download_config(config)
+    from network_guard import install as install_network_guard
+    install_network_guard()
+    from clip_engine.logging_safety import install_safe_logging
+    install_safe_logging()
+
+    model_id = config["model_id"]
+    repo = config["repo"]
+    revision = config["revision"]
+    model_dir = config["model_dir"]
+    parent = os.path.dirname(model_dir)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    required = int(int(config["approx_size_mb"]) * 1.3 * 1024 * 1024)
+    try:
+        free = shutil.disk_usage(parent).free
+    except OSError:
+        free = required
+    if free < required:
+        emit({"type": "error", "message": "Not enough free disk space to download this model."})
+        return False
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        emit({"type": "error", "message": "The local transcription runtime is not installed.",
+              "code": "local_runtime_missing"})
+        return False
+
+    staging = f"{model_dir}.downloading-{uuid.uuid4().hex[:8]}"
+    total_bytes = await asyncio.to_thread(_download_total_bytes, repo, revision)
+    emit({"type": "progress", "status": "downloading", "percent": 0,
+          "bytes_done": 0, "bytes_total": total_bytes, "step": "Downloading model files..."})
+    try:
+        if os.path.exists(staging):
+            shutil.rmtree(staging, ignore_errors=True)
+        try:
+            await asyncio.to_thread(
+                snapshot_download,
+                repo_id=repo, revision=revision, local_dir=staging,
+                tqdm_class=_aggregate_tqdm(total_bytes),
+            )
+        except TypeError:
+            # Older huggingface_hub builds do not accept a tqdm class.
+            await asyncio.to_thread(snapshot_download, repo_id=repo, revision=revision, local_dir=staging)
+        if not os.path.isdir(staging) or not os.listdir(staging):
+            raise RuntimeError("empty download")
+        if os.path.exists(model_dir):
+            shutil.rmtree(model_dir)
+        os.rename(staging, model_dir)
+    except Exception:
+        logger.error("Model download failed (%s)", model_id)
+        shutil.rmtree(staging, ignore_errors=True)
+        emit({"type": "error", "message": "The model download failed. Check your connection and try again."})
+        return False
+    emit({"type": "result", "status": "completed", "model_id": model_id, "model_dir": model_dir})
+    return True
+
+
 async def run(config: dict) -> bool:
     """Run the clipping pipeline with the given config."""
     config = validate_config(config)
@@ -199,6 +333,16 @@ async def run(config: dict) -> bool:
     os.environ["YTDLP_NO_PLUGINS"] = "1"
     os.environ["LAYOUT_VISION_ENABLED"] = "true" if config["layout_vision_enabled"] else "false"
     os.environ["CLIPPING_MODE"] = config.get("clipping_mode", "quality")
+    # Local transcription never calls a provider for audio, and a downloaded
+    # model is used offline: no Hugging Face metadata or fallback lookups.
+    os.environ["TRANSCRIPTION_PROVIDER"] = config.get("transcription_provider", "openrouter")
+    if config.get("transcription_provider") == "local":
+        os.environ["LOCAL_TRANSCRIPTION_MODEL_ID"] = config["local_transcription_model_id"]
+        os.environ["LOCAL_TRANSCRIPTION_MODEL_DIR"] = config["local_transcription_model_dir"]
+        os.environ["LOCAL_TRANSCRIPTION_BACKEND"] = config["local_transcription_backend"]
+        os.environ["LOCAL_TRANSCRIPTION_DEVICE"] = config["local_transcription_device"]
+        os.environ["LOCAL_TRANSCRIPTION_COMPUTE_TYPE"] = config["local_transcription_compute_type"]
+        os.environ["HF_HUB_OFFLINE"] = "1"
     if config.get("clipping_mode", "quality") == "economy":
         # Each job has its own bridge process, so model choices cannot leak to
         # another queued or concurrent run. Do not fall back to higher-cost planners.
@@ -366,6 +510,20 @@ def validate_config(config: object) -> dict:
         raise ValueError("Video speed must be between 1x and 2x")
     if config.get("clipping_mode", "quality") not in ("quality", "economy", "advanced"):
         raise ValueError("Invalid clipping mode")
+    if config.get("transcription_provider", "openrouter") not in ("openrouter", "local"):
+        raise ValueError("Invalid transcription provider")
+    if config.get("transcription_provider") == "local":
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", str(config.get("local_transcription_model_id") or "")):
+            raise ValueError("Invalid local transcription model")
+        model_dir = config.get("local_transcription_model_dir")
+        if not isinstance(model_dir, str) or not os.path.isabs(model_dir) or "\0" in model_dir or len(model_dir) > 1024:
+            raise ValueError("Invalid local transcription model directory")
+        if config.get("local_transcription_backend") not in ("faster-whisper", "onnx-parakeet"):
+            raise ValueError("Invalid local transcription backend")
+        if config.get("local_transcription_device") not in ("cuda", "cpu"):
+            raise ValueError("Invalid local transcription device")
+        if config.get("local_transcription_compute_type") not in ("float16", "int8"):
+            raise ValueError("Invalid local transcription compute type")
     for field in ("planner_model", "transcription_model"):
         if config.get("clipping_mode") == "advanced":
             value = config.get(field)
@@ -411,7 +569,14 @@ def main() -> int:
         raw = sys.argv[1] if len(sys.argv) == 2 else sys.stdin.read(65537)
         if len(raw) > 65536:
             raise ValueError("Config too large")
-        config = validate_config(json.loads(raw))
+        config = json.loads(raw)
+        if isinstance(config, dict) and config.get("command") == "download_model":
+            try:
+                return 0 if asyncio.run(run_model_download(config)) else 1
+            except KeyboardInterrupt:
+                emit({"type": "error", "message": "Model download cancelled"})
+                return 130
+        config = validate_config(config)
     except (ValueError, TypeError):
         emit({"type": "error", "message": "Invalid clipping configuration."})
         return 1
