@@ -8,10 +8,16 @@ It is installed only in BridgeClip's local worker process.
 import ipaddress
 import socket
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 _original_connect = socket.socket.connect
 _original_connect_ex = socket.socket.connect_ex
 _installed = False
+
+# The one loopback host:port a clip-planning call may reach, set only while the
+# local planning adapter holds the exception. Everything else stays blocked.
+_allowed_loopback: ContextVar = ContextVar("allowed_loopback_destination", default=None)
 
 
 def _internal_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
@@ -55,11 +61,41 @@ def _internal_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0
     return server, client
 
 
+def _checked_loopback_address(sock: socket.socket, address, allowed):
+    """Allow only the saved loopback host:port, checking the resolved address."""
+    if not isinstance(address, tuple) or len(address) < 2:
+        raise OSError("Network destination is invalid")
+    host, port = address[:2]
+    allowed_host, allowed_port = allowed
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        raise OSError("Network destination is invalid") from None
+    if port_number != allowed_port:
+        raise OSError("Network destination is not allowed")
+    try:
+        ip = ipaddress.ip_address(host)
+        if not ip.is_loopback:
+            raise OSError("Network destination is not loopback")
+        return address[:2] + address[2:]
+    except ValueError:
+        pass
+    if str(host).lower().rstrip(".") != allowed_host:
+        raise OSError("Network destination is not the saved host")
+    results = socket.getaddrinfo(host, port, sock.family, sock.type, sock.proto)
+    if not results or any(not ipaddress.ip_address(result[4][0]).is_loopback for result in results):
+        raise OSError("Network destination is not loopback")
+    return results[0][4]
+
+
 def _public_address(sock: socket.socket, address):
     if sock.family not in (socket.AF_INET, socket.AF_INET6):
         return address
     if not isinstance(address, tuple) or len(address) < 2:
         raise OSError("Network destination is invalid")
+    allowed = _allowed_loopback.get()
+    if allowed is not None:
+        return _checked_loopback_address(sock, address, allowed)
     host, port = address[:2]
     try:
         ip = ipaddress.ip_address(host)
@@ -75,6 +111,26 @@ def _public_address(sock: socket.socket, address):
     if any(not ipaddress.ip_address(result[4][0]).is_global for result in results):
         raise OSError("Local network destinations are not allowed")
     return results[0][4]
+
+
+@contextmanager
+def allow_loopback_destination(host: str, port: int):
+    """Scoped exception for one local planning request.
+
+    The caller (the local planning adapter) enables this only around a planning
+    call whose URL was validated as loopback and saved in settings. Plain http
+    stays blocked everywhere else, and the address is re-checked at connect
+    time, so DNS rebinding cannot widen it.
+    """
+    if not isinstance(host, str) or not host:
+        raise ValueError("Invalid loopback destination")
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("Invalid loopback destination")
+    token = _allowed_loopback.set((host.lower().rstrip("."), port))
+    try:
+        yield
+    finally:
+        _allowed_loopback.reset(token)
 
 
 def _guard_async_connect(original):

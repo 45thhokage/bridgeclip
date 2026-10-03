@@ -30,6 +30,12 @@ from clip_engine.services.openrouter import (
     json_schema_format,
     message_text,
 )
+from clip_engine.services.planning_provider import (
+    JSON_INSTRUCTION,
+    CompatiblePlanningProvider,
+    PlanningProviderError,
+    strip_code_fences,
+)
 from clip_engine.services.transcription_service import (
     TranscriptSegment,
     TranscriptionResult,
@@ -278,9 +284,35 @@ class IntelligencePlannerService:
     def __init__(self):
         self.settings = get_settings()
         self._http_client: Optional[httpx.AsyncClient] = None
-        
-        if not self.settings.openrouter_api_key:
+        self._provider_cache: Optional[CompatiblePlanningProvider] = None
+        self._provider_cache_key: Optional[tuple] = None
+        if not self.settings.uses_compatible_planning and not self.settings.openrouter_api_key:
             logger.warning("OPENROUTER_API_KEY not set, intelligence planning will fail")
+
+    @property
+    def _compatible_provider(self) -> Optional[CompatiblePlanningProvider]:
+        """The OpenAI-compatible provider for this run, rebuilt when settings change."""
+        if not self.settings.uses_compatible_planning:
+            return None
+        key = (
+            self.settings.planning_base_url,
+            self.settings.planning_model_id,
+            self.settings.planning_api_key or "",
+            self.settings.planning_context_tokens,
+            self.settings.planning_local_host,
+            self.settings.planning_local_port,
+        )
+        if self._provider_cache is None or self._provider_cache_key != key:
+            self._provider_cache = CompatiblePlanningProvider(
+                base_url=self.settings.planning_base_url,
+                model_id=self.settings.planning_model_id,
+                api_key=self.settings.planning_api_key or "",
+                context_tokens=self.settings.planning_context_tokens,
+                loopback_host=self.settings.planning_local_host,
+                loopback_port=self.settings.planning_local_port,
+            )
+            self._provider_cache_key = key
+        return self._provider_cache
 
     def calculate_optimal_clip_count(
         self,
@@ -401,18 +433,30 @@ class IntelligencePlannerService:
         return 0.0, "fallback"
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
+        """Get or create the HTTP client for the configured planning provider."""
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(
-                base_url=self.settings.openrouter_base_url,
-                # Reasoning over a multi-hour transcript can take minutes.
-                timeout=httpx.Timeout(600.0, connect=30.0),
-                headers={
-                    "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-                    "HTTP-Referer": "https://github.com/bridge-mind/bridgeclip",
-                    "X-Title": "BridgeClip AI Clipping Agent",
-                },
-            )
+            if self._compatible_provider is not None:
+                headers = {}
+                if self._compatible_provider.api_key:
+                    headers["Authorization"] = f"Bearer {self._compatible_provider.api_key}"
+                self._http_client = httpx.AsyncClient(
+                    base_url=self.settings.planning_base_url,
+                    timeout=httpx.Timeout(90.0, connect=15.0),
+                    headers=headers,
+                    follow_redirects=False,
+                    trust_env=False,
+                )
+            else:
+                self._http_client = httpx.AsyncClient(
+                    base_url=self.settings.openrouter_base_url,
+                    # Reasoning over a multi-hour transcript can take minutes.
+                    timeout=httpx.Timeout(600.0, connect=30.0),
+                    headers={
+                        "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+                        "HTTP-Referer": "https://github.com/bridge-mind/bridgeclip",
+                        "X-Title": "BridgeClip AI Clipping Agent",
+                    },
+                )
         return self._http_client
 
     async def plan_clips(
@@ -612,6 +656,10 @@ class IntelligencePlannerService:
                 'Length and clip count are preferences, never quotas. Return no clips rather than force one.'
             )
         system_prompt += SPONSOR_DISCOVERY_RULE
+        if self._compatible_provider is not None:
+            # No structured-output support on this endpoint: ask for JSON in the
+            # system message and validate the reply locally.
+            system_prompt += '\n' + JSON_INSTRUCTION
         if clip_request:
             system_prompt += CLIP_REQUEST_RULE
         if transcript:
@@ -682,22 +730,32 @@ class IntelligencePlannerService:
         cost_incomplete = False
         attempts_made = 0
         served_by = model_name
+        validation_feedback: Optional[str] = None
 
         for attempt in range(max_attempts):
             attempts_made += 1
-            parameters = self._build_request_payload(model_name, fallback_models, messages)
+            attempt_messages = messages
+            if validation_feedback and self._compatible_provider is not None:
+                # Invalid output is retried with the validation error appended
+                # (at most two more attempts); nothing is ever fabricated.
+                attempt_messages = messages + [{
+                    'role': 'user',
+                    'content': ('The previous answer could not be used: ' + validation_feedback +
+                                ' Answer again with a single JSON object only, no code fences.'),
+                }]
+            parameters = self._build_request_payload(model_name, fallback_models, attempt_messages)
             record = {'discovery_pass': 2 if discovery_feedback is not None else 1, 'model': model_name, 'requested_model': model_name,
                 'request_parameters': json.dumps({k: v for k, v in parameters.items() if k != 'messages'}),
                 'status': 'unavailable', 'messages': [
                 {'role': m['role'], 'content': m['content'] if isinstance(m['content'], str) else [
-                    item for item in m['content'] if item.get('type') == 'text']} for m in messages],
+                    item for item in m['content'] if item.get('type') == 'text']} for m in attempt_messages],
                 'response': None, 'usage': None}
             self.audit['requests'].append(record)
             try:
                 response, usage_data = await self._call_openrouter(
                     model=model_name,
                     fallback_models=fallback_models,
-                    messages=messages,
+                    messages=attempt_messages,
                 )
                 served_by = response.get("model") or model_name
                 record.update(model=served_by, status='received', response=message_text(response)[0], usage=usage_data)
@@ -706,6 +764,11 @@ class IntelligencePlannerService:
                 cumulative_total_tokens += usage_data["total_tokens"]
                 if usage_data["cost"] is not None:
                     cumulative_cost += usage_data["cost"]
+                elif self._compatible_provider is not None:
+                    # Never guess a price for a third-party or local provider.
+                    if self.settings.planning_provider != "local":
+                        cost_reported = False
+                        cost_incomplete = True
                 else:
                     cost_reported = False
                     pricing = MODEL_PRICING.get(served_by, DEFAULT_PRICING)
@@ -724,7 +787,24 @@ class IntelligencePlannerService:
                             + usage_data["completion_tokens"] * pricing["output"]
                         )
 
-                result = self._parse_clip_plan_response(response)
+                try:
+                    result = self._parse_clip_plan_response(response)
+                except IntelligencePlanningError as parse_error:
+                    if self._compatible_provider is None:
+                        raise
+                    record['status'] = 'invalid'
+                    validation_feedback = str(parse_error)[:800]
+                    if attempt == max_attempts - 1:
+                        raise IntelligencePlanningError(
+                            'The planning provider did not return a usable clip plan after '
+                            f'{attempts_made} attempts: {parse_error}',
+                            retryable=False,
+                        ) from parse_error
+                    logger.warning(
+                        f"Planning output was invalid ({parse_error}); retrying with the validation error..."
+                    )
+                    await asyncio.sleep(1)
+                    continue
                 record['status'] = 'parsed'
             except IntelligencePlanningError as e:
                 if not e.retryable or attempt == max_attempts - 1:
@@ -747,7 +827,7 @@ class IntelligencePlannerService:
             )
             result.total_clips = len(result.segments)
             result.api_costs = PlanningApiCosts(
-                provider="openrouter",
+                provider=self.settings.planning_provider if self._compatible_provider is not None else "openrouter",
                 model=served_by,
                 prompt_tokens=cumulative_prompt_tokens,
                 completion_tokens=cumulative_completion_tokens,
@@ -1206,7 +1286,16 @@ Do not overlap clips by more than 5 seconds."""
         fallback_models: list[str],
         messages: list[dict],
     ) -> dict:
-        """Build the OpenRouter chat payload for a clip-planning request."""
+        """Build the chat payload for the configured clip-planning provider."""
+        if self._compatible_provider is not None:
+            # These endpoints may not support structured outputs, so no
+            # response_format, plugins, model routing or reasoning parameters
+            # are sent. The system message asks for one JSON object instead.
+            return {
+                "model": self.settings.planning_model_id,
+                "messages": messages,
+                "max_tokens": self.settings.planner_max_output_tokens,
+            }
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -1235,7 +1324,7 @@ Do not overlap clips by more than 5 seconds."""
         messages: list[dict],
         fallback_models: Optional[list[str]] = None,
     ) -> tuple[dict, dict]:
-        """Call OpenRouter chat completions (see clip_engine.services.openrouter).
+        """Call the configured planning provider's chat completions.
 
         Raises:
             IntelligencePlanningError: with `retryable=True` for rate limits,
@@ -1243,6 +1332,19 @@ Do not overlap clips by more than 5 seconds."""
         """
         client = await self._get_client()
         payload = self._build_request_payload(model, fallback_models or [], messages)
+        if self._compatible_provider is not None:
+            from .run_diagnostics import model_request
+            with model_request(self.settings.planning_model_id) as call:
+                try:
+                    body, usage = await self._compatible_provider.chat(
+                        client, messages, self.settings.planner_max_output_tokens
+                    )
+                except PlanningProviderError as e:
+                    raise IntelligencePlanningError(str(e), retryable=e.retryable) from e
+                raw = body.get('usage') or {}
+                call.update(success=True, input_tokens=raw.get('prompt_tokens'),
+                            output_tokens=raw.get('completion_tokens'), cost_usd=raw.get('cost'))
+                return body, usage
         try:
             return await chat_completion(client, payload)
         except OpenRouterError as e:
@@ -1256,6 +1358,8 @@ Do not overlap clips by more than 5 seconds."""
                 raise IntelligencePlanningError(
                     f"Planner returned no content (finish_reason={finish_reason})"
                 )
+            # Compatible endpoints may wrap the JSON in a markdown code fence.
+            content = strip_code_fences(content)
             if finish_reason == "length":
                 logger.warning(
                     "Planner output hit max_tokens "

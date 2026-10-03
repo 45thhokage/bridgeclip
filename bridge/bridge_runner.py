@@ -343,6 +343,21 @@ async def run(config: dict) -> bool:
         os.environ["LOCAL_TRANSCRIPTION_DEVICE"] = config["local_transcription_device"]
         os.environ["LOCAL_TRANSCRIPTION_COMPUTE_TYPE"] = config["local_transcription_compute_type"]
         os.environ["HF_HUB_OFFLINE"] = "1"
+    # Clip planning source, resolved by the desktop from saved settings. The
+    # default keeps the existing OpenRouter path; anything else uses one
+    # OpenAI-compatible provider (OpenCode Zen/Go, a custom endpoint or a local
+    # server). The provider key arrives only through the worker environment.
+    planning_provider = config.get("planning_provider", "openrouter")
+    os.environ["PLANNING_SOURCE"] = config.get("planning_source", "cloud")
+    os.environ["PLANNING_PROVIDER"] = planning_provider
+    if planning_provider != "openrouter":
+        os.environ["PLANNING_BASE_URL"] = config["planning_base_url"]
+        os.environ["PLANNING_MODEL_ID"] = config["planning_model_id"]
+    if planning_provider == "local":
+        os.environ["PLANNING_LOCAL_HOST"] = config["planning_local_host"]
+        os.environ["PLANNING_LOCAL_PORT"] = str(config["planning_local_port"])
+        os.environ["PLANNING_CONTEXT_TOKENS"] = str(config.get("planning_context_tokens", 8192))
+
     if config.get("clipping_mode", "quality") == "economy":
         # Each job has its own bridge process, so model choices cannot leak to
         # another queued or concurrent run. Do not fall back to higher-cost planners.
@@ -381,7 +396,9 @@ async def run(config: dict) -> bool:
     settings = get_settings()
 
     missing = []
-    if not settings.openrouter_api_key:
+    # OpenRouter planning and Jev review need the OpenRouter key. Local,
+    # OpenCode and custom planning do not.
+    if not settings.openrouter_api_key and (planning_provider == "openrouter" or settings.jev_enabled):
         missing.append("OPENROUTER_API_KEY")
     if missing:
         emit({"type": "error", "message": f"Missing required API keys: {', '.join(missing)}"})
@@ -467,6 +484,69 @@ async def run(config: dict) -> bool:
     return False
 
 
+LOOPBACK_PLANNING_HOSTS = {"127.0.0.1", "::1", "localhost"}
+PLANNING_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}")
+
+
+def _validate_planning_config(config: dict) -> bool:
+    """Validate the resolved planning stage.
+
+    Built-in providers must use their documented host, a local server must be
+    plain http on loopback, and a custom endpoint must be https. Anything else
+    is rejected here as well as by the socket guard.
+    """
+    source = config.get("planning_source", "cloud")
+    provider = config.get("planning_provider", "openrouter")
+    if source not in ("cloud", "local"):
+        return False
+    if provider not in ("openrouter", "opencode-zen", "opencode-go", "custom", "local"):
+        return False
+    if provider == "openrouter":
+        return source == "cloud" and not any(
+            field in config for field in (
+                "planning_base_url", "planning_model_id", "planning_local_host",
+                "planning_local_port", "planning_context_tokens",
+            )
+        )
+    model_id = config.get("planning_model_id")
+    if not isinstance(model_id, str) or not PLANNING_MODEL_ID.fullmatch(model_id):
+        return False
+    base = config.get("planning_base_url")
+    if not isinstance(base, str) or not base or len(base) > 512 or "\0" in base:
+        return False
+    try:
+        url = urlsplit(base)
+    except ValueError:
+        return False
+    if url.username or url.password or not url.hostname:
+        return False
+    if provider == "local":
+        if source != "local" or url.scheme != "http":
+            return False
+        if (url.hostname or "").lower() not in LOOPBACK_PLANNING_HOSTS:
+            return False
+        try:
+            port = url.port
+        except ValueError:
+            return False
+        if port is None or not 1 <= port <= 65535:
+            return False
+        if config.get("planning_local_host") != url.hostname or config.get("planning_local_port") != port:
+            return False
+        tokens = config.get("planning_context_tokens")
+        if type(tokens) is not int or not 1024 <= tokens <= 1048576:
+            return False
+        return True
+    if source != "cloud" or url.scheme != "https":
+        return False
+    if provider == "opencode-zen":
+        return url.geturl().rstrip("/") == "https://opencode.ai/zen/v1"
+    if provider == "opencode-go":
+        return url.geturl().rstrip("/") == "https://opencode.ai/zen/go/v1"
+    # Custom: an https host; the socket guard checks the resolved address.
+    return bool(url.hostname)
+
+
 def validate_config(config: object) -> dict:
     """Reject malformed bridge requests before loading the engine or writing files."""
     if not isinstance(config, dict):
@@ -512,6 +592,8 @@ def validate_config(config: object) -> dict:
         raise ValueError("Invalid clipping mode")
     if config.get("transcription_provider", "openrouter") not in ("openrouter", "local"):
         raise ValueError("Invalid transcription provider")
+    if not _validate_planning_config(config):
+        raise ValueError("Invalid planning configuration")
     if config.get("transcription_provider") == "local":
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", str(config.get("local_transcription_model_id") or "")):
             raise ValueError("Invalid local transcription model")

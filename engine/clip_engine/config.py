@@ -688,6 +688,18 @@ class Settings(BaseSettings):
     # default, and the local runtime is never installed automatically.
     transcription_provider: Literal["openrouter", "local"] = "openrouter"
     local_transcription_model_id: str = ""
+
+    # Clip planning source (desktop only). OpenRouter is the default; the
+    # bridge sets the resolved provider for each run from saved settings. A
+    # non-OpenRouter provider uses one OpenAI-compatible chat/completions path.
+    planning_source: Literal["cloud", "local"] = "cloud"
+    planning_provider: Literal["openrouter", "opencode-zen", "opencode-go", "custom", "local"] = "openrouter"
+    planning_base_url: str = ""
+    planning_model_id: str = ""
+    planning_api_key: Optional[str] = None
+    planning_context_tokens: int = 8192
+    planning_local_host: str = ""
+    planning_local_port: int = 0
     local_transcription_model_dir: str = ""
     local_transcription_backend: str = "faster-whisper"
     local_transcription_device: Literal["cuda", "cpu"] = "cpu"
@@ -707,9 +719,14 @@ class Settings(BaseSettings):
     def _split_models(models: str, primary: str) -> List[str]:
         return [m.strip() for m in models.split(",") if m.strip() and m.strip() != primary]
 
+    @property
+    def uses_compatible_planning(self) -> bool:
+        """True when clip planning runs against an OpenAI-compatible endpoint."""
+        return self.planning_provider != "openrouter"
+
     def get_planner_fallback_models(self) -> List[str]:
         """Fallback planner models, excluding blanks and the primary."""
-        if self.clipping_mode == "advanced":
+        if self.clipping_mode == "advanced" or self.uses_compatible_planning:
             return []
         return self._split_models(self.planner_fallback_models, self.planner_model)
 

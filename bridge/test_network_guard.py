@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from network_guard import _guard_async_connect, _public_address
+from network_guard import _guard_async_connect, _public_address, allow_loopback_destination
 
 
 class NetworkGuardTests(unittest.TestCase):
@@ -29,6 +29,43 @@ class NetworkGuardTests(unittest.TestCase):
             public = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
             with patch.object(socket, "getaddrinfo", return_value=public):
                 self.assertEqual(_public_address(sock, ("public.example", 443)), ("8.8.8.8", 443))
+        finally:
+            sock.close()
+
+    def test_loopback_exception_allows_only_the_saved_host_and_port(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        private = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 11434))]
+        try:
+            with allow_loopback_destination("127.0.0.1", 11434):
+                self.assertEqual(_public_address(sock, ("127.0.0.1", 11434)), ("127.0.0.1", 11434))
+                self.assertEqual(_public_address(sock, ("::1", 11434)), ("::1", 11434))
+                # Another port on loopback, and every private or link-local
+                # range, stays blocked inside the same context.
+                for host in ("127.0.0.1", "10.0.0.1", "192.168.1.5", "169.254.169.254"):
+                    with self.subTest(host=host), self.assertRaises(OSError):
+                        _public_address(sock, (host, 11435))
+                for host in ("10.0.0.1", "172.16.0.1", "169.254.169.254"):
+                    with self.subTest(host=host), self.assertRaises(OSError):
+                        _public_address(sock, (host, 11434))
+                # A hostname is accepted only when it is the saved host itself.
+                with patch.object(socket, "getaddrinfo", return_value=private), self.assertRaises(OSError):
+                    _public_address(sock, ("localhost", 11434))
+                with patch.object(socket, "getaddrinfo", return_value=private), self.assertRaises(OSError):
+                    _public_address(sock, ("somewhere.example", 11434))
+            with allow_loopback_destination("localhost", 11434), patch.object(socket, "getaddrinfo", return_value=private):
+                self.assertEqual(_public_address(sock, ("localhost", 11434)), ("127.0.0.1", 11434))
+            # Outside the exception, even the saved destination is blocked again.
+            with self.assertRaises(OSError):
+                _public_address(sock, ("127.0.0.1", 11434))
+        finally:
+            sock.close()
+
+    def test_loopback_exception_rejects_non_loopback_dns_answers(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        rebinding = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 11434))]
+        try:
+            with allow_loopback_destination("localhost", 11434), patch.object(socket, "getaddrinfo", return_value=rebinding), self.assertRaises(OSError):
+                _public_address(sock, ("localhost", 11434))
         finally:
             sock.close()
 

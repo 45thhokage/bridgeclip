@@ -18,6 +18,7 @@ import { onRadioKeyDown } from './ui/Segmented'
 import { CLIP_REQUEST_MAX_CHARS, DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
 import { isModelId } from '../../shared/openrouter-models'
 import { localModel } from '../../shared/transcription'
+import { planningStageLabel } from '../../shared/planning'
 import { useModelStore } from '../store/use-model-store'
 import { useSettingsStore } from '../store/use-settings-store'
 import { ModelPicker } from './ModelPicker'
@@ -106,6 +107,10 @@ type Update = (patch: Partial<ClipDraft>) => void
 export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, className }: JobFormProps): React.JSX.Element {
   const draft = useDraftStore()
   const { update, step, setStep } = draft
+  const planning = useSettingsStore((s) => s.planning)
+  // The Quality/Economy/Advanced presets are OpenRouter model picks; another
+  // planning source ignores them, so they are hidden rather than misleading.
+  const planningOpenRouter = planning.source === 'cloud' && planning.cloudProvider === 'openrouter'
 
   const trim = useMemo(
     () => parseTrimRange(draft.trimOpen, draft.trimStart, draft.trimEnd),
@@ -117,12 +122,18 @@ export function JobForm({ onSubmit, onViewJob, blockedReason, submitting, classN
   const sourceError = twitchSourceError(draft.source)
   const hasSource = Boolean(draft.source.trim()) && !sourceError
   const videoValid = hasSource && draft.workflow !== null && !trim.error
-  const modelsValid = draft.clippingMode !== 'advanced' || (isModelId(draft.plannerModel) && isModelId(draft.transcriptionModel))
+  const modelsValid = !planningOpenRouter || draft.clippingMode !== 'advanced' || (isModelId(draft.plannerModel) && isModelId(draft.transcriptionModel))
   const stepValid = videoValid && (step !== 'clips' || modelsValid)
   const canSubmit = videoValid && modelsValid && !blockedReason && !submitting && !draft.started
 
   const submit = (): void => {
-    if (canSubmit) onSubmit(buildJobRequest(draft, trim))
+    if (!canSubmit) return
+    // An old Advanced choice cannot apply to another planning source; it falls
+    // back to the Quality defaults instead of referencing hidden models.
+    const request = planningOpenRouter || draft.clippingMode !== 'advanced'
+      ? draft
+      : { ...draft, clippingMode: 'quality' as const }
+    onSubmit(buildJobRequest(request, trim))
   }
 
   // ⌘↵ / Ctrl+↵ generates only once a video and workflow are chosen.
@@ -412,6 +423,8 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
 export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update }): React.JSX.Element {
   const jevEnabled = useSettingsStore((s) => s.jevEnabled === 'on')
   const transcription = useSettingsStore((s) => s.transcription)
+  const planning = useSettingsStore((s) => s.planning)
+  const planningOpenRouter = planning.source === 'cloud' && planning.cloudProvider === 'openrouter'
   const localId = transcription.provider === 'local' ? transcription.localModelId : null
   const transcriptionHint = localId ? `Local (${localModel(localId).label})` : 'MAI Transcribe 2'
   const toggleDuration = (id: string): void => {
@@ -431,7 +444,13 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
         />
         <p id="clip-request-help" className="mt-2 text-2xs text-ink-subtle">Only matching moments are clipped, so you may get fewer clips, or none. Leave blank for the best moments.</p>
       </Group>
-      <Group label="Clipping mode">
+      {!planningOpenRouter && (
+        <Group label="Clip planning">
+          <p className="text-xs text-ink-muted">Planning: <span className="text-ink">{planningStageLabel(planning)}</span></p>
+          <p className="mt-1 text-2xs text-ink-subtle">The Quality, Economy and Advanced presets pick OpenRouter models, so this picker is hidden while clip planning uses another provider. Change the planning source or model in Settings.</p>
+        </Group>
+      )}
+      {planningOpenRouter && <Group label="Clipping mode">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Clipping mode">
           {([
             { id: 'quality', label: 'Quality', hint: `GPT-6 Sol planning · ${draft.workflow === 'review' ? 'Jev review required' : `Jev review & repairs ${jevEnabled ? 'enabled' : 'off'}`} · ${transcriptionHint}` },
@@ -451,7 +470,7 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
           transcription.provider === 'local' ?
             <p className="mt-2 text-2xs text-ink-subtle">Transcription runs on this computer with {localId ? localModel(localId).label : 'the selected local model'}, so the audio never leaves it. Clip planning still uses OpenRouter.</p> :
             <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
-      </Group>
+      </Group>}
       <Group label="Clip length" aside={draft.durations.length === 0 ? 'Any length' : `${draft.durations.length} selected`}>
         <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-7" role="group" aria-label="Clip length options">
           {DURATIONS.map((d) => {
@@ -553,6 +572,8 @@ function ReviewStep({ draft, trim, onEdit }: {
 }): React.JSX.Element {
   const active = useActiveJobs()
   const transcription = useSettingsStore((s) => s.transcription)
+  const planning = useSettingsStore((s) => s.planning)
+  const planningOpenRouter = planning.source === 'cloud' && planning.cloudProvider === 'openrouter'
   const localId = transcription.provider === 'local' ? transcription.localModelId : null
   const transcriptionLabel = localId ? `Local (${localModel(localId).label})` : 'OpenRouter'
   const runningCount = active.filter((job) => job.status !== 'queued').length
@@ -572,8 +593,15 @@ function ReviewStep({ draft, trim, onEdit }: {
     { step: 'format', label: 'Format', value: `${FORMATS.find((f) => f.id === draft.aspectRatio)?.label ?? draft.aspectRatio} ${draft.aspectRatio} · ${framing}` },
     { step: 'format', label: 'Pacing', value: draft.workflow === 'review' ? 'Manual · choose your own cuts in the editor' : draft.pacing === 'tight' ? 'Cut dead air' : 'Keep pauses' },
     { step: 'format', label: 'Speed', value: `${draft.videoSpeed ?? 1}×${(draft.videoSpeed ?? 1) === 1 ? ' · Normal' : ' · All exported clips'}` },
-    { step: 'clips', label: 'Mode', value: draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
-    { step: 'clips', label: 'Transcription', value: transcriptionLabel },
+    ...(planningOpenRouter
+      ? [
+          { step: 'clips' as const, label: 'Mode', value: draft.clippingMode === 'advanced' ? 'Advanced · custom models' : draft.clippingMode === 'economy' ? 'Economy · lower cost' : 'Quality · higher accuracy' },
+          { step: 'clips' as const, label: 'Transcription', value: transcriptionLabel }
+        ]
+      : [
+          { step: 'clips' as const, label: 'Planning', value: planningStageLabel(planning) },
+          { step: 'clips' as const, label: 'Transcription', value: transcriptionLabel }
+        ]),
     { step: 'clips', label: 'Clips', value: `${lengths}${(draft.videoSpeed ?? 1) > 1 && draft.durations.length > 0 ? ' of source footage' : ''} · ${draft.autoClipCount ? 'AI decides how many' : `Up to ${draft.maxClips}`}` },
     { step: 'clips', label: 'What to clip', value: draft.clipRequest?.trim() || 'The best moments' },
     { step: 'captions', label: 'Captions', value: draft.includeCaptions ? CAPTION_PRESET_NAMES[draft.captionPreset] ?? draft.captionPreset : 'Off' }
@@ -602,7 +630,11 @@ function ReviewStep({ draft, trim, onEdit }: {
           ? `${runningCount} jobs are running. This one waits in the queue and starts automatically.`
           : active.length > 0
             ? `Runs alongside ${active.length} other job${active.length === 1 ? '' : 's'}. Up to ${MAX_PARALLEL_JOBS} run at once.`
-            : 'Runs on this computer. Transcription and clip planning bill your OpenRouter account.'}
+            : planning.source === 'local'
+              ? 'Runs on this computer. Local clip planning costs $0.'
+              : planning.cloudProvider !== 'openrouter'
+                ? 'Runs on this computer. Clip planning cost is not reported by provider.'
+                : 'Runs on this computer. Transcription and clip planning bill your OpenRouter account.'}
       </p>
     </div>
   )
