@@ -139,7 +139,10 @@ jobs:
             dist/*.dmg
             dist/*.AppImage
             dist/*.deb
-            dist/*.blockmap
+            # Squirrel.Mac installs ZIPs, so the DMG blockmaps upstream does not
+            # publish stay out of the release too.
+            dist/*.zip.blockmap
+            dist/*.exe.blockmap
             dist/latest.yml
             dist/latest-linux.yml
             dist/latest-mac.yml
