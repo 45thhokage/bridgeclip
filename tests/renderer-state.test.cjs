@@ -114,6 +114,26 @@ test('overlapping settings writes merge at dispatch and retain saving state', as
   assert.equal(useSettingsStore.getState().saving, false)
 })
 
+test('a transcription picker change updates the settings store, so the picker cannot snap back', async () => {
+  // The GPU/VRAM selects render from the store. Saving through the dedicated
+  // transcription IPC must also update the store, or the select shows the old
+  // value again until the next settings load.
+  const { useSettingsStore } = load({ transcription: {
+    save: async (next) => ({
+      settings: next,
+      recommendation: { recommendedModelId: 'small.en', alsoAvailable: [], computeType: 'int8', device: 'cpu', reason: '' },
+      models: [], download: null, runtimeInstalled: true, installCommand: ''
+    })
+  } })
+  useSettingsStore.setState({ transcription: { provider: 'local', gpuFamily: 'unsure', vram: '4to7', localModelId: 'small.en' } })
+  await useSettingsStore.getState().saveTranscription({ gpuFamily: 'nvidia_pascal', vram: '8plus' })
+  const saved = useSettingsStore.getState().transcription
+  assert.equal(saved.gpuFamily, 'nvidia_pascal')
+  assert.equal(saved.vram, '8plus')
+  assert.equal(saved.provider, 'local')
+  assert.equal(saved.localModelId, 'small.en')
+})
+
 test('failed settings write does not poison subsequent writes', async () => {
   let calls = 0
   const { useSettingsStore } = load({ settings: {

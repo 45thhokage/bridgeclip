@@ -1,5 +1,5 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS, type JevThresholdSettings } from '../shared/jev-settings'
-import { TRANSCRIPTION_DEFAULTS, normalizeTranscriptionSettings, type TranscriptionSettings } from '../shared/transcription'
+import { TRANSCRIPTION_DEFAULTS, mergeTranscriptionSettings, normalizeTranscriptionSettings, type TranscriptionSettings } from '../shared/transcription'
 import { app, safeStorage } from 'electron'
 import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join } from 'path'
@@ -311,7 +311,7 @@ export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory
     jevEnabled: update.jevEnabled ?? current.jevEnabled,
     jevVisualContext: update.jevVisualContext ?? current.jevVisualContext,
     sourceContextWebResearch: update.sourceContextWebResearch ?? current.sourceContextWebResearch,
-    transcription: normalizeTranscriptionSettings(update.transcription ?? current.transcription)
+    transcription: mergeTranscriptionSettings(current.transcription, update.transcription)
   }))
 }
 
@@ -339,9 +339,9 @@ export function vocabularyTerms(value: string): string[] {
  * Save just the transcription choice. Used by Settings and by deleting the
  * selected model, without touching the other settings.
  */
-export function saveTranscriptionSettings(update: TranscriptionSettings): PublicSettings {
+export function saveTranscriptionSettings(update: Partial<TranscriptionSettings>): PublicSettings {
   const current = loadSettings()
-  return publicSettings(saveSettings({ ...current, transcription: normalizeTranscriptionSettings(update) }))
+  return publicSettings(saveSettings({ ...current, transcription: mergeTranscriptionSettings(current.transcription, update) }))
 }
 
 export function replaceApiKey(key: ApiKeyName, value: string): PublicSettings {

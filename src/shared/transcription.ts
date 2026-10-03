@@ -179,6 +179,25 @@ export function normalizeTranscriptionSettings(value: unknown): TranscriptionSet
   }
 }
 
+/**
+ * Apply a partial update over the saved transcription settings. Fields the
+ * update omits keep their saved values, so changing the GPU never resets the
+ * provider, VRAM or selected model. An explicit `localModelId: null` clears it.
+ */
+export function mergeTranscriptionSettings(current: unknown, patch: unknown): TranscriptionSettings {
+  const base = normalizeTranscriptionSettings(current)
+  const raw = (patch && typeof patch === 'object' ? patch : {}) as Record<string, unknown>
+  const present = (key: keyof TranscriptionSettings): boolean => Object.hasOwn(raw, key)
+  return {
+    provider: isTranscriptionProvider(raw.provider) ? raw.provider : base.provider,
+    gpuFamily: isGpuFamily(raw.gpuFamily) ? raw.gpuFamily : base.gpuFamily,
+    vram: isTranscriptionVram(raw.vram) ? raw.vram : base.vram,
+    localModelId: !present('localModelId')
+      ? base.localModelId
+      : isLocalModelId(raw.localModelId) ? raw.localModelId : null
+  }
+}
+
 export interface TranscriptionRecommendation {
   recommendedModelId: LocalModelId
   /** Other catalog models worth showing with their speed/accuracy label. */

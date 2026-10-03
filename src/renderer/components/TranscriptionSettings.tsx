@@ -33,7 +33,7 @@ function sizeLabel(approxSizeMB: number): string {
  */
 export function TranscriptionSettings(): React.JSX.Element {
   const transcription = useSettingsStore((s) => s.transcription)
-  const save = useSettingsStore((s) => s.save)
+  const saveTranscription = useSettingsStore((s) => s.saveTranscription)
   const loadSettings = useSettingsStore((s) => s.load)
   const [overview, setOverview] = useState<TranscriptionOverview | null>(null)
   const [download, setDownload] = useState<ModelDownloadState | null>(null)
@@ -61,7 +61,8 @@ export function TranscriptionSettings(): React.JSX.Element {
     setBusy(true)
     setError(null)
     try {
-      setOverview(await getApi().transcription.save({ ...transcription, ...patch }))
+      // Saving updates the settings store as well, so the pickers keep the choice.
+      setOverview(await saveTranscription(patch))
     } catch (err) {
       setError(errorMessage(err, 'Could not save the transcription setting'))
     } finally {
@@ -73,8 +74,7 @@ export function TranscriptionSettings(): React.JSX.Element {
     // Local needs a model to mean anything; start on the recommended one.
     const recommended = overview?.recommendation.recommendedModelId ?? null
     const localModelId = provider === 'local' && !transcription.localModelId ? recommended : transcription.localModelId
-    await save({ transcription: { ...transcription, provider, localModelId } })
-    await refresh()
+    await commit({ provider, localModelId })
   }
 
   const startDownload = async (modelId: LocalModelId): Promise<void> => {

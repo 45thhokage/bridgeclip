@@ -1,5 +1,5 @@
 import { JEV_DEFAULTS, JEV_FEATURE_DEFAULTS } from '../../shared/jev-settings'
-import { TRANSCRIPTION_DEFAULTS } from '../../shared/transcription'
+import { TRANSCRIPTION_DEFAULTS, mergeTranscriptionSettings, type TranscriptionOverview, type TranscriptionSettings } from '../../shared/transcription'
 import { create } from 'zustand'
 import { errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
@@ -13,6 +13,8 @@ interface SettingsState extends ClipSettings {
   toolError: string | null
   load: () => Promise<void>
   save: (settings: Partial<ClipSettings>) => Promise<void>
+  /** Save the transcription pickers through the dedicated IPC and keep the store in sync. */
+  saveTranscription: (update: Partial<TranscriptionSettings>) => Promise<TranscriptionOverview>
   replaceApiKey: (key: 'openrouterApiKey' | 'zernioApiKey', value: string) => Promise<void>
   checkTools: () => Promise<void>
 }
@@ -52,6 +54,23 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       set({ ...pickSettings(saved), loaded: true })
     })
     saveQueue = task.catch(() => {})
+    return task.finally(() => {
+      pendingSaves -= 1
+      set({ saving: pendingSaves > 0 })
+    })
+  },
+
+  saveTranscription: (update) => {
+    const merged = mergeTranscriptionSettings(get().transcription, update)
+    pendingSaves += 1
+    set({ saving: true })
+    const task = saveQueue.then(async (): Promise<TranscriptionOverview> => {
+      const overview = await getApi().transcription.save(merged)
+      // The selects render from the store, so the saved value must land here.
+      set({ ...pickSettings(get()), transcription: overview.settings, loaded: true })
+      return overview
+    })
+    saveQueue = task.then(() => undefined).catch(() => {})
     return task.finally(() => {
       pendingSaves -= 1
       set({ saving: pendingSaves > 0 })
