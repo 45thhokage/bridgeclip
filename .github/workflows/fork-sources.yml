@@ -47,18 +47,21 @@ jobs:
       - name: Upload the mirror
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # This job has no checkout, so name the repository explicitly instead
+          # of letting gh infer it from a git remote.
           release="${{ inputs.target_release }}"
-          if ! gh release view "$release" >/dev/null 2>&1; then
-            gh release create "$release" --latest=false \
+          if ! gh release view "$release" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$release" -R "$REPO" --latest=false \
               --title "FFmpeg corresponding source (mirror)" \
-              --notes "Version-pinned FFmpeg corresponding source, mirrored unmodified from bridge-mind/bridgeclip \${{ inputs.source_release }} for LGPL compliance. This is not an app release; ignore it when looking for installers."
+              --notes "Version-pinned FFmpeg corresponding source, mirrored unmodified from bridge-mind/bridgeclip ${{ inputs.source_release }} for LGPL compliance. This is not an app release; ignore it when looking for installers."
           fi
           cd source
           mv upstream-files.txt UPSTREAM-MANIFEST.txt
           rm -f SHA256SUMS.txt
           sha256sum ffmpeg-corresponding-source-*.tar.xz > SHA256SUMS.txt
-          gh release upload "$release" \
+          gh release upload "$release" -R "$REPO" \
             ffmpeg-corresponding-source-*.tar.xz SHA256SUMS.txt UPSTREAM-MANIFEST.txt \
             --clobber
