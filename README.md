@@ -5,12 +5,12 @@
   </picture>
 </h1>
 
-<p align="center"><strong>Turn long videos into captioned short-form clips.</strong></p>
+<p align="center"><strong>Turn long videos into captioned short-form clips — with local transcription and clip planning.</strong></p>
 
 <p align="center">
   An open-source desktop app from <a href="https://www.bridgemind.ai">BridgeMind</a>.
   Find moments in podcasts, streams and interviews, refine the edit, and export clips for your audience.
-  Video rendering runs on your computer; AI uses your own OpenRouter key.
+  Video rendering runs on your computer, and so can the AI: use your own OpenRouter key, or keep transcription and clip planning local.
 </p>
 
 <p align="center">

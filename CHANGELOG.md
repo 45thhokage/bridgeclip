@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-02
+
 ### Added
 
 - **What to clip** in Create → Clips: describe the moments you want, such as "every time they talk about pricing". Leave it blank to get the strongest moments as before.
@@ -20,12 +22,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 - **Free editor media** removes an editor project's source copy and preview once you're done with it.
 - BridgeClip asks whether to save or discard unsaved edits before quitting, and offers **Reload project** when a project was changed elsewhere.
 - This changelog, in Settings → About and the Help menu.
+- **Settings → Pipeline** gives each stage its own source: transcription on OpenRouter or on this computer, and clip planning on OpenRouter, OpenCode Zen, OpenCode Go, a custom https endpoint or a local server you already run. Every combination works, including local transcription with cloud planning.
+- **Settings → Local setup** can point clip planning at Ollama, LM Studio, llama.cpp server or a typed OpenAI-compatible address, with a model picker, a context-window setting and **Test connection**. A transcript that does not fit is refused before any request instead of being truncated.
+- First launch is three steps — Transcription, Clip planning, Summary — so the two stages are chosen separately, and every cloud provider key row shows **Test connection** and **Used by**.
 
 ### Changed
 
 - Smart framing ignores weak background faces, stays on a speaker who briefly looks away, follows talking heads inside 4:3 video, and analyzes footage faster.
 - Screen + webcam clips fill the top panel again.
 - Editor previews use much less disk space, and downloaded sources are moved into the project instead of copied.
+- **Settings** groups the pipeline stages, the cloud keys and the local setup, and names the stage each key belongs to on its own row.
+- Clip planning cost shows as **not reported by provider** when a cloud provider does not return prices, and as **$0** when it runs on this computer.
 
 ### Fixed
 
@@ -36,6 +43,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Mai
 - Unattended posts no longer use text from the source video's description, and refuse web addresses or @handles that aren't said in the video.
 - Deleting a clip also removes its caption and YouTube text files.
 - A missing transcript shows a clear message, and research citations can be selected and copied.
+- **Settings → Local setup** keeps the GPU and VRAM you pick after saving.
+- OpenCode model lists load before a model is chosen, so the picker shows the provider's models and **Refresh models** works.
+- Local clip planning works with `http://[::1]` (IPv6 loopback) and with an address typed without a port, and only `127.0.0.1`, `::1` and `localhost` are accepted for a local server.
+- **Test connection** asks for a missing OpenCode key instead of a model you cannot pick yet, and a model id with unsupported characters now says so instead of leaving an unsaved value on screen.
+- The setup card's **Finish planning later with OpenRouter** runs the key check, so **Finish** works on the Summary step.
+- Create and Summary name the clip-planning provider actually in use instead of always saying OpenRouter.
 
 ## [0.1.19] - 2026-09-27
 
@@ -104,7 +117,8 @@ The first version with downloadable installers, starting with macOS.
 
 - BridgeClip's source code is public under the MIT license. Installers start with 0.1.17.
 
-[Unreleased]: https://github.com/bridge-mind/bridgeclip/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/bridge-mind/bridgeclip/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.2.0
 [0.1.19]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.19
 [0.1.18]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.18
 [0.1.17]: https://github.com/bridge-mind/bridgeclip/releases/tag/v0.1.17

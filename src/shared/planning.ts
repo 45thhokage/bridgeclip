@@ -231,12 +231,15 @@ export function mergePlanningSettings(current: unknown, patch: unknown): Plannin
   }
 }
 
-/** True for the hosts a local planning server may use: this computer only. */
+/**
+ * True for the hosts a local planning server may use: this computer only.
+ *
+ * The same three names are the bridge's allowlist, so a saved value that the UI
+ * accepts can never be refused later by `_validate_planning_config`.
+ */
 export function isLoopbackPlanningHost(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true
-  return false
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1'
 }
 
 export interface BaseUrlInfo {
@@ -245,14 +248,18 @@ export interface BaseUrlInfo {
   port: string
 }
 
-/** Parse a planning base URL, returning null when it is malformed or carries credentials. */
+/**
+ * Parse a planning base URL, returning null when it is malformed or carries
+ * credentials. `hostname` is unbracketed, matching what the Python bridge and
+ * the socket guard see for an IPv6 literal (`::1`, not `[::1]`).
+ */
 export function parsePlanningBaseUrl(value: unknown): BaseUrlInfo | null {
   if (typeof value !== 'string' || !value.trim() || value.length > 512 || value.includes('\0')) return null
   try {
     const url = new URL(value.trim())
     if (url.username || url.password) return null
     const port = url.port || (url.protocol === 'https:' ? '443' : '80')
-    return { url: url.toString().replace(/\/$/, ''), hostname: url.hostname, port }
+    return { url: url.toString().replace(/\/$/, ''), hostname: url.hostname.replace(/^\[|\]$/g, ''), port }
   } catch {
     return null
   }

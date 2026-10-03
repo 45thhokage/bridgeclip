@@ -2,7 +2,8 @@
  * Transcription settings, the local model catalog and the GPU recommendation.
  *
  * OpenRouter (MAI Transcribe 2) stays the default. Local transcription runs the
- * speech-to-text model on this computer; clip planning still uses OpenRouter.
+ * speech-to-text model on this computer; clip planning picks its own source in
+ * shared/planning.ts.
  * Hardware is never detected: the GPU dropdown is the only source, so every
  * decision here is a pure function of the chosen family and VRAM.
  */

@@ -175,6 +175,63 @@ test('local planning resolves the host, port and context for either transcriptio
   }
 })
 
+test('an IPv6 loopback server resolves the unbracketed host the bridge compares', () => {
+  const planning = loadPlanning()
+  const shared = loadShared('planning.ts')
+  // Node keeps the brackets in URL.hostname; the job options and the Python
+  // bridge both see the bare literal.
+  const ipv6 = { ...LOCAL_PLANNING.local, baseUrl: 'http://[::1]:11434/v1' }
+  const options = planning.planningJobOptions(baseSettings({ planning: { ...LOCAL_PLANNING, local: ipv6 } }))
+  assert.equal(options.planning_local_host, '::1')
+  assert.equal(options.planning_local_port, 11434)
+  assert.equal(options.planning_base_url, 'http://[::1]:11434/v1')
+  assert.equal(shared.parsePlanningBaseUrl('http://[::1]:11434/v1').hostname, '::1')
+  assert.equal(shared.isLoopbackPlanningHost('::1'), true)
+})
+
+test('a local address without a port resolves to the scheme default', () => {
+  const planning = loadPlanning()
+  const noPort = { ...LOCAL_PLANNING.local, baseUrl: 'http://localhost/v1' }
+  const options = planning.planningJobOptions(baseSettings({ planning: { ...LOCAL_PLANNING, local: noPort } }))
+  assert.equal(options.planning_local_host, 'localhost')
+  assert.equal(options.planning_local_port, 80)
+})
+
+test('only the three documented loopback hosts are accepted for a local server', () => {
+  const shared = loadShared('planning.ts')
+  for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '::1', '[::1]']) {
+    assert.equal(shared.isLoopbackPlanningHost(host), true, host)
+  }
+  // The bridge's allowlist carries the same three names, so none of these may
+  // pass the UI and fail later in the worker.
+  for (const host of ['127.0.0.2', '192.168.1.10', 'localhost.example.com', '::2', '0.0.0.0']) {
+    assert.equal(shared.isLoopbackPlanningHost(host), false, host)
+  }
+  const planning = loadPlanning()
+  const other = { ...LOCAL_PLANNING.local, baseUrl: 'http://127.0.0.2:11434/v1' }
+  assert.throws(() => planning.planningJobOptions(baseSettings({ planning: { ...LOCAL_PLANNING, local: other } })), /this computer/)
+})
+
+test('Test connection names a missing OpenCode key before the missing model', async () => {
+  const planning = loadPlanning(async () => { throw new Error('no request is sent without a key') })
+  const goPlanning = {
+    source: 'cloud',
+    cloudProvider: 'opencode-go',
+    cloudModels: { openrouter: '', 'opencode-zen': '', 'opencode-go': '', custom: '' },
+    cloudBaseUrl: '',
+    local: LOCAL_PLANNING.local
+  }
+  const noKey = await planning.testPlanningConnection('opencode-go', baseSettings({ planning: goPlanning }))
+  assert.equal(noKey.ok, false)
+  assert.equal(noKey.kind, 'incomplete')
+  assert.match(noKey.message, /OpenCode Go key/)
+  // With a key saved, the model is the thing left to fix.
+  const withKey = await planning.testPlanningConnection('opencode-go', baseSettings({ opencodeGoApiKey: 'sk-go-test', planning: goPlanning }))
+  assert.equal(withKey.ok, false)
+  assert.equal(withKey.kind, 'incomplete')
+  assert.match(withKey.message, /model/)
+})
+
 test('an unusable local or cloud planning target fails before a job is queued', () => {
   const planning = loadPlanning()
   const remote = baseSettings({ planning: { ...LOCAL_PLANNING, local: { ...LOCAL_PLANNING.local, baseUrl: 'http://192.168.1.10:11434/v1' } } })

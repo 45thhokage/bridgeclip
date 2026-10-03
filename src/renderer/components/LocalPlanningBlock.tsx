@@ -34,6 +34,9 @@ export function LocalPlanningBlock({ onTestResult }: { onTestResult?: (result: P
   const [test, setTest] = useState<PlanningTestResult | 'testing' | null>(null)
 
   const preset = localPlanningPreset(planning.local.preset)
+  // A typed id that the pattern rejects is never saved, so say so instead of
+  // leaving a value on screen that is not in effect.
+  const modelDraftInvalid = modelDraft !== null && modelDraft.trim() !== '' && !isPlanningModelId(modelDraft.trim())
   const urlInfo = parsePlanningBaseUrl(planning.local.baseUrl)
   const urlError = !urlInfo
     ? 'Enter a full http:// address.'
@@ -106,6 +109,9 @@ export function LocalPlanningBlock({ onTestResult }: { onTestResult?: (result: P
             }}
             onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
           />
+          {modelDraftInvalid && (
+            <p role="alert" className="text-2xs text-danger">Model ids use letters, numbers and . _ : / - only (up to 160 characters).</p>
+          )}
           {!urlError && (
             <PlanningModelPicker
               target="local"

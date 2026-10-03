@@ -147,7 +147,7 @@ export function planningJobOptions(settings: AppSettings = loadSettings()): Reco
     return { planning_source: 'cloud', planning_provider: 'openrouter' }
   }
   const options: Record<string, string | number> = {
-    planning_source: settings.planning.source,
+    planning_source: normalizePlanningSettings(settings.planning).source,
     planning_provider: resolved.provider,
     planning_model_id: resolved.modelId!,
     planning_base_url: resolved.baseUrl!
@@ -262,10 +262,16 @@ function freeModelMessage(): string {
  * actionable without exposing provider internals, keys or request bodies.
  */
 export async function testPlanningConnection(target?: PlanningProviderId, settings: AppSettings = loadSettings()): Promise<PlanningTestResult> {
+  const targetId = target ?? activePlanningTarget(settings.planning)
   let resolved: ResolvedPlanningProvider
   try {
-    resolved = resolvePlanningTarget(target ?? activePlanningTarget(settings.planning), settings)
+    resolved = resolvePlanningTarget(targetId, settings)
   } catch (error) {
+    // Without a key there is no model list to pick a model from, so name the
+    // key first instead of asking for a model that cannot exist yet.
+    if (targetId !== 'local' && targetId !== 'custom' && !keyForProvider[targetId](settings)) {
+      return { ok: false, kind: 'incomplete', message: `Add and test the ${cloudPlanningProvider(targetId).label} key in Settings.` }
+    }
     return { ok: false, kind: 'incomplete', message: error instanceof Error ? error.message : 'Finish the planning setup first.' }
   }
   if (resolved.provider === 'openrouter') return testOpenRouterKey(settings)

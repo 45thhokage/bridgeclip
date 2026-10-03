@@ -39,6 +39,9 @@ export function CloudApiSection(): React.JSX.Element {
   const [tests, setTests] = useState<Partial<Record<PlanningProviderId | 'zernio', PlanningTestResult | 'testing'>>>({})
   const [customUrlDraft, setCustomUrlDraft] = useState<string | null>(null)
   const [customModelDraft, setCustomModelDraft] = useState<string | null>(null)
+  // A typed id the pattern rejects is never saved; say so rather than leaving
+  // a value on screen that is not in effect.
+  const customModelDraftInvalid = customModelDraft !== null && customModelDraft.trim() !== '' && !isPlanningModelId(customModelDraft.trim())
 
   const test = async (target: PlanningProviderId): Promise<void> => {
     setTests((current) => ({ ...current, [target]: 'testing' }))
@@ -220,6 +223,9 @@ export function CloudApiSection(): React.JSX.Element {
                   onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
                 />
               </Field>
+              {customModelDraftInvalid && (
+                <p role="alert" className="text-2xs text-danger">Model ids use letters, numbers and . _ : / - only (up to 160 characters).</p>
+              )}
               <p className="flex items-start gap-1.5 text-2xs text-warning">
                 <TriangleAlert className="mt-px h-3 w-3 shrink-0" />
                 Only connect to services you trust. BridgeClip sends transcript text and prompts to this address.

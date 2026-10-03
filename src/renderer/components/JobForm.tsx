@@ -18,7 +18,7 @@ import { onRadioKeyDown } from './ui/Segmented'
 import { CLIP_REQUEST_MAX_CHARS, DURATION_OPTIONS, VIDEO_SPEED_OPTIONS } from '../../shared/job-contract'
 import { isModelId } from '../../shared/openrouter-models'
 import { localModel } from '../../shared/transcription'
-import { planningStageLabel } from '../../shared/planning'
+import { cloudPlanningProvider, planningStageLabel } from '../../shared/planning'
 import { useModelStore } from '../store/use-model-store'
 import { useSettingsStore } from '../store/use-settings-store'
 import { ModelPicker } from './ModelPicker'
@@ -468,7 +468,7 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
         </div>
         {draft.clippingMode === 'advanced' ? <AdvancedModels draft={draft} update={update} /> :
           transcription.provider === 'local' ?
-            <p className="mt-2 text-2xs text-ink-subtle">Transcription runs on this computer with {localId ? localModel(localId).label : 'the selected local model'}, so the audio never leaves it. Clip planning still uses OpenRouter.</p> :
+            <p className="mt-2 text-2xs text-ink-subtle">Transcription runs on this computer with {localId ? localModel(localId).label : 'the selected local model'}, so the audio never leaves it. Clip planning: {planningStageLabel(planning)}.</p> :
             <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
       </Group>}
       <Group label="Clip length" aside={draft.durations.length === 0 ? 'Any length' : `${draft.durations.length} selected`}>
@@ -633,8 +633,10 @@ function ReviewStep({ draft, trim, onEdit }: {
             : planning.source === 'local'
               ? 'Runs on this computer. Local clip planning costs $0.'
               : planning.cloudProvider !== 'openrouter'
-                ? 'Runs on this computer. Clip planning cost is not reported by provider.'
-                : 'Runs on this computer. Transcription and clip planning bill your OpenRouter account.'}
+                ? `Runs on this computer. Clip planning uses ${cloudPlanningProvider(planning.cloudProvider).label}; its exact cost is not reported to BridgeClip.`
+                : transcription.provider === 'local'
+                  ? 'Runs on this computer. Clip planning bills your OpenRouter account.'
+                  : 'Runs on this computer. Transcription and clip planning bill your OpenRouter account.'}
       </p>
     </div>
   )

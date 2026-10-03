@@ -523,15 +523,23 @@ def _validate_planning_config(config: dict) -> bool:
     if provider == "local":
         if source != "local" or url.scheme != "http":
             return False
-        if (url.hostname or "").lower() not in LOOPBACK_PLANNING_HOSTS:
+        # The desktop sends the host unbracketed for IPv6 ("::1"), which is
+        # also what urlsplit returns; strip brackets defensively.
+        host = (url.hostname or "").lower().strip("[]")
+        if host not in LOOPBACK_PLANNING_HOSTS:
             return False
         try:
             port = url.port
         except ValueError:
             return False
-        if port is None or not 1 <= port <= 65535:
+        if port is None:
+            # An http URL without an explicit port: the desktop resolves and
+            # sends the scheme default, so compare against the same value.
+            port = 80
+        if not 1 <= port <= 65535:
             return False
-        if config.get("planning_local_host") != url.hostname or config.get("planning_local_port") != port:
+        saved_host = str(config.get("planning_local_host") or "").lower().strip("[]")
+        if saved_host != host or config.get("planning_local_port") != port:
             return False
         tokens = config.get("planning_context_tokens")
         if type(tokens) is not int or not 1024 <= tokens <= 1048576:

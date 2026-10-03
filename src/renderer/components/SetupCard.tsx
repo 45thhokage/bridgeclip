@@ -260,7 +260,7 @@ export function SetupCard({ onOpenSettings, className }: { onOpenSettings: () =>
               </Button>
               <Button
                 variant="ghost"
-                onClick={() => { void savePlanning({ source: 'cloud', cloudProvider: 'openrouter' }); setStep(2) }}
+                onClick={() => { void savePlanning({ source: 'cloud', cloudProvider: 'openrouter' }); void runTest('openrouter'); setStep(2) }}
                 disabled={!openrouterConfigured}
                 tooltip={openrouterConfigured ? undefined : 'Add an OpenRouter key to plan with OpenRouter instead.'}
               >

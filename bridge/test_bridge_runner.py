@@ -350,5 +350,47 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("child noise", done.stderr)
 
 
+class PlanningConfigTests(unittest.TestCase):
+    """The bridge accepts exactly what the desktop resolves for a local server."""
+
+    def local(self, **overrides):
+        return {
+            "planning_source": "local",
+            "planning_provider": "local",
+            "planning_model_id": "llama3.1:8b",
+            "planning_base_url": "http://127.0.0.1:11434/v1",
+            "planning_local_host": "127.0.0.1",
+            "planning_local_port": 11434,
+            "planning_context_tokens": 8192,
+            **overrides,
+        }
+
+    def test_accepts_the_resolved_loopback_server(self):
+        self.assertTrue(bridge._validate_planning_config(self.local()))
+
+    def test_accepts_the_unbracketed_ipv6_host_the_desktop_sends(self):
+        config = self.local(planning_base_url="http://[::1]:11434/v1", planning_local_host="::1")
+        self.assertTrue(bridge._validate_planning_config(config))
+
+    def test_accepts_a_bracketed_host_from_an_older_desktop_build(self):
+        config = self.local(planning_base_url="http://[::1]:11434/v1", planning_local_host="[::1]")
+        self.assertTrue(bridge._validate_planning_config(config))
+
+    def test_accepts_a_missing_port_as_the_http_default(self):
+        config = self.local(planning_base_url="http://localhost/v1", planning_local_host="localhost", planning_local_port=80)
+        self.assertTrue(bridge._validate_planning_config(config))
+
+    def test_rejects_a_host_that_is_not_the_saved_one(self):
+        config = self.local(planning_local_host="::1")
+        self.assertFalse(bridge._validate_planning_config(config))
+
+    def test_rejects_a_port_that_is_not_the_saved_one(self):
+        self.assertFalse(bridge._validate_planning_config(self.local(planning_local_port=11435)))
+
+    def test_rejects_a_server_that_is_not_on_this_computer(self):
+        config = self.local(planning_base_url="http://192.168.1.10:11434/v1", planning_local_host="192.168.1.10")
+        self.assertFalse(bridge._validate_planning_config(config))
+
+
 if __name__ == '__main__':
     unittest.main()
