@@ -18,7 +18,10 @@ function loadShared(file) {
 }
 
 /** src/main/planning.ts with the settings store, network policy and fetch stubbed. */
-function loadPlanning() {
+function loadPlanning(
+  fetchImpl = async () => { throw new Error('live calls are not allowed in tests') },
+  settingsImpl = () => { throw new Error('save settings must be passed explicitly in tests') }
+) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/main/planning.ts'), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
@@ -27,12 +30,12 @@ function loadPlanning() {
     exports: module.exports,
     require: (id) => {
       if (id === '../shared/planning') return loadShared('planning.ts')
-      if (id === './http-response') return { readResponseText: async () => '' }
+      if (id === './http-response') return { readResponseText: async (response) => response.text() }
       if (id === './network-policy') return { assertPublicWebUrl: async () => {} }
-      if (id === './settings-store') return { loadSettings: () => { throw new Error('save settings must be passed explicitly in tests') } }
+      if (id === './settings-store') return { loadSettings: settingsImpl }
       return require(id)
     },
-    URL, AbortSignal, fetch: async () => { throw new Error('live calls are not allowed in tests') },
+    URL, AbortSignal, Response, fetch: fetchImpl,
     process, Buffer, console, setTimeout, clearTimeout
   })
   return module.exports
@@ -190,6 +193,49 @@ test('an unusable local or cloud planning target fails before a job is queued', 
   assert.throws(() => planning.planningJobOptions(zenNoKey), /OpenCode Zen key/)
 })
 
+test('a provider model list loads before any model is chosen, and refresh re-reads it', async () => {
+  const calls = []
+  const settings = baseSettings({
+    opencodeZenApiKey: 'sk-zen-live',
+    planning: {
+      source: 'cloud',
+      cloudProvider: 'opencode-zen',
+      // No model chosen yet: listing models is how the user picks one.
+      cloudModels: { openrouter: '', 'opencode-zen': '', 'opencode-go': '', custom: '' },
+      cloudBaseUrl: '',
+      local: LOCAL_PLANNING.local
+    }
+  })
+  const planning = loadPlanning(async (url, options) => {
+    calls.push({ url, auth: options.headers.Authorization })
+    return new Response(JSON.stringify({ data: [{ id: 'gpt-5.2' }, { id: 'free-model' }] }), { status: 200 })
+  }, () => settings)
+  const first = await planning.listPlanningModels(false, 'opencode-zen')
+  assert.deepEqual([...first.models], ['gpt-5.2', 'free-model'])
+  assert.equal(first.error, null)
+  assert.equal(calls[0].url, 'https://opencode.ai/zen/v1/models')
+  assert.equal(calls[0].auth, 'Bearer sk-zen-live')
+  // The cached copy answers the second load; Refresh fetches again.
+  await planning.listPlanningModels(false, 'opencode-zen')
+  assert.equal(calls.length, 1)
+  await planning.listPlanningModels(true, 'opencode-zen')
+  assert.equal(calls.length, 2)
+})
+
+test('a local model list loads without a chosen model and refuses a remote server', async () => {
+  const fetchModels = async () => new Response(JSON.stringify({ data: [{ id: 'llama3.1:8b' }] }), { status: 200 })
+  const local = baseSettings({ planning: { ...LOCAL_PLANNING, local: { ...LOCAL_PLANNING.local, modelId: '' } } })
+  let current = local
+  const planning = loadPlanning(fetchModels, () => current)
+  const result = await planning.listPlanningModels(false, 'local')
+  assert.deepEqual([...result.models], ['llama3.1:8b'])
+  assert.equal(result.error, null)
+  current = baseSettings({ planning: { ...LOCAL_PLANNING, local: { ...LOCAL_PLANNING.local, baseUrl: 'http://192.168.1.10:11434/v1' } } })
+  const refused = await planning.listPlanningModels(true, 'local')
+  assert.deepEqual([...refused.models], [])
+  assert.match(refused.error, /this computer/)
+})
+
 test('a custom endpoint requires https and its own model id', () => {
   const planning = loadPlanning()
   const custom = {
@@ -265,6 +311,21 @@ test('a fully local setup also skips the first-run card', () => {
     planning: { local: { modelId: 'llama3.1:8b' } }
   }
   assert.equal(setup.needsFirstRunSetup(localOnly), false)
+})
+
+test('an OpenCode key is stored, reported as configured, and kept after a reload', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-opencode-key-'))
+  try {
+    const store = loadStore(root)
+    const saved = store.replaceApiKey('opencodeZenApiKey', 'sk-zen-live')
+    assert.equal(saved.planningKeysConfigured['opencode-zen'], true)
+    assert.equal(saved.planningKeysConfigured['opencode-go'], false)
+    // A fresh app start decrypts the saved key and still reports it as set.
+    const reloadedStore = loadStore(root)
+    const reloaded = reloadedStore.loadSettings()
+    assert.equal(reloaded.opencodeZenApiKey, 'sk-zen-live')
+    assert.equal(reloadedStore.publicSettings(reloaded).planningKeysConfigured['opencode-zen'], true)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
 test('saving one planning field keeps the rest of the saved planning settings', () => {

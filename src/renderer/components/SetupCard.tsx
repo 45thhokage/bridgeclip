@@ -12,6 +12,7 @@ import { IconTile } from './ui/IconTile'
 import { StatusDot } from './ui/Badge'
 import { LocalTranscriptionBlock } from './TranscriptionBlocks'
 import { LocalPlanningBlock } from './LocalPlanningBlock'
+import { PlanningModelPicker } from './PlanningModelPicker'
 import { needsFirstRunSetup } from '../../shared/setup'
 import { planningStageLabel, planningStatus, type PlanningCloudProviderId, type PlanningTestResult } from '../../shared/planning'
 import { transcriptionStageLabel } from '../../shared/transcription'
@@ -211,6 +212,23 @@ export function SetupCard({ onOpenSettings, className }: { onOpenSettings: () =>
                       description="Stored encrypted on this computer. One OpenCode key works for Zen and Go."
                       getKeyUrl={cloudProvider === 'openrouter' ? PROVIDER_LINKS.openrouter : OPENCODE_KEY_LINK}
                     />
+                  </div>
+                )}
+                {cloudProvider !== 'openrouter' && (
+                  <div className="mt-3">
+                    {cloudKeyConfigured ? (
+                      <PlanningModelPicker
+                        target={cloudProvider}
+                        value={planning.cloudModels[cloudProvider]}
+                        ariaLabel={cloudProvider === 'opencode-zen' ? 'OpenCode Zen model' : 'OpenCode Go model'}
+                        onChange={(modelId) => {
+                          void savePlanning({ cloudModels: { ...planning.cloudModels, [cloudProvider]: modelId } })
+                            .then(() => runTest(cloudProvider))
+                        }}
+                      />
+                    ) : (
+                      <p className="text-2xs text-ink-subtle">Save a key for this provider to load its models.</p>
+                    )}
                   </div>
                 )}
                 <div className="mt-2 flex flex-wrap items-center gap-2">

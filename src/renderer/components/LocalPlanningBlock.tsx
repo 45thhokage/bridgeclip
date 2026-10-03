@@ -106,12 +106,14 @@ export function LocalPlanningBlock({ onTestResult }: { onTestResult?: (result: P
             }}
             onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
           />
-          <PlanningModelPicker
-            target="local"
-            value={planning.local.modelId}
-            ariaLabel="Local planning model list"
-            onChange={(modelId) => void savePlanning({ local: { ...planning.local, modelId } })}
-          />
+          {!urlError && (
+            <PlanningModelPicker
+              target="local"
+              value={planning.local.modelId}
+              ariaLabel="Local planning model list"
+              onChange={(modelId) => void savePlanning({ local: { ...planning.local, modelId } })}
+            />
+          )}
         </div>
       </Field>
 

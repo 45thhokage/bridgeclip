@@ -170,14 +170,18 @@ export function CloudApiSection(): React.JSX.Element {
                 OpenAI-compatible endpoint at {planning.cloudProvider === 'opencode-zen' ? 'opencode.ai/zen/v1' : 'opencode.ai/zen/go/v1'}.
                 Pick a model from the list; free models may be restricted for third-party apps.
               </p>
-              <PlanningModelPicker
-                target={planning.cloudProvider}
-                value={planning.cloudModels[planning.cloudProvider]}
-                ariaLabel={`${planning.cloudProvider === 'opencode-zen' ? 'OpenCode Zen' : 'OpenCode Go'} model`}
-                onChange={(modelId) => void savePlanning({
-                  cloudModels: { ...planning.cloudModels, [planning.cloudProvider]: modelId }
-                })}
-              />
+              {keyConfigured(planning.cloudProvider) ? (
+                <PlanningModelPicker
+                  target={planning.cloudProvider}
+                  value={planning.cloudModels[planning.cloudProvider]}
+                  ariaLabel={`${planning.cloudProvider === 'opencode-zen' ? 'OpenCode Zen' : 'OpenCode Go'} model`}
+                  onChange={(modelId) => void savePlanning({
+                    cloudModels: { ...planning.cloudModels, [planning.cloudProvider]: modelId }
+                  })}
+                />
+              ) : (
+                <p className="text-2xs text-ink-subtle">Save a key for this provider to load its models.</p>
+              )}
             </div>
           )}
 

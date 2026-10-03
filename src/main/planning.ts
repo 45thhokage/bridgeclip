@@ -66,10 +66,11 @@ export function activePlanningTarget(settings: PlanningSettings): PlanningProvid
 }
 
 /**
- * Resolve one explicit provider target (a B3 key row or the active provider),
- * validating the values that target needs from saved settings.
+ * Resolve just the connection a model list needs. Listing models must work
+ * before one is chosen: that is how the user picks a model, and Refresh
+ * re-reads the list without touching the current selection.
  */
-export function resolvePlanningTarget(target: PlanningProviderId, settings: AppSettings = loadSettings()): ResolvedPlanningProvider {
+export function resolvePlanningModelsProvider(target: PlanningProviderId, settings: AppSettings = loadSettings()): ResolvedPlanningProvider {
   const planning = normalizePlanningSettings(settings.planning)
   if (target === 'openrouter') {
     return { provider: target, baseUrl: 'https://openrouter.ai/api/v1', modelId: null, key: settings.openrouterApiKey, contextTokens: null }
@@ -79,23 +80,36 @@ export function resolvePlanningTarget(target: PlanningProviderId, settings: AppS
     if (!info) throw new Error('Set a valid local planning server address in Settings.')
     if (!info.url.startsWith('http://')) throw new Error('A local planning server must use http:// on this computer.')
     if (!isLoopbackPlanningHost(info.hostname)) throw new Error('A local planning server must run on this computer (127.0.0.1, ::1 or localhost).')
-    if (!planning.local.modelId) throw new Error('Pick or type a model for local clip planning in Settings.')
-    return { provider: target, baseUrl: info.url, modelId: planning.local.modelId, key: settings.planningLocalApiKey, contextTokens: planning.local.contextTokens }
+    return { provider: target, baseUrl: info.url, modelId: planning.local.modelId || null, key: settings.planningLocalApiKey, contextTokens: planning.local.contextTokens }
   }
-  const modelId = planning.cloudModels[target]
-  if (!modelId) throw new Error(`Pick a ${cloudPlanningProvider(target).label} model in Settings.`)
   if (target === 'custom') {
     const info = parsePlanningBaseUrl(planning.cloudBaseUrl)
     if (!info || !info.url.startsWith('https://')) throw new Error('A custom planning endpoint must use an https:// address.')
-    return { provider: target, baseUrl: info.url, modelId, key: settings.planningCustomApiKey, contextTokens: null }
+    return { provider: target, baseUrl: info.url, modelId: planning.cloudModels.custom || null, key: settings.planningCustomApiKey, contextTokens: null }
   }
   return {
     provider: target,
     baseUrl: target === 'opencode-zen' ? OPENCODE_ZEN_BASE_URL : OPENCODE_GO_BASE_URL,
-    modelId,
+    modelId: planning.cloudModels[target] || null,
     key: keyForProvider[target](settings),
     contextTokens: null
   }
+}
+
+/**
+ * Resolve one explicit provider target (a B3 key row or the active provider),
+ * validating the values a job or a connection test needs. Unlike a model list,
+ * this requires the model that planning would actually use.
+ */
+export function resolvePlanningTarget(target: PlanningProviderId, settings: AppSettings = loadSettings()): ResolvedPlanningProvider {
+  const resolved = resolvePlanningModelsProvider(target, settings)
+  if (target === 'openrouter') return resolved
+  const modelId = resolved.modelId
+  if (!modelId) {
+    if (target === 'local') throw new Error('Pick or type a model for local clip planning in Settings.')
+    throw new Error(`Pick a ${cloudPlanningProvider(target).label} model in Settings.`)
+  }
+  return { ...resolved, modelId }
 }
 
 function joinUrl(baseUrl: string, path: string): string {
@@ -205,7 +219,14 @@ async function fetchModelIds(resolved: ResolvedPlanningProvider): Promise<string
 export async function listPlanningModels(refresh: unknown = false, target?: PlanningProviderId): Promise<PlanningModelsResult> {
   if (typeof refresh !== 'boolean') throw new Error('Invalid model refresh option')
   const settings = loadSettings()
-  const resolved = resolvePlanningTarget(target ?? activePlanningTarget(settings.planning), settings)
+  let resolved: ResolvedPlanningProvider
+  try {
+    resolved = resolvePlanningModelsProvider(target ?? activePlanningTarget(settings.planning), settings)
+  } catch (error) {
+    // A half-configured provider reports why instead of throwing over IPC,
+    // so the picker can show the address or key that still needs saving.
+    return { models: [], fetchedAt: null, error: error instanceof Error ? error.message : 'Could not load the model list.' }
+  }
   const key = cacheKey(resolved)
   const cached = modelsCache.get(key)
   if (!refresh && cached && Date.now() - Date.parse(cached.fetchedAt) < MODELS_CACHE_MS) {
